@@ -1279,3 +1279,35 @@ __wasi_errno_t __wasi_context_destroy(
     return (uint16_t) ret;
 }
 
+// Firebox extension: path_chmod and fd_chmod for POSIX permission support.
+// These are not part of the upstream WASIX spec but are provided by
+// Firebox's patched wasmer runtime (jmfirth/wasmer#firebox-patches).
+
+int32_t __imported_wasix_32v1_path_chmod(int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("path_chmod")
+));
+
+__wasi_errno_t __wasix_path_chmod(
+    __wasi_fd_t fd,
+    const char *path,
+    size_t path_len,
+    uint32_t mode
+){
+    int32_t ret = __imported_wasix_32v1_path_chmod((int32_t) fd, (int32_t) path, (int32_t) path_len, (int32_t) mode);
+    return (uint16_t) ret;
+}
+
+int32_t __imported_wasix_32v1_fd_chmod(int32_t arg0, int32_t arg1) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("fd_chmod")
+));
+
+__wasi_errno_t __wasix_fd_chmod(
+    __wasi_fd_t fd,
+    uint32_t mode
+){
+    int32_t ret = __imported_wasix_32v1_fd_chmod((int32_t) fd, (int32_t) mode);
+    return (uint16_t) ret;
+}
+

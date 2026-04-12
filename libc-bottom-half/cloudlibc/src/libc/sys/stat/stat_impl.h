@@ -68,6 +68,32 @@ static inline void to_public_stat(const __wasi_filestat_t *in,
       out->st_mode |= S_IFLNK;
       break;
   }
+
+  // Extract POSIX permission bits from the dev field.
+  //
+  // WASI preview1's filestat has no mode field. Firebox's runtime encodes
+  // Unix permission bits (0o7777 -- owner/group/other rwx plus setuid,
+  // setgid, sticky) in the low 12 bits of the dev (device ID) field.
+  // A dev value of 0 means the runtime did not provide mode information;
+  // in that case fall back to sensible defaults (0755 for directories,
+  // 0644 for regular files) so that ls -l always shows something useful.
+  {
+    mode_t perm = (mode_t)(in->dev & 07777);
+    if (perm != 0) {
+      out->st_mode |= perm;
+    } else {
+      // Default permissions when the runtime provides none.
+      if (S_ISDIR(out->st_mode)) {
+        out->st_mode |= 0755;
+      } else if (S_ISREG(out->st_mode)) {
+        out->st_mode |= 0644;
+      } else if (S_ISLNK(out->st_mode)) {
+        out->st_mode |= 0777;
+      } else {
+        out->st_mode |= 0644;
+      }
+    }
+  }
 }
 
 static inline bool utimens_get_timestamps(const struct timespec *times,

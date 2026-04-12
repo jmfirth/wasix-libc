@@ -5286,6 +5286,51 @@ __wasi_errno_t __wasi_context_destroy(
 ) __attribute__((__warn_unused_result__));
 /** @} */
 
+/**
+ * Firebox extensions: POSIX permission mode bits.
+ *
+ * These are not part of the upstream WASIX spec. They are provided by
+ * Firebox's patched wasmer runtime (jmfirth/wasmer#firebox-patches).
+ */
+
+/**
+ * Change the permission mode bits of a file or directory.
+ * Note: This is similar to `chmod` in POSIX.
+ */
+__wasi_errno_t __wasix_path_chmod(
+    /**
+     * The base directory from which `path` is understood.
+     */
+    __wasi_fd_t fd,
+    /**
+     * The path of the file or directory to change permissions on.
+     */
+    const char *path,
+    /**
+     * The number of bytes in `path`.
+     */
+    size_t path_len,
+    /**
+     * The new Unix permission mode bits (e.g., 0755).
+     */
+    uint32_t mode
+) __attribute__((__warn_unused_result__));
+
+/**
+ * Change the permission mode bits of an open file descriptor.
+ * Note: This is similar to `fchmod` in POSIX.
+ */
+__wasi_errno_t __wasix_fd_chmod(
+    /**
+     * The open file descriptor to change permissions on.
+     */
+    __wasi_fd_t fd,
+    /**
+     * The new Unix permission mode bits (e.g., 0644).
+     */
+    uint32_t mode
+) __attribute__((__warn_unused_result__));
+
 #ifdef __cplusplus
 }
 #endif

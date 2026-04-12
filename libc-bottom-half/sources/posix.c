@@ -5,9 +5,11 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
+#include <wasi/api.h>
 #include <wasi/libc.h>
 #include <wasi/libc-find-relpath.h>
 #include <wasi/libc-nocwd.h>
@@ -233,17 +235,35 @@ mode_t umask(mode_t mode) {
 }
 
 int chmod(const char *path, mode_t mode) {
-    // WASI does not have the concept of mode/umask
-    return 0;
+    char *relative_path;
+    int dirfd = find_relpath(path, &relative_path);
+
+    // If we can't find a preopen for it, fail as if we can't find the path.
+    if (dirfd == -1) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    return fchmodat(dirfd, relative_path, mode, 0);
 }
 
 int fchmod(int fd, mode_t mode) {
-    // WASI does not have the concept of mode/umask
+    __wasi_errno_t error = __wasix_fd_chmod(fd, (uint32_t)mode);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
     return 0;
 }
 
 int fchmodat(int fd, const char *path, mode_t mode, int flag) {
-    // WASI does not have the concept of mode/umask
+    (void)flag;  // AT_SYMLINK_NOFOLLOW not yet supported
+    size_t path_len = strlen(path);
+    __wasi_errno_t error = __wasix_path_chmod(fd, path, path_len, (uint32_t)mode);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
     return 0;
 }
 
