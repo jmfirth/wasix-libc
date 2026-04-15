@@ -257,14 +257,51 @@ int fchmod(int fd, mode_t mode) {
 }
 
 int fchmodat(int fd, const char *path, mode_t mode, int flag) {
-    (void)flag;  // AT_SYMLINK_NOFOLLOW not yet supported
-    size_t path_len = strlen(path);
-    __wasi_errno_t error = __wasix_path_chmod(fd, path, path_len, (uint32_t)mode);
+    // Reject unknown flags per POSIX.
+    if (flag & ~AT_SYMLINK_NOFOLLOW) {
+        errno = EINVAL;
+        return -1;
+    }
+    // For AT_FDCWD and absolute paths, resolve through the preopen map
+    // to obtain a real dirfd + relative path, mirroring how `chmod()` and
+    // other *at()-family wrappers in this file work. WASIX has no kernel
+    // CWD; every path must land on a preopen, so forwarding AT_FDCWD or
+    // a bare absolute path directly to the WASIX import would return
+    // EBADF (AT_FDCWD is -100, not a valid WASIX fd).
+    int effective_fd = fd;
+    const char *effective_path = path;
+    if (fd == AT_FDCWD || (path != NULL && path[0] == '/')) {
+        char *relative_path;
+        int dirfd = find_relpath(path, &relative_path);
+        if (dirfd == -1) {
+            errno = ENOENT;
+            return -1;
+        }
+        effective_fd = dirfd;
+        effective_path = relative_path;
+    }
+    size_t path_len = strlen(effective_path);
+    __wasi_errno_t error = (flag & AT_SYMLINK_NOFOLLOW)
+        ? __wasix_path_lchmod(effective_fd, effective_path, path_len, (uint32_t)mode)
+        : __wasix_path_chmod(effective_fd, effective_path, path_len, (uint32_t)mode);
     if (error != 0) {
         errno = error;
         return -1;
     }
     return 0;
+}
+
+int lchmod(const char *path, mode_t mode) {
+    char *relative_path;
+    int dirfd = find_relpath(path, &relative_path);
+
+    // If we can't find a preopen for it, fail as if we can't find the path.
+    if (dirfd == -1) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    return fchmodat(dirfd, relative_path, mode, AT_SYMLINK_NOFOLLOW);
 }
 
 DIR *opendir(const char *dirname) {
