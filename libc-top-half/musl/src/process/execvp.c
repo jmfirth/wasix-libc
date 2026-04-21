@@ -62,6 +62,25 @@ int __execvpe(const char *file, char *const argv[], char *const envp[])
 	return -1;
 }
 #else
+/*
+ * firebox #54: emit NUL between entries instead of '\n', and end the
+ * buffer with a DOUBLE NUL so wrappers can compute the real length.
+ *
+ * The old '\n' separator broke any argv element containing an embedded
+ * newline (multi-line `python3 -c`, bash heredocs, cmake probe
+ * scripts, etc.). NUL is illegal inside a C string, so it is a safe
+ * separator for the combined argv/envp buffer the WASIX host splits
+ * back apart.
+ *
+ * The firebox wasmer fork accepts both separators for backward compat
+ * (NUL preferred, '\n' fallback).
+ *
+ * The buffer terminates with two zero bytes. The wrappers in
+ * __wasixlibc_real.c (proc_exec3, proc_spawn2, proc_spawn) use that
+ * double-NUL as their end-of-buffer sentinel for computing `args_len`
+ * / `envs_len`, because strlen() stops at the first intra-buffer NUL
+ * and would pass a truncated length to the host.
+ */
 char *__wasilibc_exec_combine_strings(char *const strings[])
 {
 	int combined_len = 0;
@@ -76,9 +95,13 @@ char *__wasilibc_exec_combine_strings(char *const strings[])
 	{
 		memcpy(combined_p, *ptr, strlen(*ptr));
 		combined_p += strlen(*ptr);
-		*combined_p = '\n';
+		*combined_p = '\0';
 		combined_p++;
 	}
+	/* Final NUL. Combined with the separator NUL of the last entry this
+	 * produces the `...\0\0` end-of-buffer marker. For an empty argv
+	 * (zero entries), combined_p still points at combined[0], so the
+	 * whole buffer is a single `\0` — wrappers treat that as length 0. */
 	*combined_p = 0;
 
 	return combined;

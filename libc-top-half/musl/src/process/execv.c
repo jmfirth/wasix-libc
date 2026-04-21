@@ -14,6 +14,11 @@ int execv(const char *path, char *const argv[])
 #ifdef __wasilibc_unmodified_upstream
 	return execve(path, argv, __environ);
 #else
+	/*
+	 * firebox #54: emit NUL between entries (was '\n'), end with double NUL.
+	 * See the long comment in execvp.c for the protocol — this is the
+	 * exact same packing as __wasilibc_exec_combine_strings().
+	 */
 	int combined_len = 0;
 	for (char **argvp = (char **)argv; *argvp != NULL; argvp++) {
 		combined_len += strlen(*argvp) + 1;
@@ -24,7 +29,7 @@ int execv(const char *path, char *const argv[])
 	for (char **argvp = (char **)argv; *argvp != NULL; argvp++) {
 		memcpy(combined_argv_p, *argvp, strlen(*argvp));
 		combined_argv_p += strlen(*argvp);
-		*combined_argv_p = '\n';
+		*combined_argv_p = '\0';
 		combined_argv_p++;
 	}
 	*combined_argv_p = 0;

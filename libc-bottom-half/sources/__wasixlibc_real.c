@@ -13,6 +13,48 @@
 #include <wasi/api.h>
 #include <string.h>
 
+/*
+ * firebox #54: compute the length of a combined argv/envp buffer
+ * produced by __wasilibc_exec_combine_strings().
+ *
+ * The buffer uses `'\0'` as the between-entries separator (post-#54
+ * guest), so plain strlen() stops at the first entry and passes a
+ * truncated length to the WASIX host. The buffer terminates with a
+ * double NUL (`...\0\0`) specifically so this helper can find the
+ * real end.
+ *
+ * For NULL buffers we return 0 (matches the host's null-pointer
+ * handling in proc_exec3 / proc_spawn2).
+ *
+ * Callers of these wrappers inside wasix-libc are exclusively
+ * execvp.c, execv.c, posix_spawn.c — all of which use
+ * __wasilibc_exec_combine_strings and produce the double-NUL
+ * terminator. External callers do not exist: the wrappers are not
+ * in any public header.
+ */
+static size_t __wasilibc_exec_buffer_len(const char *buf)
+{
+    if (buf == (const char *)0) {
+        return 0;
+    }
+    const unsigned char *p = (const unsigned char *)buf;
+    if (*p == 0) {
+        return 0;
+    }
+    /* Scan for two consecutive zero bytes. Return the position of the
+     * first zero plus one, so the host sees a complete final entry
+     * followed by its terminating NUL. */
+    for (;;) {
+        while (*p != 0) {
+            p++;
+        }
+        if (p[1] == 0) {
+            return (size_t)(p - (const unsigned char *)buf) + 1;
+        }
+        p++;
+    }
+}
+
 int32_t __imported_wasix_32v1_clock_time_set(int32_t arg0, int64_t arg1) __attribute__((
     __import_module__("wasix_32v1"),
     __import_name__("clock_time_set")
@@ -434,9 +476,11 @@ __wasi_errno_t __wasi_proc_exec3(
     const char *path
 ){
     size_t name_len = strlen(name);
-    size_t args_len = strlen(args);
-    size_t envs_len = strlen(envs);
-    size_t path_len = strlen(path);
+    /* firebox #54: args / envs are NUL-separated combined buffers, so
+     * use double-NUL scan instead of strlen. */
+    size_t args_len = __wasilibc_exec_buffer_len(args);
+    size_t envs_len = __wasilibc_exec_buffer_len(envs);
+    size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
     int32_t ret = __imported_wasix_32v1_proc_exec3((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len);
     return (uint16_t) ret;
 }
@@ -458,8 +502,9 @@ __wasi_errno_t __wasi_proc_spawn(
     __wasi_process_handles_t *retptr0
 ){
     size_t name_len = strlen(name);
-    size_t args_len = strlen(args);
-    size_t preopen_len = strlen(preopen);
+    /* firebox #54: args / preopen are NUL-separated combined buffers. */
+    size_t args_len = __wasilibc_exec_buffer_len(args);
+    size_t preopen_len = __wasilibc_exec_buffer_len(preopen);
     size_t working_dir_len = strlen(working_dir);
     int32_t ret = __imported_wasix_32v1_proc_spawn((intptr_t) name, (intptr_t) name_len, (int32_t) chroot, (intptr_t) args, (intptr_t) args_len, (intptr_t) preopen, (intptr_t) preopen_len, (int32_t) stdin, (int32_t) stdout, (int32_t) stderr, (intptr_t) working_dir, (intptr_t) working_dir_len, (intptr_t) retptr0);
     return (uint16_t) ret;
@@ -483,9 +528,10 @@ __wasi_errno_t __wasi_proc_spawn2(
     __wasi_pid_t *retptr0
 ){
     size_t name_len = strlen(name);
-    size_t args_len = strlen(args);
-    size_t envs_len = strlen(envs);
-    size_t path_len = strlen(path);
+    /* firebox #54: args / envs are NUL-separated combined buffers. */
+    size_t args_len = __wasilibc_exec_buffer_len(args);
+    size_t envs_len = __wasilibc_exec_buffer_len(envs);
+    size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
     int32_t ret = __imported_wasix_32v1_proc_spawn2((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (intptr_t) fd_ops, (intptr_t) fd_ops_len, (intptr_t) signal_dispositions, (intptr_t) signal_dispositions_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len, (intptr_t) retptr0);
     return (uint16_t) ret;
 }
