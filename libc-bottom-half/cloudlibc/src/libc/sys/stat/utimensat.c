@@ -13,6 +13,13 @@
 
 int __wasilibc_nocwd_utimensat(int fd, const char *path, const struct timespec times[2],
                                int flag) {
+  // POSIX: reject unknown AT_* bits with EINVAL. utimensat accepts
+  // AT_SYMLINK_NOFOLLOW; everything else is invalid. See issue #24
+  // patch J.
+  if ((flag & ~AT_SYMLINK_NOFOLLOW) != 0) {
+    errno = EINVAL;
+    return -1;
+  }
   errno = 0;
   // Convert timestamps and extract NOW/OMIT flags.
   __wasi_timestamp_t st_atim;

@@ -9,6 +9,13 @@
 #include <unistd.h>
 
 int __wasilibc_nocwd_linkat(int fd1, const char *path1, int fd2, const char *path2, int flag) {
+  // POSIX: reject unknown AT_* bits with EINVAL. linkat accepts
+  // AT_SYMLINK_FOLLOW (no AT_EMPTY_PATH in the cloudlibc surface
+  // here). See issue #24 patch J.
+  if ((flag & ~AT_SYMLINK_FOLLOW) != 0) {
+    errno = EINVAL;
+    return -1;
+  }
   // Create lookup properties.
   __wasi_lookupflags_t lookup1_flags = 0;
   if ((flag & AT_SYMLINK_FOLLOW) != 0)

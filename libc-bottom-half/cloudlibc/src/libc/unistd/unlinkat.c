@@ -10,6 +10,12 @@
 #include <unistd.h>
 
 int unlinkat(int fd, const char *path, int flag) {
+  // POSIX: reject unknown AT_* bits with EINVAL. unlinkat only honors
+  // AT_REMOVEDIR. See issue #24 patch J.
+  if ((flag & ~AT_REMOVEDIR) != 0) {
+    errno = EINVAL;
+    return -1;
+  }
   if ((flag & AT_REMOVEDIR) != 0) {
     return __wasilibc_rmdirat(fd, path);
   }

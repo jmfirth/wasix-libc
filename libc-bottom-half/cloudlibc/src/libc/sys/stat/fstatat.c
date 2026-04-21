@@ -13,6 +13,13 @@
 
 int __wasilibc_nocwd_fstatat(int fd, const char *restrict path, struct stat *restrict buf,
                              int flag) {
+  // POSIX: reject unknown AT_* bits with EINVAL. This is the fstatat
+  // callsite in the AT_* hygiene sweep from issue #24 patch J. The
+  // only flag fstatat honors is AT_SYMLINK_NOFOLLOW.
+  if ((flag & ~AT_SYMLINK_NOFOLLOW) != 0) {
+    errno = EINVAL;
+    return -1;
+  }
   errno = 0;
   // Create lookup properties.
   __wasi_lookupflags_t lookup_flags = 0;
