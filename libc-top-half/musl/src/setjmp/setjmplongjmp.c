@@ -93,9 +93,7 @@ int setjmp (jmp_buf buf) {
 
 #  endif
 
-// TODO: ignoring signal masking for now
-int sigsetjmp(jmp_buf  buf, int savesigs) {
-    return setjmp(buf);
-}
+/* WASIX sigsetjmp is defined in src/signal/sigsetjmp_wasix.c so it
+ * can share the TLS saved-mask slot with siglongjmp. See issue #37. */
 
 #endif
