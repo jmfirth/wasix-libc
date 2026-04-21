@@ -80,6 +80,10 @@ void __wasi_init_tp()
 {
 	// See comments on start_args.pthread_self_ptr in pthread_create.c for how TLS is handled in WASIX threads.
 	void *tp = aligned_alloc(_Alignof(struct pthread), sizeof(struct pthread));
+	/* Zero-init so fields added by Firebox patches (e.g. blocked_sigmask
+	 * for per-thread sigmask inheritance, see issue #24 patch C) start
+	 * in a known state. aligned_alloc returns uninitialized memory. */
+	memset(tp, 0, sizeof(struct pthread));
 	__set_tp((uintptr_t)tp);
 	__init_tp(tp);
 }

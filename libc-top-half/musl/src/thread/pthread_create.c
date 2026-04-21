@@ -326,6 +326,15 @@ hidden void __wasi_thread_start_C(int tid, void *p)
 	// whichever thread (parent or child) reaches this point first can proceed
 	// without waiting.
 	atomic_store((atomic_int *) &(self->tid), tid);
+
+	// Register the signal-dispatch callback for THIS thread. Wasmer's
+	// signal handling stores the "signal callback registered" bit in a
+	// thread-local handle map, so each new OS thread needs its own
+	// __wasi_callback_signal("__wasm_signal") call. Without this,
+	// raise() / pthread_kill() deliveries to the new thread are logged
+	// as "Signal ignored" and never invoke the handler. See issue #24.
+	__wasi_callback_signal("__wasm_signal");
+
 	// Execute the user's start function.
 	__pthread_exit(args->start_func(args->start_arg));
 }
@@ -516,6 +525,12 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 	new->robust_list.head = &new->robust_list.head;
 	new->canary = self->canary;
 	new->sysinfo = self->sysinfo;
+#ifndef __wasilibc_unmodified_upstream
+	/* POSIX: new threads inherit creator's signal mask. Copy the
+	 * parent's blocked_sigmask field verbatim. See issue #24 patch C. */
+	memcpy(new->blocked_sigmask, self->blocked_sigmask,
+	       sizeof(new->blocked_sigmask));
+#endif
 
 	/* Setup argument structure for the new thread on its stack.
 	 * It's safe to access from the caller only until the thread

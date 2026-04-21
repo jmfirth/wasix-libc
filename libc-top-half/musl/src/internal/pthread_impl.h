@@ -4,6 +4,10 @@
 #include <pthread.h>
 #ifdef __wasilibc_unmodified_upstream
 #include <signal.h>
+#else
+/* WASIX needs signal.h here for _NSIG (used in struct pthread's
+ * per-thread blocked sigmask field added for issue #24). */
+#include <signal.h>
 #endif
 #include <errno.h>
 #include <limits.h>
@@ -67,6 +71,26 @@ struct pthread {
 	volatile int killlock[1];
 	char *dlerror_buf;
 	void *stdio_locks;
+#ifndef __wasilibc_unmodified_upstream
+	/* Per-thread blocked signal mask, consulted by __wasm_signal to
+	 * decide whether to dispatch or enqueue. sigset_t on WASIX is
+	 * sized from _NSIG via musl; `blocked[0]` bit N represents
+	 * signal N+1 being blocked. Written by pthread_sigmask. */
+	unsigned long blocked_sigmask[_NSIG/(8*sizeof(long))];
+	/* Per-thread pending signal bitmask. When __wasm_signal on THIS
+	 * thread receives a blocked signal, the bit (sig-1) is set here.
+	 * pthread_sigmask on SIG_UNBLOCK drains this per-thread bitmask,
+	 * re-raising only signals that were pended on THIS thread. This
+	 * avoids a cross-thread coalescing bug when the process-wide
+	 * bitmask was drained by whichever thread ran UNBLOCK first. */
+	volatile int pending_sigs[((_NSIG + 31) / 32)];
+	/* Signal delivery counter — incremented by __wasm_signal after it
+	 * calls a handler. sigsuspend(2) samples this before entering the
+	 * wait loop and polls for a change, so it can return -1/EINTR
+	 * once a handler has run. volatile int so __futexwait / __wake see
+	 * a consistent address. */
+	volatile int sigsuspend_tick;
+#endif
 
 	/* Part 3 -- the positions of these fields relative to
 	 * the end of the structure is external and internal ABI. */
