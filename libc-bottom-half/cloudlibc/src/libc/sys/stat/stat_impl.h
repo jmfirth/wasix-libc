@@ -67,6 +67,9 @@ static inline void to_public_stat(const __wasi_filestat_t *in,
     case __WASI_FILETYPE_SYMBOLIC_LINK:
       out->st_mode |= S_IFLNK;
       break;
+    case __WASI_FILETYPE_FIFO:
+      out->st_mode |= S_IFIFO;
+      break;
   }
 
   // Extract POSIX permission bits from the dev field.

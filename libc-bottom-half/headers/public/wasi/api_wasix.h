@@ -737,6 +737,11 @@ typedef uint8_t __wasi_filetype_t;
  */
 #define __WASI_FILETYPE_SOCKET_SEQPACKET (UINT8_C(9))
 
+/**
+ * The file descriptor or file refers to a named pipe (FIFO).
+ */
+#define __WASI_FILETYPE_FIFO (UINT8_C(10))
+
 _Static_assert(sizeof(__wasi_filetype_t) == 1, "witx calculated size");
 _Static_assert(_Alignof(__wasi_filetype_t) == 1, "witx calculated align");
 
@@ -5354,6 +5359,36 @@ __wasi_errno_t __wasix_fd_chmod(
      * The new Unix permission mode bits (e.g., 0644).
      */
     uint32_t mode
+) __attribute__((__warn_unused_result__));
+
+/**
+ * Create a filesystem node (FIFO/named pipe) at the given path.
+ * Note: This is similar to `mknodat` in POSIX, but supports only
+ * `S_IFIFO`. The caller is expected to strip the type bits from
+ * `mode` before invoking this; type information is implicit.
+ */
+__wasi_errno_t __wasix_path_mknod(
+    /**
+     * The base directory from which `path` is understood.
+     */
+    __wasi_fd_t fd,
+    /**
+     * The path of the FIFO to create.
+     */
+    const char *path,
+    /**
+     * The number of bytes in `path`.
+     */
+    size_t path_len,
+    /**
+     * The new Unix permission mode bits (low 12 bits; type bits ignored).
+     */
+    uint32_t mode,
+    /**
+     * Device identifier — preserved for ABI parity with POSIX `mknodat`,
+     * ignored by the runtime.
+     */
+    uint64_t dev
 ) __attribute__((__warn_unused_result__));
 
 #ifdef __cplusplus

@@ -1326,3 +1326,19 @@ __wasi_errno_t __wasix_fd_chmod(
     return (uint16_t) ret;
 }
 
+int32_t __imported_wasix_32v1_path_mknod(int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3, int64_t arg4) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("path_mknod")
+));
+
+__wasi_errno_t __wasix_path_mknod(
+    __wasi_fd_t fd,
+    const char *path,
+    size_t path_len,
+    uint32_t mode,
+    uint64_t dev
+){
+    int32_t ret = __imported_wasix_32v1_path_mknod((int32_t) fd, (int32_t) path, (int32_t) path_len, (int32_t) mode, (int64_t) dev);
+    return (uint16_t) ret;
+}
+
