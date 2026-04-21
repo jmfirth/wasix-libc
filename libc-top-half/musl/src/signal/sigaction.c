@@ -1,12 +1,19 @@
 #include <signal.h>
 #include <errno.h>
+#include <stdint.h>
 #include <string.h>
 #include <sysexits.h>
+#ifndef __wasilibc_unmodified_upstream
+#include <wasi/api.h>
+#endif
 #include "syscall.h"
 #include "pthread_impl.h"
 #include "libc.h"
 #include "lock.h"
 #include "ksigaction.h"
+#ifndef __wasilibc_unmodified_upstream
+#include "atomic.h"
+#endif
 
 static int unmask_done;
 static unsigned long handler_set[_NSIG/(8*sizeof(long))];
@@ -14,7 +21,30 @@ static unsigned long handler_set[_NSIG/(8*sizeof(long))];
 #else
 static volatile int __eintr_callback_registered = 0;
 static volatile struct k_sigaction __eintr_handler_callbacks[_NSIG];
+/* Pure futex-protected lock guarding __eintr_handler_callbacks[].
+ * MUST NEVER be touched by a_store() or raw writes — that conflates
+ * the futex "has waiters" bit (1) with a "signals blocked" flag and
+ * deadlocks under re-entrant __wasm_signal dispatch. See issue #24. */
 volatile int __eintr_handler_lock[1];
+
+/* Process-wide "signals currently blocked by __block_all_sigs" flag.
+ * Separate from __eintr_handler_lock so the dispatcher can tell the
+ * two apart. Written atomically by __block_all_sigs / __restore_sigs.
+ * Read by __wasm_signal to decide whether to dispatch or enqueue. */
+volatile int __wasm_signals_blocked = 0;
+
+/* Process-wide pending-signal bitmask. Bit (sig-1) set means a signal
+ * was raised during a blocked window and needs redelivery at
+ * __restore_sigs time. Implemented as an array of ints for a_or /
+ * a_and_l atomics; musl's sigset_t semantics (bit N-1) mirrored. */
+#define __WASM_PENDING_WORDS ((_NSIG + 31) / 32)
+volatile int __wasm_pending_sigs[__WASM_PENDING_WORDS];
+
+/* SA_NODEFER in-handler recursion guards: per-signal depth counters.
+ * Written only from within __wasm_signal, so no atomic needed — the
+ * WASM runtime delivers signals serially to a single thread and we
+ * guard re-entrant dispatch via __wasm_signals_blocked. */
+static int __wasm_in_handler[_NSIG];
 #endif
 
 void __get_handler_set(sigset_t *set)
@@ -178,23 +208,131 @@ volatile int __eintr_valid_flag;
 
 #ifdef __wasilibc_unmodified_upstream
 #else
+/* Forward declarations for the internal helpers the dispatcher consults.
+ * All three are defined in block.c / thread/pthread_sigmask.c. */
+extern volatile int __wasm_signals_blocked;
+extern volatile int __wasm_pending_sigs[];
+int __wasm_thread_sig_blocked(int sig);
+
+/* Record a signal as pending on THIS thread. Bit (sig-1) set = pending.
+ * Per-thread storage avoids a cross-thread coalescing bug when multiple
+ * threads concurrently block/raise — otherwise one thread's UNBLOCK would
+ * drain another thread's pending signals and re-raise on the wrong tid. */
+static inline void __wasm_pend_signal(int sig) {
+	struct pthread *self = __pthread_self();
+	if (!self) return;
+	int word = (sig - 1) / 32;
+	int bit = (sig - 1) % 32;
+	a_or((volatile int *)&self->pending_sigs[word], 1 << bit);
+	/* Also OR into the process-wide bitmask for sigpending(2)'s query
+	 * surface. Consumers of sigpending treat the process-wide bitmask
+	 * as the authoritative "what's queued" view. */
+	a_or(&__wasm_pending_sigs[word], 1 << bit);
+}
+
+/* Drain the calling thread's pending bitmask and re-raise each bit via
+ * __wasi_thread_signal on the calling thread. Called from __restore_sigs
+ * after clearing the blocked flag, and from pthread_sigmask after a
+ * SIG_UNBLOCK. The re-raise loops back through the runtime →
+ * __wasm_signal, which will then find the signal unblocked and dispatch
+ * normally. */
+void __wasm_drain_pending_sigs(void) {
+	struct pthread *self = __pthread_self();
+	if (!self) return;
+	int tid = self->tid;
+	for (int word = 0; word < __WASM_PENDING_WORDS; word++) {
+		int bits = a_swap((volatile int *)&self->pending_sigs[word], 0);
+		/* Mirror the clear into the process-wide bitmask so
+		 * sigpending doesn't continue to report these as pending. */
+		a_and(&__wasm_pending_sigs[word], ~bits);
+		while (bits) {
+			int bit = a_ctz_32((uint32_t)bits);
+			bits &= ~(1 << bit);
+			int sig = word * 32 + bit + 1;
+			if (sig >= 1 && sig < _NSIG) {
+				/* Re-raise on the current thread so it flows back
+				 * through the dispatch path and rechecks blocking. */
+				(void)__wasi_thread_signal(tid,
+				                           (__wasi_signal_t)sig);
+			}
+		}
+	}
+}
+
 __attribute__((export_name("__wasm_signal")))
 void __wasm_signal(int sig) {
 	if (sig-32U < 3 || sig-1U >= _NSIG-1) {
 		return;
 	}
+
+	/* Process-wide block (from __block_all_sigs). Enqueue and return.
+	 * __restore_sigs will drain this bitmask. */
+	if (__wasm_signals_blocked) {
+		__wasm_pend_signal(sig);
+		return;
+	}
+
+	/* Per-thread block (from pthread_sigmask). The signal is queued
+	 * into the calling thread's own pending bitmask; pthread_sigmask
+	 * on SIG_UNBLOCK (or SIG_SETMASK) drains and redelivers. */
+	if (__wasm_thread_sig_blocked(sig)) {
+		__wasm_pend_signal(sig);
+		return;
+	}
+
 	LOCK(__eintr_handler_lock);
 	struct k_sigaction ksa = __eintr_handler_callbacks[sig];
+	/* SA_RESETHAND: reset handler to SIG_DFL atomically with snapshot,
+	 * so a concurrent sigaction() on another thread sees the reset. */
+	if (ksa.handler != 0 && (ksa.flags & SA_RESETHAND)) {
+		__eintr_handler_callbacks[sig].handler = 0;
+	}
 	UNLOCK(__eintr_handler_lock);
+
+	/* SA_NODEFER recursion guard. Without SA_NODEFER, don't re-enter
+	 * the same signal's handler; enqueue instead. */
+	if (!(ksa.flags & SA_NODEFER)) {
+		if (__wasm_in_handler[sig] > 0) {
+			__wasm_pend_signal(sig);
+			return;
+		}
+		__wasm_in_handler[sig] = 1;
+	}
 
 	if (ksa.handler != 0) {
 		ksa.handler(sig);
 	} else {
-		unsigned long set[_NSIG/(8*sizeof(long))];
-		__block_all_sigs(&set);
 		default_handler(sig);
-		__restore_sigs(&set);
 	}
+
+	if (!(ksa.flags & SA_NODEFER)) {
+		__wasm_in_handler[sig] = 0;
+	}
+
+	/* Bump the sigsuspend wake counter and wake any waiters on it.
+	 * This lets sigsuspend(2) observe that a signal was delivered and
+	 * return -1/EINTR. Touching the counter from the dispatch path
+	 * (rather than from the handler itself) avoids forcing handlers
+	 * to be sigsuspend-aware. */
+	{
+		struct pthread *self = __pthread_self();
+		if (self) {
+			a_inc(&self->sigsuspend_tick);
+			__wake(&self->sigsuspend_tick, 1, 1);
+		}
+	}
+}
+
+/* Stub export for the runtime's callback_signal("__wasm_signal_blocked").
+ * Historically wasix-libc's __block_all_sigs calls __wasi_callback_signal
+ * with this name, but no program exported the target. Now that
+ * __block_all_sigs sets __wasm_signals_blocked=1 BEFORE calling the
+ * callback, and __wasm_signal consults the flag, this export is a
+ * compatibility no-op: it exists so the runtime's callback wiring
+ * doesn't see "export not found" and doesn't disable dispatch. */
+__attribute__((export_name("__wasm_signal_blocked")))
+void __wasm_signal_blocked(int sig) {
+	(void)sig;
 }
 #endif
 
@@ -353,6 +491,28 @@ int __wasm_sigaction(int sig, int action) {
 
 	return 0;
 }
+
+/* Force-link references for symbols shipped in archive members that a
+ * linker wouldn't otherwise pull in when the only consumer-side reference
+ * is a weak declaration (e.g. the wasix-libc regression harness probing
+ * feature presence). By referencing them from sigaction.c — which is
+ * always pulled in because crt1 calls __wasi_init_signals below — the
+ * linker resolves these at link time. See issue #24.
+ *
+ * The symbols: sigsetjmp, siglongjmp (patch E); sigpending, sigsuspend
+ * (patch F); mknodat (patch I). Declared with minimal prototypes here
+ * because src/signal/ doesn't have setjmp.h / sys/stat.h in scope. */
+extern int sigsetjmp();
+extern void siglongjmp();
+extern int mknodat();
+__attribute__((used))
+static void *__firebox_force_link_signals[] = {
+	(void *)&sigsetjmp,
+	(void *)&siglongjmp,
+	(void *)&sigpending,
+	(void *)&sigsuspend,
+	(void *)&mknodat,
+};
 
 void __wasi_init_signals() {
     __wasi_errno_t err;

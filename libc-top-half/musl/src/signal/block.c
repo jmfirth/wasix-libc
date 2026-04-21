@@ -3,12 +3,19 @@
 #include "syscall.h"
 #else
 #include <wasi/api.h>
+#include "atomic.h"
 #endif
 #include <signal.h>
 
 #ifdef __wasilibc_unmodified_upstream
 #else
-extern volatile int __eintr_handler_lock[1];
+/* Process-wide "signals blocked" flag set by __block_all_sigs and
+ * cleared by __restore_sigs. Defined in sigaction.c. Consulted by
+ * __wasm_signal before dispatching a handler. */
+extern volatile int __wasm_signals_blocked;
+/* Drain helper — re-raises queued signals after restore_sigs clears
+ * the block. Defined in sigaction.c. */
+void __wasm_drain_pending_sigs(void);
 #endif
 
 static const unsigned long all_mask[] = {
@@ -42,7 +49,12 @@ void __block_all_sigs(void *set)
 #ifdef __wasilibc_unmodified_upstream
 	__syscall(SYS_rt_sigprocmask, SIG_BLOCK, &all_mask, set, _NSIG/8);
 #else
-	a_store(__eintr_handler_lock, 1);
+	/* Set the dedicated process-wide blocked flag. __wasm_signal will
+	 * see this on its next entry and enqueue into __wasm_pending_sigs
+	 * rather than dispatch. The callback_signal keeps the runtime's
+	 * notification mechanism armed; the __wasm_signal_blocked export
+	 * (new in this patch) is a no-op on the libc side. */
+	a_store(&__wasm_signals_blocked, 1);
 	__wasi_callback_signal("__wasm_signal_blocked");
 #endif
 }
@@ -52,7 +64,7 @@ void __block_app_sigs(void *set)
 #ifdef __wasilibc_unmodified_upstream
 	__syscall(SYS_rt_sigprocmask, SIG_BLOCK, &app_mask, set, _NSIG/8);
 #else
-	a_store(__eintr_handler_lock, 1);
+	a_store(&__wasm_signals_blocked, 1);
 	__wasi_callback_signal("__wasm_signal_blocked");
 #endif
 }
@@ -62,6 +74,11 @@ void __restore_sigs(void *set)
 #ifdef __wasilibc_unmodified_upstream
 	__syscall(SYS_rt_sigprocmask, SIG_SETMASK, set, 0, _NSIG/8);
 #else
+	/* Clear the block flag, re-arm the normal dispatcher, then drain
+	 * any signals that queued during the block window. Drain must
+	 * happen AFTER the flag clears so re-raised signals dispatch. */
+	a_store(&__wasm_signals_blocked, 0);
 	__wasi_callback_signal("__wasm_signal");
+	__wasm_drain_pending_sigs();
 #endif
 }
