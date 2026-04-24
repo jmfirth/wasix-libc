@@ -302,11 +302,18 @@ void __wasm_signal(int sig) {
 		__wasm_in_handler[sig] = 1;
 	}
 
-	if (ksa.handler != 0) {
+	/* SIG_DFL (0): fall through to default_handler. SIG_IGN (1): POSIX
+	 * "ignore" — the sentinel is NOT callable; treat as no-op. Without
+	 * this, ksa.handler(sig) lowers to call_indirect on table slot 1
+	 * and traps "uninitialized element". */
+	if (ksa.handler != 0 && (uintptr_t)ksa.handler != 1) {
 		ksa.handler(sig);
-	} else {
+	} else if (ksa.handler == 0 && default_handler != 0) {
 		default_handler(sig);
 	}
+	/* else: SIG_IGN, or SIG_DFL with default_handler unset — drop.
+	 * Correct action for SIGCHLD/SIGURG/SIGWINCH/SIGCONT (POSIX
+	 * "ignore" default) when no user handler is installed. */
 
 	if (!(ksa.flags & SA_NODEFER)) {
 		__wasm_in_handler[sig] = 0;
@@ -520,6 +527,17 @@ static void *__firebox_force_link_signals[] = {
 void __wasi_init_signals() {
     __wasi_errno_t err;
 	int sigaction_ret;
+
+	/* Ensure default_handler is set BEFORE any signal can be delivered.
+	 * Otherwise a program that never calls sigaction() (e.g. a Rust
+	 * binary like coreutils/ls that relies on wasix-libc's default
+	 * dispositions) leaves default_handler == NULL, and the first
+	 * signal that fires (commonly a pending SIGCHLD delivered across
+	 * a proc_exec3 module swap) traps __wasm_signal with
+	 * "uninitialized element". This used to be reached only via
+	 * __sigaction, which __wasi_init_signals can skip entirely when
+	 * the builder has no signal dispositions. */
+	if (default_handler == 0) default_handler = &__default_handler;
 
     __wasi_size_t signal_count;
     err = __wasi_proc_signals_sizes_get(&signal_count);
