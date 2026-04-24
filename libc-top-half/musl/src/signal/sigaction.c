@@ -163,7 +163,10 @@ static void __default_handler(int sig) {
 #endif
 		case SIGURG:
 		case SIGWINCH:
-			SIG_IGN(sig);
+			/* SIG_IGN is the sentinel value (void(*)(int))1, not a
+			 * real function. Calling it traps "uninitialized element"
+			 * at runtime. POSIX "ignore" default means do nothing. */
+			(void)sig;
 			break;
 
 		// Default behavior: "continue".
