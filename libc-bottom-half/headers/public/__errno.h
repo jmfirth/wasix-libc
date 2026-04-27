@@ -5,10 +5,16 @@
 extern "C" {
 #endif
 
+#if defined(__PIC__) && !defined(__PIE__) && !defined(__WASILIBC_BUILDING_LIBC)
+/* Shared-library consumer: import errno via GOT.mem (non-TLS extern).
+ * See patches/0020-errno-non-tls-when-pic-shared.patch for full rationale. */
+extern int errno;
+#else
 #ifdef __cplusplus
 extern thread_local int errno;
 #else
 extern _Thread_local int errno;
+#endif
 #endif
 
 #define errno errno
