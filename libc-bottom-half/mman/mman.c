@@ -187,3 +187,52 @@ int msync (void *addr, size_t length, int flags) {
 
     return 0;
 }
+
+// madvise: hint the kernel about future memory access patterns.
+//
+// WebAssembly has no MMU, no page caching, and the userspace emulated
+// mmap in this file is malloc()-backed rather than page-backed, so all
+// advice values are semantically meaningless. POSIX permits madvise to
+// be a no-op as long as it validates arguments and returns 0.
+//
+// We accept all standard POSIX advice values and reject unknown ones
+// with EINVAL.
+int madvise(void *addr, size_t length, int advice) {
+    (void)addr;
+    (void)length;
+
+    switch (advice) {
+    case POSIX_MADV_NORMAL:
+    case POSIX_MADV_RANDOM:
+    case POSIX_MADV_SEQUENTIAL:
+    case POSIX_MADV_WILLNEED:
+    case POSIX_MADV_DONTNEED:
+        return 0;
+    default:
+        // Linux-specific advice values (MADV_FREE, MADV_REMOVE,
+        // MADV_DONTFORK, etc.) would land here. Returning EINVAL is
+        // conservative; programs that probe for support get a clear
+        // negative answer rather than a silent succeed.
+        errno = EINVAL;
+        return -1;
+    }
+}
+
+// posix_madvise: same as madvise but with the POSIX-namespaced advice
+// constants. The Linux ABI happens to assign identical values to
+// MADV_*=POSIX_MADV_*, so the underlying behavior is identical here.
+int posix_madvise(void *addr, size_t length, int advice) {
+    (void)addr;
+    (void)length;
+
+    switch (advice) {
+    case POSIX_MADV_NORMAL:
+    case POSIX_MADV_RANDOM:
+    case POSIX_MADV_SEQUENTIAL:
+    case POSIX_MADV_WILLNEED:
+    case POSIX_MADV_DONTNEED:
+        return 0;
+    default:
+        return EINVAL;  // posix_madvise returns errno directly, not via errno
+    }
+}
