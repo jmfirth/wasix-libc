@@ -17,7 +17,11 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     if (pollfd->fd < 0)
       continue;
     bool created_events = false;
-    if ((pollfd->events & POLLRDNORM) != 0) {
+    // POLLIN and POLLRDNORM are distinct on musl/wasix (0x001 vs 0x040)
+    // but equivalent for TCP sockets, pipes, and regular files.  Callers
+    // that set POLLIN (curl, Rust std) must see the same behaviour as
+    // callers that set POLLRDNORM (POSIX equivalence).
+    if ((pollfd->events & (POLLRDNORM | POLLIN)) != 0) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
       *subscription = (__wasi_subscription_t){
           .userdata = (uintptr_t)pollfd,
@@ -26,7 +30,7 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
       };
       created_events = true;
     }
-    if ((pollfd->events & POLLWRNORM) != 0) {
+    if ((pollfd->events & (POLLWRNORM | POLLOUT)) != 0) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
       *subscription = (__wasi_subscription_t){
           .userdata = (uintptr_t)pollfd,
@@ -105,12 +109,12 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
       } else {
         // Data can be read or written.
         if (event->type == __WASI_EVENTTYPE_FD_READ) {
-            pollfd->revents |= POLLRDNORM;
+            pollfd->revents |= POLLRDNORM | POLLIN;
             if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) {
               pollfd->revents |= POLLHUP;
             }
         } else if (event->type == __WASI_EVENTTYPE_FD_WRITE) {
-            pollfd->revents |= POLLWRNORM;
+            pollfd->revents |= POLLWRNORM | POLLOUT;
             if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) {
               pollfd->revents |= POLLHUP;
             }

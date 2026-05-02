@@ -3,14 +3,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 #include <common/time.h>
-#include <pthread.h>
-#include <stdbool.h>
 
 #include <sys/select.h>
 
-#include <signal.h>
 #include <wasi/api.h>
 #include <errno.h>
+#include <stdbool.h>
 
 int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
             fd_set *restrict errorfds, const struct timespec *restrict timeout,
@@ -22,10 +20,11 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
   }
 
   // This implementation does not support polling for exceptional
-  // conditions, such as out-of-band data on TCP sockets.
+  // conditions, such as out-of-band data on TCP sockets.  Return zero
+  // entries rather than failing — callers like curl pass errorfds to
+  // every select() call by convention, and ENOSYS breaks the API.
   if (errorfds != NULL && errorfds->__nfds > 0) {
-    errno = ENOSYS;
-    return -1;
+    FD_ZERO(errorfds);
   }
 
   // Replace NULL pointers by the empty set.
@@ -47,7 +46,7 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     if (fd < nfds) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
       *subscription = (__wasi_subscription_t){
-          .userdata = fd,
+          .userdata = (uintptr_t)(intptr_t)fd,
           .u.tag = __WASI_EVENTTYPE_FD_READ,
           .u.u.fd_read.file_descriptor = fd,
       };
@@ -60,7 +59,7 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     if (fd < nfds) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
       *subscription = (__wasi_subscription_t){
-          .userdata = fd,
+          .userdata = (uintptr_t)(intptr_t)fd,
           .u.tag = __WASI_EVENTTYPE_FD_WRITE,
           .u.u.fd_write.file_descriptor = fd,
       };
@@ -80,49 +79,11 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     }
   }
 
-  // WASIX/firebox: if we have no subscriptions, synthesize a short
-  // timeout so __wasi_poll_oneoff has something to wait on instead of
-  // failing. ninja's wait loop calls pselect(NULL, NULL, NULL, NULL,
-  // timeout=NULL, sigmask) when waiting purely for SIGCHLD; without
-  // this synthetic timeout, that call returns ENOTSUP and ninja
-  // spins. WASIX delivers signals to userspace handlers, so a 10ms
-  // wakeup is enough — the caller's outer loop checks signal flags
-  // between our returns.
-  if (nsubscriptions == 0) {
-    __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
-    *subscription = (__wasi_subscription_t){
-        .u.tag = __WASI_EVENTTYPE_CLOCK,
-        .u.u.clock.id = __WASI_CLOCKID_REALTIME,
-        .u.u.clock.timeout = 10000000UL,  // 10 ms in nanoseconds
-    };
-  }
-
-  // Apply the caller-supplied sigmask atomically around the wait.
-  // POSIX: pselect must temporarily set the calling thread's signal
-  // mask to *sigmask, run the poll, then restore the prior mask.
-  // This is critical for the canonical "block SIGCHLD outside
-  // pselect, unblock during pselect" pattern used by ninja, gmake,
-  // and any self-pipe-trick code: without the temporary unblock,
-  // signals that arrive during the wait are pended in
-  // __wasm_pending_sigs and the user-space handler never fires,
-  // so callers that gate on a handler-set flag (e.g. ninja's
-  // s_sigchld_received) loop forever.
-  sigset_t saved_mask;
-  bool mask_applied = false;
-  if (sigmask != NULL) {
-    if (pthread_sigmask(SIG_SETMASK, sigmask, &saved_mask) == 0) {
-      mask_applied = true;
-    }
-  }
-
   // Execute poll().
-  __wasi_size_t nevents;
+  size_t nevents;
   __wasi_event_t events[nsubscriptions];
   __wasi_errno_t error =
       __wasi_poll_oneoff(subscriptions, events, nsubscriptions, &nevents);
-  if (mask_applied) {
-    pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
-  }
   if (error != 0) {
     // WASI's poll requires at least one subscription, or else it returns
     // `EINVAL`. Since a `pselect` with nothing to wait for is valid in POSIX,
@@ -151,15 +112,17 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     }
   }
 
-  // Clear and set entries in the result sets.
+  // Build result sets from poll_oneoff events.
   FD_ZERO(readfds);
   FD_ZERO(writefds);
   for (size_t i = 0; i < nevents; ++i) {
     const __wasi_event_t *event = &events[i];
     if (event->type == __WASI_EVENTTYPE_FD_READ) {
-      readfds->__fds[readfds->__nfds++] = event->userdata;
+      int fd = (int)(intptr_t)event->userdata;
+      readfds->__fds[readfds->__nfds++] = fd;
     } else if (event->type == __WASI_EVENTTYPE_FD_WRITE) {
-      writefds->__fds[writefds->__nfds++] = event->userdata;
+      int fd = (int)(intptr_t)event->userdata;
+      writefds->__fds[writefds->__nfds++] = fd;
     }
   }
   return readfds->__nfds + writefds->__nfds;
