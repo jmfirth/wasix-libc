@@ -59,7 +59,18 @@ struct pthread {
 	size_t guard_size;
 	void *result;
 	struct __ptcb *cancelbuf;
-	void **tsd;
+	/* Align the tsd field — and therefore the entire struct pthread —
+	 * to 8 bytes. This forces _Alignof(struct pthread) to 8, which
+	 * propagates to aligned_alloc() in __wasi_init_tp / __pthread_create
+	 * so every pthread struct base address is 8-aligned. The downstream
+	 * effect: fields like pending_sigs[] (used in atomic cmpxchg via
+	 * a_or / a_swap in __wasm_signal / __wasm_drain_pending_sigs) end
+	 * up at addresses that satisfy V8's strict atomic-alignment check
+	 * on shared memory. Without this, browser-side fork+pipeline
+	 * (e.g. `echo X | grep X` in bash) traps with
+	 * "operation does not support unaligned accesses" inside the
+	 * forked child's signal-dispatch path. See issue #234. */
+	void **tsd __attribute__((aligned(8)));
 	struct {
 		volatile void *volatile head;
 		long off;
