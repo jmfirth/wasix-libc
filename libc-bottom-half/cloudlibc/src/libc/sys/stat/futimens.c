@@ -10,6 +10,7 @@
 #include "stat_impl.h"
 
 int futimens(int fd, const struct timespec *times) {
+  errno = 0;
   // Convert timestamps and extract NOW/OMIT flags.
   __wasi_timestamp_t st_atim;
   __wasi_timestamp_t st_mtim;

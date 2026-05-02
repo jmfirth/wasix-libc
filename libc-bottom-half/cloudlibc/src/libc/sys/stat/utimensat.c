@@ -13,6 +13,7 @@
 
 int __wasilibc_nocwd_utimensat(int fd, const char *path, const struct timespec times[2],
                                int flag) {
+  errno = 0;
   // Convert timestamps and extract NOW/OMIT flags.
   __wasi_timestamp_t st_atim;
   __wasi_timestamp_t st_mtim;

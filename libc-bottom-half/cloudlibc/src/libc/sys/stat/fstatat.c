@@ -13,6 +13,7 @@
 
 int __wasilibc_nocwd_fstatat(int fd, const char *restrict path, struct stat *restrict buf,
                              int flag) {
+  errno = 0;
   // Create lookup properties.
   __wasi_lookupflags_t lookup_flags = 0;
   if ((flag & AT_SYMLINK_NOFOLLOW) == 0)
