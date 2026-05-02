@@ -11,7 +11,8 @@
 
 int clock_getres(clockid_t clock_id, struct timespec *res) {
   __wasi_timestamp_t ts;
-  __wasi_errno_t error = __wasi_clock_res_get(clock_id, &ts);
+  __wasi_errno_t error =
+      __wasi_clock_res_get(__wasilibc_clockid_from_any((uintptr_t)clock_id), &ts);
   if (error != 0) {
     errno = error;
     return -1;
