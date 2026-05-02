@@ -77,6 +77,23 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     }
   }
 
+  // WASIX/firebox: if we have no subscriptions, synthesize a short
+  // timeout so __wasi_poll_oneoff has something to wait on instead of
+  // failing. ninja's wait loop calls pselect(NULL, NULL, NULL, NULL,
+  // timeout=NULL, sigmask) when waiting purely for SIGCHLD; without
+  // this synthetic timeout, that call returns ENOTSUP and ninja
+  // spins. WASIX delivers signals to userspace handlers, so a 10ms
+  // wakeup is enough — the caller's outer loop checks signal flags
+  // between our returns.
+  if (nsubscriptions == 0) {
+    __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
+    *subscription = (__wasi_subscription_t){
+        .u.tag = __WASI_EVENTTYPE_CLOCK,
+        .u.u.clock.id = __WASI_CLOCKID_REALTIME,
+        .u.u.clock.timeout = 10000000UL,  // 10 ms in nanoseconds
+    };
+  }
+
   // Execute poll().
   __wasi_size_t nevents;
   __wasi_event_t events[nsubscriptions];
