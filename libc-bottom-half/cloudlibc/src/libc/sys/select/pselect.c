@@ -3,9 +3,12 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 #include <common/time.h>
+#include <pthread.h>
+#include <stdbool.h>
 
 #include <sys/select.h>
 
+#include <signal.h>
 #include <wasi/api.h>
 #include <errno.h>
 
@@ -94,11 +97,32 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     };
   }
 
+  // Apply the caller-supplied sigmask atomically around the wait.
+  // POSIX: pselect must temporarily set the calling thread's signal
+  // mask to *sigmask, run the poll, then restore the prior mask.
+  // This is critical for the canonical "block SIGCHLD outside
+  // pselect, unblock during pselect" pattern used by ninja, gmake,
+  // and any self-pipe-trick code: without the temporary unblock,
+  // signals that arrive during the wait are pended in
+  // __wasm_pending_sigs and the user-space handler never fires,
+  // so callers that gate on a handler-set flag (e.g. ninja's
+  // s_sigchld_received) loop forever.
+  sigset_t saved_mask;
+  bool mask_applied = false;
+  if (sigmask != NULL) {
+    if (pthread_sigmask(SIG_SETMASK, sigmask, &saved_mask) == 0) {
+      mask_applied = true;
+    }
+  }
+
   // Execute poll().
   __wasi_size_t nevents;
   __wasi_event_t events[nsubscriptions];
   __wasi_errno_t error =
       __wasi_poll_oneoff(subscriptions, events, nsubscriptions, &nevents);
+  if (mask_applied) {
+    pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
+  }
   if (error != 0) {
     // WASI's poll requires at least one subscription, or else it returns
     // `EINVAL`. Since a `pselect` with nothing to wait for is valid in POSIX,
