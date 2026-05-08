@@ -84,18 +84,28 @@ static size_t dlmalloc_usable_size(void*);
 #include "malloc.c"
 
 // =============================================================================
-// firebox-trace alloc subsystem (MVP).
+// firebox-trace alloc subsystem.
 //
-// Hand-maintained mirror of `crates/firebox-trace/src/lib.rs` (firebox repo) —
-// subsystem IDs MUST stay in sync. Polish (#302) extracts this block into a
-// shared `firebox_trace.h` and links it as a separate firebox_trace.o.
+// Compile-time gated: when FIREBOX_TRACE_ENABLED is undefined (the default
+// for production wasix-libc builds), the entire trace machinery — env-var
+// parsing, fd setup, format buffer, write call, and re-entrancy guard —
+// compiles out completely and the FIREBOX_TRACE() macro becomes a no-op.
+// libc.a in default builds carries zero allocator-instrumentation cost.
 //
-// CRITICAL: firebox_trace_emit() must NOT call malloc/free/calloc. vsnprintf
-// can call malloc internally for wide-format conversions; the in_emit guard
-// short-circuits the recursive FIREBOX_TRACE call so we don't blow the stack.
-// Output goes through raw write(2) which is atomic per-call and bypasses
-// stdio buffering (which would itself malloc).
+// Enable with `bash scripts/wasix-libc/build.sh --pic --trace` (which
+// adds -DFIREBOX_TRACE_ENABLED to CFLAGS) for forensic builds. Subsystem
+// IDs and the FIREBOX_TRACE macro are mirrored on the Rust side at
+// `crates/firebox-trace/src/lib.rs` (firebox repo) — both files are read
+// by the same FIREBOX_TRACE env var; if the bits drift, filtering breaks.
+//
+// CRITICAL (when enabled): firebox_trace_emit() must NOT call malloc/free.
+// vsnprintf can call malloc internally for wide-format conversions; the
+// in_emit guard short-circuits the recursive FIREBOX_TRACE call so we
+// don't blow the stack. Output goes through raw write(2) which is atomic
+// per-call and bypasses stdio buffering (which would itself malloc).
 // =============================================================================
+
+#ifdef FIREBOX_TRACE_ENABLED
 
 #define FIREBOX_TRACE_TRAP       (1u << 0)
 #define FIREBOX_TRACE_ALLOC      (1u << 1)
@@ -237,6 +247,28 @@ static void firebox_trace_emit(unsigned int subsys, const char* component,
         firebox_trace_emit((subsys), (component), __VA_ARGS__); \
     } \
 } while (0)
+
+#else  // !FIREBOX_TRACE_ENABLED
+
+// Production build: trace machinery elided.  Subsystem IDs are still defined
+// at zero so any consumer that references them outside of FIREBOX_TRACE()
+// expressions still compiles cleanly, but the macro itself drops all args
+// without evaluation, including any side-effects in format args.  The
+// optimizer eliminates the entire call.
+#define FIREBOX_TRACE_TRAP       0u
+#define FIREBOX_TRACE_ALLOC      0u
+#define FIREBOX_TRACE_PANIC      0u
+#define FIREBOX_TRACE_SYSCALL    0u
+#define FIREBOX_TRACE_DYNLINK    0u
+#define FIREBOX_TRACE_THREAD     0u
+#define FIREBOX_TRACE_PROCMACRO  0u
+#define FIREBOX_TRACE_VFS        0u
+#define FIREBOX_TRACE_IMAGE      0u
+#define FIREBOX_TRACE_CACHE      0u
+
+#define FIREBOX_TRACE(subsys, component, ...) ((void)0)
+
+#endif  // FIREBOX_TRACE_ENABLED
 
 // =============================================================================
 // Public allocator entry points — wrap the static dlmalloc/dlfree/etc and
