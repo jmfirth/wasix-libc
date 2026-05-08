@@ -7,12 +7,12 @@
  *     cargo run --manifest-path tools/wasi-headers/Cargo.toml generate-libc
  */
 
-#ifndef __wasix__
-#define __wasix__ 1
+#ifndef __wasi__
+#define __wasi__ 1
 #endif
 
-#ifndef __wasix_api_h
-#define __wasix_api_h
+#ifndef __wasi_api_h
+#define __wasi_api_h
 
 #include <stddef.h>
 #include <stdint.h>
@@ -736,11 +736,6 @@ typedef uint8_t __wasi_filetype_t;
  * The file descriptor or file refers to a sequential packet socket.
  */
 #define __WASI_FILETYPE_SOCKET_SEQPACKET (UINT8_C(9))
-
-/**
- * The file descriptor or file refers to a named pipe (FIFO).
- */
-#define __WASI_FILETYPE_FIFO (UINT8_C(10))
 
 _Static_assert(sizeof(__wasi_filetype_t) == 1, "witx calculated size");
 _Static_assert(_Alignof(__wasi_filetype_t) == 1, "witx calculated align");
@@ -5290,106 +5285,6 @@ __wasi_errno_t __wasi_context_destroy(
     __wasi_context_id_t context
 ) __attribute__((__warn_unused_result__));
 /** @} */
-
-/**
- * Firebox extensions: POSIX permission mode bits.
- *
- * These are not part of the upstream WASIX spec. They are provided by
- * Firebox's patched wasmer runtime (jmfirth/wasmer#firebox-patches).
- */
-
-/**
- * Change the permission mode bits of a file or directory.
- * Note: This is similar to `chmod` in POSIX.
- */
-__wasi_errno_t __wasix_path_chmod(
-    /**
-     * The base directory from which `path` is understood.
-     */
-    __wasi_fd_t fd,
-    /**
-     * The path of the file or directory to change permissions on.
-     */
-    const char *path,
-    /**
-     * The number of bytes in `path`.
-     */
-    size_t path_len,
-    /**
-     * The new Unix permission mode bits (e.g., 0755).
-     */
-    uint32_t mode
-) __attribute__((__warn_unused_result__));
-
-/**
- * Change the permission mode bits of a path without following the final
- * path component if it is a symlink.
- * Note: This is similar to `lchmod` / `fchmodat(.., AT_SYMLINK_NOFOLLOW)`
- * in POSIX.
- */
-__wasi_errno_t __wasix_path_lchmod(
-    /**
-     * The base directory from which `path` is understood.
-     */
-    __wasi_fd_t fd,
-    /**
-     * The path of the file, directory, or symlink to change permissions on.
-     */
-    const char *path,
-    /**
-     * The number of bytes in `path`.
-     */
-    size_t path_len,
-    /**
-     * The new Unix permission mode bits (e.g., 0755).
-     */
-    uint32_t mode
-) __attribute__((__warn_unused_result__));
-
-/**
- * Change the permission mode bits of an open file descriptor.
- * Note: This is similar to `fchmod` in POSIX.
- */
-__wasi_errno_t __wasix_fd_chmod(
-    /**
-     * The open file descriptor to change permissions on.
-     */
-    __wasi_fd_t fd,
-    /**
-     * The new Unix permission mode bits (e.g., 0644).
-     */
-    uint32_t mode
-) __attribute__((__warn_unused_result__));
-
-/**
- * Create a filesystem node (FIFO/named pipe) at the given path.
- * Note: This is similar to `mknodat` in POSIX, but supports only
- * `S_IFIFO`. The caller is expected to strip the type bits from
- * `mode` before invoking this; type information is implicit.
- */
-__wasi_errno_t __wasix_path_mknod(
-    /**
-     * The base directory from which `path` is understood.
-     */
-    __wasi_fd_t fd,
-    /**
-     * The path of the FIFO to create.
-     */
-    const char *path,
-    /**
-     * The number of bytes in `path`.
-     */
-    size_t path_len,
-    /**
-     * The new Unix permission mode bits (low 12 bits; type bits ignored).
-     */
-    uint32_t mode,
-    /**
-     * Device identifier — preserved for ABI parity with POSIX `mknodat`,
-     * ignored by the runtime.
-     */
-    uint64_t dev
-) __attribute__((__warn_unused_result__));
 
 #ifdef __cplusplus
 }
