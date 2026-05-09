@@ -86,7 +86,27 @@ static_assert(EXDEV == __WASI_ERRNO_XDEV, "Value mismatch");
 static_assert(EMEMVIOLATION == __WASI_ERRNO_MEMVIOLATION, "Value mismatch");
 static_assert(EUNKNOWN == __WASI_ERRNO_UNKNOWN, "Value mismatch");
 
+// firebox#323: gate errno's TLS lowering. The static wasix-libc variant
+// (target wasm32-wasi) is built into a sysroot whose consumers (zeroperl,
+// Ruby cross-compile, coreutils) compile WITHOUT `-pthread`. Without
+// `-pthread`, an `extern _Thread_local int errno;` declaration in those
+// consumers lowers to a non-TLS R_WASM_MEMORY_ADDR_LEB relocation at
+// absolute address 0, while libc's own errno.o (built WITH `-pthread` and
+// `-ftls-model=local-exec`) places the symbol in a .tbss segment at the
+// TLS-relative virtual address (typically 65536). Split-brain: libc writes
+// errno into the TLS slot, consumer reads zero from absolute 0. Concrete
+// failure: Ruby's `Dir.glob("/missing/*")` gets ENOENT from the syscall,
+// libc stores it via TLS errno, but Ruby's `rb_sys_fail` reads errno=0 and
+// raises `Errno::NOERROR`. Gating on `__FIREBOX_NO_TLS_ERRNO__` (defined by
+// scripts/wasix-libc/build.sh for the static variant only) denatures the
+// TLS lowering at the libc side so both sides agree on a plain global.
+// The threaded variant (wasm32-wasi-threads) leaves this off — its
+// consumers DO compile with `-pthread` and correctly expect TLS errno.
+#ifdef __FIREBOX_NO_TLS_ERRNO__
+int errno = 0;
+#else
 thread_local int errno = 0;
+#endif
 
 // These values are used by reference-sysroot's dlmalloc.
 const int __EINVAL = EINVAL;
