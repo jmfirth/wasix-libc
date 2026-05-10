@@ -118,18 +118,34 @@ static size_t dlmalloc_usable_size(void*);
 #define FIREBOX_TRACE_IMAGE      (1u << 8)
 #define FIREBOX_TRACE_CACHE      (1u << 9)
 
-#ifdef _REENTRANT
-#define FBX_TLS __thread
-#else
-#define FBX_TLS  /* single-threaded build — no thread-local needed */
-#endif
+// firebox#320: state below is intentionally NOT thread-local. The trace
+// machinery is called from within aligned_alloc — including the very first
+// aligned_alloc inside __wasix_init_tls, which runs BEFORE TLS storage is
+// set up. Any __thread access in this code path writes through __tls_base=0,
+// landing in the data section and corrupting unrelated state (manifested as
+// downstream EISDIR/exit-21 errors during cargo→rustc subprocess spawn).
+// Per Linux glibc convention: allocator instrumentation must not depend on
+// TLS. Re-entrancy is handled by atomic CAS; thread identity comes from
+// __wasi_thread_id (a syscall, bootstrap-safe).
 
 static unsigned int firebox_trace_mask = FIREBOX_TRACE_TRAP;
 static int firebox_trace_fd = 2; // stderr
 static unsigned long long firebox_trace_start_ns = 0;
-static FBX_TLS int firebox_trace_in_emit = 0;
-static FBX_TLS unsigned int firebox_trace_tid = 0;
-static unsigned int firebox_trace_next_tid = 1;
+// firebox#320: re-entrancy guard MUST NOT use __thread. The instrumentation
+// fires from inside aligned_alloc(), which is itself called by __wasix_init_tls
+// — the function that sets up TLS. Reading/writing __thread variables before
+// TLS is initialized writes through __tls_base=0, landing at low data-section
+// addresses and corrupting whatever lives there (manifested as exit 21 EISDIR
+// downstream during cargo→rustc subprocess startup).
+//
+// Linux glibc solves this same class of bootstrap-order bug by keeping
+// allocator-internal state non-TLS (lock primitive + per-arena pointer); we
+// follow the same convention. Cost: a single atomic compare-and-swap per emit
+// (already on a "should we trace" branch). Recursion within the same thread
+// returns immediately (CAS fails). Concurrent emits from different threads
+// serialize through the same flag — a debug-feature trade-off where we
+// occasionally miss interleaved events but never corrupt program state.
+static int firebox_trace_in_emit = 0;
 
 static unsigned long long firebox_trace_now_ns(void) {
     struct timespec ts;
@@ -195,18 +211,33 @@ static void firebox_trace_init(void) {
     }
 }
 
+// firebox#320: tid is now the WASIX thread ID via __wasi_thread_id syscall.
+// Bootstrap-safe (no TLS dependency). Replaces the __thread firebox_trace_tid
+// that tripped during pre-TLS-init alloc events fired from inside
+// __wasix_init_tls's own aligned_alloc.
+#include <wasi/api.h>
+
 static unsigned int firebox_trace_my_tid(void) {
-    if (firebox_trace_tid == 0) {
-        firebox_trace_tid = __atomic_fetch_add(&firebox_trace_next_tid, 1,
-                                                __ATOMIC_RELAXED);
-    }
-    return firebox_trace_tid;
+    __wasi_tid_t tid = 0;
+    (void)__wasi_thread_id(&tid);  // ignore errno; tid stays 0 on failure
+    return (unsigned int)tid;
 }
 
 static void firebox_trace_emit(unsigned int subsys, const char* component,
                                 const char* fmt, ...) {
-    if (firebox_trace_in_emit) return;
-    firebox_trace_in_emit = 1;
+    // firebox#320: bootstrap-safe re-entrancy guard via atomic CAS instead of
+    // __thread. CAS fails if any thread is already in emit; that thread (or
+    // any other) returns immediately. Recursion within the same thread also
+    // returns. The cost is occasional missed events under multi-thread
+    // contention — acceptable for a debug feature, and far better than the
+    // pre-TLS-init memory corruption that __thread caused.
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&firebox_trace_in_emit, &expected, 1,
+                                      0,  // weak=false
+                                      __ATOMIC_ACQUIRE,
+                                      __ATOMIC_RELAXED)) {
+        return;
+    }
 
     char buf[512];
     unsigned long long now = firebox_trace_now_ns() - firebox_trace_start_ns;
@@ -218,7 +249,7 @@ static void firebox_trace_emit(unsigned int subsys, const char* component,
                      firebox_trace_subsys_name(subsys), component,
                      secs, us, firebox_trace_my_tid());
     if (n < 0 || (size_t)n >= sizeof(buf)) {
-        firebox_trace_in_emit = 0;
+        __atomic_store_n(&firebox_trace_in_emit, 0, __ATOMIC_RELEASE);
         return;
     }
 
@@ -226,7 +257,10 @@ static void firebox_trace_emit(unsigned int subsys, const char* component,
     va_start(ap, fmt);
     int body = vsnprintf(buf + n, sizeof(buf) - (size_t)n, fmt, ap);
     va_end(ap);
-    if (body < 0) { firebox_trace_in_emit = 0; return; }
+    if (body < 0) {
+        __atomic_store_n(&firebox_trace_in_emit, 0, __ATOMIC_RELEASE);
+        return;
+    }
 
     size_t total = (size_t)n + (size_t)body;
     if (total >= sizeof(buf)) total = sizeof(buf) - 1;
@@ -239,7 +273,7 @@ static void firebox_trace_emit(unsigned int subsys, const char* component,
     // (which would itself malloc and re-enter us).
     (void)write(firebox_trace_fd, buf, total);
 
-    firebox_trace_in_emit = 0;
+    __atomic_store_n(&firebox_trace_in_emit, 0, __ATOMIC_RELEASE);
 }
 
 #define FIREBOX_TRACE(subsys, component, ...) do { \
