@@ -48,6 +48,23 @@
 #define F_DUPFD (5)
 #define F_DUPFD_CLOEXEC (6)
 
+/*
+ * POSIX advisory record locks (Firebox extension, issue #243).
+ *
+ * Routed at runtime to the WASIX import `__wasix_fd_lock_range`. The
+ * runtime maintains a per-(inode, pid) lock table; closing any fd on
+ * the inode releases this process's locks on it. F_SETLKW currently
+ * fails with ENOTSUP on contention (no wait queue yet); callers should
+ * use F_SETLK and retry-with-backoff if they need blocking semantics.
+ */
+#define F_SETLK   (7)
+#define F_GETLK   (8)
+#define F_SETLKW  (9)
+
+#define F_RDLCK   (0)
+#define F_WRLCK   (1)
+#define F_UNLCK   (2)
+
 #define FD_CLOEXEC (1)
 
 #define AT_EACCESS          (0x0)

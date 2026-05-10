@@ -1388,3 +1388,51 @@ __wasi_errno_t __wasix_path_mknod(
     return (uint16_t) ret;
 }
 
+// Firebox extension: advisory file locks (Firebox issue #243).
+// These are not part of the upstream WASIX spec but are provided by
+// Firebox's patched wasmer runtime (jmfirth/wasmer#firebox-patches).
+//
+// fd_lock implements BSD flock(2) semantics; fd_lock_range implements
+// POSIX fcntl(F_SETLK)/F_GETLK/F_SETLKW semantics. The runtime maintains
+// a process-wide lock table keyed by inode and pid. See the Rust-side
+// implementation at lib/wasix/src/fs/file_lock.rs in the wasmer fork
+// for the table semantics; the headers in <sys/file.h> and <fcntl.h>
+// expose the constants the wasix runtime expects in `op` / `l_type` /
+// `whence` here.
+
+int32_t __imported_wasix_32v1_fd_lock(int32_t arg0, int32_t arg1) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("fd_lock")
+));
+
+__wasi_errno_t __wasix_fd_lock(
+    __wasi_fd_t fd,
+    uint32_t op
+){
+    int32_t ret = __imported_wasix_32v1_fd_lock((int32_t) fd, (int32_t) op);
+    return (uint16_t) ret;
+}
+
+int32_t __imported_wasix_32v1_fd_lock_range(
+    int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3,
+    int64_t arg4, int64_t arg5
+) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("fd_lock_range")
+));
+
+__wasi_errno_t __wasix_fd_lock_range(
+    __wasi_fd_t fd,
+    uint32_t op,
+    uint32_t l_type,
+    uint32_t whence,
+    int64_t start,
+    int64_t len
+){
+    int32_t ret = __imported_wasix_32v1_fd_lock_range(
+        (int32_t) fd, (int32_t) op, (int32_t) l_type, (int32_t) whence,
+        start, len
+    );
+    return (uint16_t) ret;
+}
+

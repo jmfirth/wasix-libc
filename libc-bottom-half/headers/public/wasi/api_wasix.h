@@ -5391,6 +5391,59 @@ __wasi_errno_t __wasix_path_mknod(
     uint64_t dev
 ) __attribute__((__warn_unused_result__));
 
+/**
+ * Apply or release a BSD-style advisory file lock (`flock(2)`).
+ * Note: this is a Firebox extension (issue #243), not part of upstream
+ * WASIX. The runtime maintains a process-wide advisory lock table and
+ * releases this process's locks on the inode whenever any of its fds
+ * referring to that inode is closed.
+ *
+ * `op` is the bitwise OR of one of LOCK_SH/LOCK_EX/LOCK_UN with an
+ * optional LOCK_NB. Without LOCK_NB the runtime currently returns
+ * ENOTSUP (no wait queue yet); with LOCK_NB a contended acquisition
+ * returns EAGAIN/EWOULDBLOCK.
+ */
+__wasi_errno_t __wasix_fd_lock(
+    /** The open file descriptor to lock. */
+    __wasi_fd_t fd,
+    /** Operation: LOCK_SH | LOCK_EX | LOCK_UN, optionally OR'd with LOCK_NB. */
+    uint32_t op
+) __attribute__((__warn_unused_result__));
+
+/**
+ * Apply, release, or test a POSIX-style advisory record lock
+ * (`fcntl(F_SETLK)` / `F_SETLKW` / `F_GETLK`).
+ *
+ * Firebox extension for issue #243 — not part of upstream WASIX.
+ * The runtime keys lock entries on (inode, pid) and releases all of a
+ * pid's locks on the inode when any fd referring to it is closed
+ * (POSIX `fcntl` semantics).
+ *
+ * `op` selects the operation:
+ *   0 — F_SETLK   (try to acquire / release; non-blocking)
+ *   1 — F_SETLKW  (blocking variant; currently returns ENOTSUP on
+ *                  conflict — no wait queue yet)
+ *   2 — F_GETLK   (probe for conflict; does not acquire)
+ *
+ * `l_type` is F_RDLCK (0), F_WRLCK (1), or F_UNLCK (2).
+ * `whence` is SEEK_SET (0), SEEK_CUR (1), or SEEK_END (2) for `start`.
+ * `len` of 0 means "to end of file" (POSIX convention).
+ */
+__wasi_errno_t __wasix_fd_lock_range(
+    /** The open file descriptor to lock. */
+    __wasi_fd_t fd,
+    /** Operation code: 0=F_SETLK, 1=F_SETLKW, 2=F_GETLK. */
+    uint32_t op,
+    /** Lock type: 0=F_RDLCK, 1=F_WRLCK, 2=F_UNLCK. */
+    uint32_t l_type,
+    /** Whence for `start`: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END. */
+    uint32_t whence,
+    /** Byte offset of the lock range, relative to `whence`. */
+    int64_t start,
+    /** Length of the lock range; 0 means "to end of file". */
+    int64_t len
+) __attribute__((__warn_unused_result__));
+
 #ifdef __cplusplus
 }
 #endif
