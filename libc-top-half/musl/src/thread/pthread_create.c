@@ -28,39 +28,15 @@ weak_alias(dummy_0, __dl_thread_cleanup);
 weak_alias(dummy_0, __membarrier_init);
 #endif
 
-static int tl_lock_count;
-static int tl_lock_waiters;
-
-void __tl_lock(void)
-{
-	int tid = __pthread_self()->tid;
-	int val = __thread_list_lock;
-	if (val == tid) {
-		tl_lock_count++;
-		return;
-	}
-	while ((val = a_cas(&__thread_list_lock, 0, tid)))
-		__wait(&__thread_list_lock, &tl_lock_waiters, val, 0);
-}
-
-void __tl_unlock(void)
-{
-	if (tl_lock_count) {
-		tl_lock_count--;
-		return;
-	}
-	a_store(&__thread_list_lock, 0);
-	if (tl_lock_waiters) __wake(&__thread_list_lock, 1, 0);
-}
-
-void __tl_sync(pthread_t td)
-{
-	a_barrier();
-	int val = __thread_list_lock;
-	if (!val) return;
-	__wait(&__thread_list_lock, &tl_lock_waiters, val, 0);
-	if (tl_lock_waiters) __wake(&__thread_list_lock, 1, 0);
-}
+/*
+ * firebox R7 (Ruby M2): __tl_lock / __tl_unlock / __tl_sync (and their
+ * shared state tl_lock_count + tl_lock_waiters) live in
+ * src/thread/tl_lock.c so that fork() consumers can resolve __tl_lock
+ * without pulling pthread_create.o (and, transitively, the
+ * wasi_thread_start.o reference that requires the -pthread-only
+ * synthesized __wasm_init_tls). See tl_lock.c's header comment for
+ * the full root-cause trace.
+ */
 
 _Noreturn void __pthread_exit(void *result)
 {
