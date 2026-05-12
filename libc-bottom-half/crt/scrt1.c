@@ -28,3 +28,25 @@ __attribute__((export_name("__wasix_init_tls"))) size_t __wasix_init_tls(void)
     __wasm_init_tls(tls);
     return (size_t)tls;
 }
+
+// firebox#350 Phase 3.1: host-coordinated TLS arena variant.
+//
+// `__wasix_init_tls` (above) is the legacy path: it calls `aligned_alloc` from
+// inside the side module's pre-TLS code path, which races with concurrent
+// dlmalloc activity from sibling instance groups in shared linear memory (the
+// architectural class behind #320 / zerotrie corruption / proc-macro flakes).
+//
+// `__wasix_init_tls_with_buffer` takes a pre-allocated buffer from the host
+// and simply runs the linker-synthesized `__wasm_init_tls` against it. The
+// host (wasmer linker) pre-reserves a TLS arena via `memory.grow` at side-
+// module load time, hands a slot to each instance group, and invokes this
+// function. dlmalloc is never on the stack during TLS init, so the race is
+// eliminated by construction.
+//
+// Mirrors the pthread_create + wasi_thread_start split for main-module TLS:
+// the parent allocates, the child only initializes.
+__attribute__((export_name("__wasix_init_tls_with_buffer")))
+void __wasix_init_tls_with_buffer(void *tls_buffer)
+{
+    __wasm_init_tls(tls_buffer);
+}
