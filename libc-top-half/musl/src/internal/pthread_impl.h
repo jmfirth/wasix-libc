@@ -216,6 +216,15 @@ hidden int __wasilibc_futex_wait(volatile void *, int, int, int64_t);
 hidden int __timedwait(volatile int *, int, clockid_t, const struct timespec *, int);
 hidden int __timedwait_cp(volatile int *, int, clockid_t, const struct timespec *, int);
 hidden void __wait(volatile int *, volatile int *, int, int);
+/* Firebox #384: when __FIREBOX_TRACE_MUSL_LOCK__ is defined, route
+ * __wake through the out-of-line traced variant in __wake_trace.c so
+ * that every futex wake is observable in the trace stream. The traced
+ * variant is identical to the inline below modulo the FIREBOX_LOCK_TRACE
+ * calls. When __FIREBOX_TRACE_MUSL_LOCK__ is NOT defined, this inline
+ * is identical to upstream and zero-cost. */
+#ifdef __FIREBOX_TRACE_MUSL_LOCK__
+hidden void __wake(volatile void *addr, int cnt, int priv);
+#else
 static inline void __wake(volatile void *addr, int cnt, int priv)
 {
 	if (priv) priv = FUTEX_PRIVATE;
@@ -228,6 +237,7 @@ static inline void __wake(volatile void *addr, int cnt, int priv)
 	//__builtin_wasm_memory_atomic_notify((int*)addr, cnt);
 #endif
 }
+#endif
 static inline void __futexwait(volatile void *addr, int val, int priv)
 {
 #ifdef __wasilibc_unmodified_upstream

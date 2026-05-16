@@ -67,6 +67,7 @@
  */
 
 #include "pthread_impl.h"
+#include "firebox_lock_trace.h"
 
 /* The thread-list lock state. tl_lock_count is a per-thread reentrance
  * counter; tl_lock_waiters tracks how many threads are blocked. Both
@@ -79,22 +80,36 @@ void __tl_lock(void)
 {
 	int tid = __pthread_self()->tid;
 	int val = __thread_list_lock;
+	/* Firebox #384: trace entry. The futex_wait{expected=2} from #380
+	 * could be a tid==2 stored in __thread_list_lock — the strongest
+	 * H-δ.4 candidate. The addr field will be `&__thread_list_lock`
+	 * which is a fixed BSS address; matching against the trace's
+	 * futex_idx pins this hypothesis. */
+	FIREBOX_LOCK_TRACE("tl_lock_enter", "__tl_lock", &__thread_list_lock, val);
 	if (val == tid) {
 		tl_lock_count++;
+		FIREBOX_LOCK_TRACE("tl_lock_exit", "__tl_lock_reentry", &__thread_list_lock, val);
 		return;
 	}
-	while ((val = a_cas(&__thread_list_lock, 0, tid)))
+	while ((val = a_cas(&__thread_list_lock, 0, tid))) {
+		FIREBOX_LOCK_TRACE("tl_lock_wait_pre", "__tl_lock", &__thread_list_lock, val);
 		__wait(&__thread_list_lock, &tl_lock_waiters, val, 0);
+		FIREBOX_LOCK_TRACE("tl_lock_wait_post", "__tl_lock", &__thread_list_lock, __thread_list_lock);
+	}
+	FIREBOX_LOCK_TRACE("tl_lock_exit", "__tl_lock_acquired", &__thread_list_lock, __thread_list_lock);
 }
 
 void __tl_unlock(void)
 {
+	FIREBOX_LOCK_TRACE("tl_unlock_enter", "__tl_unlock", &__thread_list_lock, __thread_list_lock);
 	if (tl_lock_count) {
 		tl_lock_count--;
+		FIREBOX_LOCK_TRACE("tl_unlock_exit", "__tl_unlock_reentry", &__thread_list_lock, __thread_list_lock);
 		return;
 	}
 	a_store(&__thread_list_lock, 0);
 	if (tl_lock_waiters) __wake(&__thread_list_lock, 1, 0);
+	FIREBOX_LOCK_TRACE("tl_unlock_exit", "__tl_unlock_released", &__thread_list_lock, __thread_list_lock);
 }
 
 void __tl_sync(pthread_t td)
@@ -102,6 +117,8 @@ void __tl_sync(pthread_t td)
 	a_barrier();
 	int val = __thread_list_lock;
 	if (!val) return;
+	FIREBOX_LOCK_TRACE("tl_sync_wait_pre", "__tl_sync", &__thread_list_lock, val);
 	__wait(&__thread_list_lock, &tl_lock_waiters, val, 0);
+	FIREBOX_LOCK_TRACE("tl_sync_wait_post", "__tl_sync", &__thread_list_lock, __thread_list_lock);
 	if (tl_lock_waiters) __wake(&__thread_list_lock, 1, 0);
 }
