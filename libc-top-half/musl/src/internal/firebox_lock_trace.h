@@ -1,5 +1,22 @@
 /*
- * Firebox #384 — printf instrumentation for musl lock primitives.
+ * Firebox #384 + #398 — printf instrumentation for musl lock primitives.
+ *
+ * Update for #398 (2026-05-16)
+ * ============================
+ * G.1 RCA (#396) recommended `__builtin_return_address(0)` to capture the
+ * wasm-side caller's PC at __wait entry. Empirically falsified — clang
+ * for wasm32 rejects `__builtin_return_address(0)` with a hard compile
+ * error ("Non-Emscripten WebAssembly hasn't implemented
+ * __builtin_return_address"). Same limitation already documented in
+ * `dlmalloc/src/dlmalloc.c:311` for the FIREBOX_TRACE alloc path.
+ *
+ * Equivalent-power substitute: capture the caller's `__FILE__:__LINE__`
+ * at every musl __wait / __futexwait call site via macro expansion.
+ * Each musl primitive that calls __wait (pthread_cond_timedwait::lock,
+ * __tl_lock, pthread_create, pthread_barrier_wait, etc.) becomes
+ * identifiable from the trace stream by its exact source location.
+ * See FIREBOX_LOCK_TRACE_CALLER below + pthread_impl.h's __wait /
+ * __futexwait macro shims.
  *
  * Why this exists
  * ===============
@@ -92,12 +109,52 @@ static inline void firebox_lock_trace_emit(const char *op, const char *tag,
     }
 }
 
+/* Firebox #398: trace emit with caller source location.
+ *
+ * Used by the __wait / __futexwait macro shims (pthread_impl.h) to
+ * record the EXACT __FILE__/__LINE__ where the wait was issued —
+ * empirically substitutes for __builtin_return_address(0) which clang
+ * refuses to lower for non-Emscripten wasm32 targets.
+ *
+ * `caller_file` / `caller_line` are captured at the macro expansion
+ * point (i.e. the call site of __wait / __futexwait inside e.g.
+ * pthread_cond_timedwait.c), not at __wait.c's own __FILE__/__LINE__.
+ */
+static inline void firebox_lock_trace_emit_caller(const char *op,
+                                                   const char *tag,
+                                                   volatile const void *addr,
+                                                   int val,
+                                                   const char *caller_file,
+                                                   int caller_line)
+{
+    char buf[384];
+    int n = snprintf(buf, sizeof(buf),
+        "[firebox-lock-trace] %s pid=%d addr=%p val=%d site=%s caller=%s:%d\n",
+        op, (int)getpid(), (const void *)addr, val, tag,
+        caller_file ? caller_file : "?", caller_line);
+    if (n > 0) {
+        if ((size_t)n >= sizeof(buf)) n = sizeof(buf) - 1;
+        (void)write(2, buf, (size_t)n);
+    }
+}
+
 #define FIREBOX_LOCK_TRACE(op, tag, addr, val) \
     firebox_lock_trace_emit((op), (tag), (addr), (val))
+
+/* Firebox #398: trace emit with caller's __FILE__/__LINE__.
+ *
+ * Always call with literal __FILE__/__LINE__ at the call site (or via
+ * the __wait / __futexwait macros which forward them transparently).
+ * Adds ~80 bytes per event to the trace stream when active. */
+#define FIREBOX_LOCK_TRACE_CALLER(op, tag, addr, val, caller_file, caller_line) \
+    firebox_lock_trace_emit_caller((op), (tag), (addr), (val), \
+                                   (caller_file), (caller_line))
 
 #else  /* __FIREBOX_TRACE_MUSL_LOCK__ not defined */
 
 #define FIREBOX_LOCK_TRACE(op, tag, addr, val) ((void)0)
+#define FIREBOX_LOCK_TRACE_CALLER(op, tag, addr, val, caller_file, caller_line) \
+    ((void)0)
 
 #endif
 

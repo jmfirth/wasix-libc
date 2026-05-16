@@ -4,6 +4,14 @@
 #include "assert.h"
 #endif
 
+/* Firebox #398: pthread_impl.h installs a `__wait` function-style macro
+ * when __FIREBOX_TRACE_MUSL_LOCK__ is set, which would otherwise rewrite
+ * this TU's own definition. Undefine after the header to recover the
+ * bare function symbol. */
+#ifdef __FIREBOX_TRACE_MUSL_LOCK__
+#undef __wait
+#endif
+
 #ifndef __wasilibc_unmodified_upstream
 // Use WebAssembly's `wait` instruction to implement a futex. Note that `op` is
 // unused but retained as a parameter to match the original signature of the
@@ -69,3 +77,27 @@ void __wait(volatile int *addr, volatile int *waiters, int val, int priv)
 	if (waiters) a_dec(waiters);
 	FIREBOX_LOCK_TRACE("wait_exit", "__wait_value_changed", addr, *addr);
 }
+
+#ifdef __FIREBOX_TRACE_MUSL_LOCK__
+/* Firebox #398: caller-source-location-aware trampoline.
+ *
+ * Installed by pthread_impl.h's __wait / __futexwait macros under the
+ * trace gate. Emits a `wait_caller` event carrying the caller's
+ * __FILE__/__LINE__ BEFORE entering the bare __wait body. The bare
+ * __wait body still emits its own wait_enter / wait_futex_pre /
+ * wait_futex_post / wait_exit events; correlating them with the
+ * preceding wait_caller event (same pid, same addr, same val) pins
+ * the exact musl primitive that issued the wait.
+ *
+ * Cost: one extra trace line per __wait entry when active. The bare
+ * __wait reference (after the #undef above) is the function symbol, so
+ * this is one direct call. */
+void __wait_traced(volatile int *addr, volatile int *waiters,
+                   int val, int priv,
+                   const char *caller_file, int caller_line)
+{
+    FIREBOX_LOCK_TRACE_CALLER("wait_caller", "__wait_traced",
+                              addr, val, caller_file, caller_line);
+    __wait(addr, waiters, val, priv);
+}
+#endif

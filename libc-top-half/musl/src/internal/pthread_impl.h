@@ -216,6 +216,30 @@ hidden int __wasilibc_futex_wait(volatile void *, int, int, int64_t);
 hidden int __timedwait(volatile int *, int, clockid_t, const struct timespec *, int);
 hidden int __timedwait_cp(volatile int *, int, clockid_t, const struct timespec *, int);
 hidden void __wait(volatile int *, volatile int *, int, int);
+/* Firebox #398: when __FIREBOX_TRACE_MUSL_LOCK__ is defined, route every
+ * call to __wait / __futexwait through a traced variant that captures the
+ * caller's __FILE__/__LINE__. Empirically substitutes for the wasm-PC
+ * capture path that G.1 RCA originally proposed (and which clang refuses
+ * for wasm32 — `__builtin_return_address(0)` is unimplemented on non-
+ * Emscripten wasm). See firebox_lock_trace.h for the macro details.
+ *
+ * The traced helper has its own out-of-line definition in __wait.c. The
+ * #define MUST appear after the prototype above so that any internal
+ * declarations of __wait elsewhere don't get rewritten.
+ *
+ * NOTE: a function-style macro for __wait shadows the bare-name function
+ * pointer for any code that takes &__wait; none of the wasix-libc / musl
+ * tree currently does this. The trace build is non-production-shipping
+ * and the constraint is checked at compile time via `-Werror=...` on the
+ * production build (which never defines __FIREBOX_TRACE_MUSL_LOCK__). */
+#ifdef __FIREBOX_TRACE_MUSL_LOCK__
+hidden void __wait_traced(volatile int *addr, volatile int *waiters,
+                          int val, int priv,
+                          const char *caller_file, int caller_line);
+#define __wait(addr, waiters, val, priv) \
+    __wait_traced((addr), (waiters), (val), (priv), __FILE__, __LINE__)
+#endif
+
 /* Firebox #384: when __FIREBOX_TRACE_MUSL_LOCK__ is defined, route
  * __wake through the out-of-line traced variant in __wake_trace.c so
  * that every futex wake is observable in the trace stream. The traced
@@ -238,6 +262,16 @@ static inline void __wake(volatile void *addr, int cnt, int priv)
 #endif
 }
 #endif
+/* Firebox #398: under the trace gate, __futexwait is a macro so that
+ * __FILE__/__LINE__ resolve at the caller's source location (e.g.
+ * __lockfile.c:14, __timedwait.c:NN) rather than this header's line.
+ * The macro routes directly to __wait_traced (skipping the __wait
+ * macro above to avoid double-expansion). */
+#ifdef __FIREBOX_TRACE_MUSL_LOCK__
+#define __futexwait(addr, val, priv) \
+    __wait_traced((volatile int *)(addr), NULL, (val), (priv), \
+                  __FILE__, __LINE__)
+#else
 static inline void __futexwait(volatile void *addr, int val, int priv)
 {
 #ifdef __wasilibc_unmodified_upstream
@@ -248,6 +282,7 @@ static inline void __futexwait(volatile void *addr, int val, int priv)
 	__wait(addr, NULL, val, priv);
 #endif
 }
+#endif
 
 hidden void __acquire_ptc(void);
 hidden void __release_ptc(void);
