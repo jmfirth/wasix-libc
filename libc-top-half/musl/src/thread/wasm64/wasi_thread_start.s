@@ -6,6 +6,8 @@
 	.globaltype	__tls_base, i64
 	.functype	__wasi_thread_start_C (i64, i64) -> ()
 	.functype	__wasm_init_tls (i64) -> ()
+	# firebox#456: see wasm32 variant for the full rationale.
+	.functype	__wasilibc_thread_escape_recover () -> ()
 
 	.hidden	wasi_thread_start
 	.globl	wasi_thread_start
@@ -29,5 +31,9 @@ wasi_thread_start:
 	local.get   0  # tid
 	local.get   1  # start_arg
 	call __wasi_thread_start_C
+
+	# firebox#456: defensive recovery from asyncify escape; see
+	# wasm32 variant for full rationale.
+	call __wasilibc_thread_escape_recover
 
 	end_function

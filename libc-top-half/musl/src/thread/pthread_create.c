@@ -290,6 +290,99 @@ hidden void *__dummy_reference = wasi_thread_start;
 
 extern void __set_tp(uintptr_t p);
 
+/*
+ * firebox #456: defensive recovery from a Binaryen-asyncify escape on
+ * thread teardown.
+ *
+ * Symptom (firebox#456 / #444-residual / #380 H-delta.1): a worker
+ * thread's wasi_thread_start export returns to the host with Ok([])
+ * while __asyncify_state == 1 (Unwinding), instead of trapping
+ * WasiError::ThreadExit via __wasi_thread_exit. The joiner futex on
+ * &self->detach_state is never woken, and pthread_join blocks
+ * forever -- process deadlock.
+ *
+ * Root cause class (per Phase 1 host-side asyncify-state tracer in
+ * the firebox-456-asyncify-state-tracer wasmer fork): some function
+ * on the worker thread teardown call chain -- which on Ruby includes
+ * rb_wasm_rt_start and the other ruby.wasm asyncify catchers --
+ * initiates a guest-managed asyncify unwind (asyncify_start_unwind)
+ * whose catcher is missed by the call-chain return. The unwind
+ * propagates back up through every instrumented frame as the
+ * asyncify state==1 "skip body, return to caller" epilogue, and
+ * finally escapes the wasi_thread_start export. The host call_wasm
+ * loop sees Ok([]) plus no on_called callback registered and
+ * propagates the corrupt return. See
+ *   work/tasks/456-*\/reports/2026-05-22-phase1-asyncify-state-tracer-findings.md
+ * for the evidence and
+ *   class_lesson_thread_teardown_via_guest_asyncify_escape.md
+ * for the class lesson.
+ *
+ * Fix (Phase 2, Path B.1): defensive trap at the wasi_thread_start
+ * export-return boundary. This function is invoked from
+ * wasi_thread_start.s after __wasi_thread_start_C returns. In
+ * normal flow control never reaches here -- __pthread_exit is
+ * _Noreturn and terminates with for(;;) __wasi_thread_exit(0), so
+ * any return from __wasi_thread_start_C is by definition an
+ * asyncify escape.
+ *
+ * The recovery:
+ *  1. Call asyncify_stop_unwind to drain the state machine back to
+ *     Normal (state := 0). MUST happen first: without it, every
+ *     subsequent function call would itself execute under
+ *     asyncify-state==1 (skipping function bodies and propagating
+ *     the escape further). Note __asyncify_data still points at
+ *     the buffer the guest-side start_unwind was given, so the
+ *     stop_unwind stack-validity check operates on a fresh buffer.
+ *  2. Wake the joiner futex (a_store(&self->detach_state,
+ *     DT_EXITED), then __wake). This closes the orphan that is the
+ *     actual process-level symptom of #456.
+ *  3. Trap via __wasi_thread_exit(0). The host
+ *     set_status_finished path runs and the worker exits cleanly
+ *     from the host perspective.
+ *
+ * Why we do NOT walk the robust mutex list or run TSD destructors:
+ * the escape call chain is corrupted -- robust-list invariants may
+ * be partially-violated mid-iteration (e.g. a half-updated head
+ * pointer from a partial __pthread_exit run pre-escape). Walking a
+ * stale list risks SEGV; the worst-case correctness cost is a
+ * leaked mutex on a thread that is terminating anyway, which is
+ * preferable to crashing the process. TSD destructors are skipped
+ * for the same reason. The joiner wake is the only teardown step
+ * that is necessary to break the deadlock.
+ *
+ * This helper MUST be on the asyncify-removelist in every threaded
+ * package build (see packages/ruby/build.sh Step 4a-asyncify-imports
+ * and packages/python/build.sh if Python ever adds an asyncify
+ * removelist). If it is NOT on the removelist, Binaryen instruments
+ * it, and the state==1 epilogue inside this body would skip the
+ * very code needed to break the escape. The same applies to
+ * wasi_thread_start itself, which must also be on the removelist
+ * so the call to this helper is reached at all.
+ */
+__attribute__((__import_module__("asyncify"),
+               __import_name__("stop_unwind")))
+extern void __firebox_456_asyncify_stop_unwind(void);
+
+_Noreturn hidden void __wasilibc_thread_escape_recover(void)
+{
+    // Step 1: drain the asyncify state machine. After this returns
+    // __asyncify_state == 0 (Normal). Calls below run on instrumented
+    // frames whose state==0 entry-discriminator lets the body execute.
+    __firebox_456_asyncify_stop_unwind();
+
+    // Step 2: wake the joiner futex. `__pthread_self()` is valid here
+    // because TLS was set up by `wasi_thread_start.s`'s
+    // `__wasm_init_tls` call (which runs BEFORE the escape can occur).
+    pthread_t self = __pthread_self();
+    a_store(&self->detach_state, DT_EXITED);
+    __wake(&self->detach_state, 1, 1);
+
+    // Step 3: terminate via the WASIX thread-exit trap. The host's
+    // `WasiError::ThreadExit` handler runs `set_status_finished`,
+    // which the rest of the runtime expects on a worker exit.
+    for (;;) __wasi_thread_exit(0);
+}
+
 hidden void __wasi_thread_start_C(int tid, void *p)
 {
 	struct start_args *args = p;
