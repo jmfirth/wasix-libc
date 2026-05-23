@@ -16,6 +16,50 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
+// POSIX mmap(2) requires returned addresses to be aligned to
+// sysconf(_SC_PAGESIZE). On WebAssembly the architectural page is 65536
+// bytes but the POSIX page size every Linux-targeted port assumes is 4096
+// — that is what every guest (Blink's x86-64 page-table packing, JIT
+// engines that W^X-toggle code pages, busybox/perl/lua/R as latent
+// witnesses) actually asserts on.
+//
+// Pre-fix history (firebox#458 Phase 1.5, 2026-05-23): mmap used
+// `malloc(length + sizeof(struct map))` and returned `map + 1`. wasm32
+// `malloc` is 16-byte aligned and the +sizeof(struct map) (24-byte) skip
+// guaranteed the returned pointer was *never* page-aligned. Blink's
+// `AllocateAnonymousPage` (`blink/memorymalloc.c:463`) asserts
+// `!(real & ~PAGE_TA)` with PAGE_TA = 0x0000fffffffff000 and trapped on
+// the first guest page-table allocation. Class lesson:
+// class_lesson_wasix_libc_emulated_mmap_unaligned.
+//
+// Layout after the fix (guard-page-prefix header):
+//
+//     base                                     base + WASIX_MMAN_PAGE_SIZE
+//     |                                         |
+//     v                                         v
+//     +-----------------------------------------+--------- ... ---------+
+//     | struct map header  | unused padding ... | user memory (length)  |
+//     +-----------------------------------------+--------- ... ---------+
+//     ^                                         ^
+//     | aligned_alloc(4096, ...) returns here   | returned to caller
+//
+// We allocate `aligned_alloc(WASIX_MMAN_PAGE_SIZE, length +
+// WASIX_MMAN_PAGE_SIZE)`. The first page holds the header; the remaining
+// bytes are the user-visible mapping. The returned pointer is `base +
+// WASIX_MMAN_PAGE_SIZE`, which is page-aligned because base is.
+// Cost: one wasted page (4 KiB) per mmap — accepted as the price of
+// POSIX compliance for the emulated path.
+//
+// munmap()/msync() recover the header via
+// `(struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE)`. free() takes the
+// base pointer (= addr - page), which is exactly what aligned_alloc
+// returned. aligned_alloc lives in
+// libc-top-half/musl/src/malloc/mallocng/aligned_alloc.c — it does NOT
+// require the length argument to be a multiple of the alignment, so we
+// don't round up explicitly.
+
+#define WASIX_MMAN_PAGE_SIZE ((size_t)4096)
+
 struct map {
     int prot;
     int flags;
@@ -67,35 +111,42 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         return MAP_FAILED;
     }
 
-    // Check for integer overflow.
+    // Compute allocation size: user length plus one full prefix page for
+    // the header. Overflow-check before passing to aligned_alloc.
     size_t buf_len = 0;
-    if (__builtin_add_overflow(length, sizeof(struct map), &buf_len)) {
+    if (__builtin_add_overflow(length, WASIX_MMAN_PAGE_SIZE, &buf_len)) {
         errno = ENOMEM;
         return MAP_FAILED;
     }
 
-    // Allocate the memory.
-    struct map *map = malloc(buf_len);
-    if (!map) {
+    // Allocate page-aligned backing memory. The returned base IS the
+    // header location and (base + WASIX_MMAN_PAGE_SIZE) is the user-
+    // visible page-aligned mapping.
+    void *base = aligned_alloc(WASIX_MMAN_PAGE_SIZE, buf_len);
+    if (!base) {
         errno = ENOMEM;
         return MAP_FAILED;
     }
 
-    // Initialize the header.
+    // Initialize the header at the front of the prefix page.
+    struct map *map = (struct map *)base;
     map->prot = prot;
     map->flags = flags;
     map->offset = offset;
     map->length = length;
 
+    // User-visible mapping starts one page past the header. Page-aligned
+    // by construction (base is page-aligned per aligned_alloc contract).
+    addr = (char *)base + WASIX_MMAN_PAGE_SIZE;
+
     // Initialize the main memory buffer, either with the contents of a file,
     // or with zeros.
-    addr = map + 1;
     if ((flags & MAP_ANON) == 0) {
         int new_fd = dup(fd);
 
         if (new_fd < 0) {
             errno = EINVAL;
-            free(map);
+            free(base);
 
             return NULL;
         }
@@ -125,7 +176,10 @@ void *mmap(void *addr, size_t length, int prot, int flags,
 }
 
 int munmap(void *addr, size_t length) {
-    struct map *map = (struct map *)addr - 1;
+    // Recover the header that lives one page below the user address.
+    // Symmetric to the mmap return: addr == base + WASIX_MMAN_PAGE_SIZE.
+    void *base = (char *)addr - WASIX_MMAN_PAGE_SIZE;
+    struct map *map = (struct map *)base;
 
     // We don't support partial munmapping.
     if (map->length != length) {
@@ -143,15 +197,18 @@ int munmap(void *addr, size_t length) {
         close(map->fd);
     }
 
-    // Release the memory.
-    free(map);
+    // Release the memory. free() must see the same pointer aligned_alloc
+    // returned (== base), not the offset user pointer.
+    free(base);
 
     // Success!
     return 0;
 }
 
 int msync (void *addr, size_t length, int flags) {
-    struct map *map = (struct map *)addr - 1;
+    // Header recovery: see munmap() for layout. addr is page-aligned by
+    // construction; the header sits exactly one page below it.
+    struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
     size_t map_flags = map->flags;
     off_t map_offset = map->offset;
     size_t map_length = map->length;
