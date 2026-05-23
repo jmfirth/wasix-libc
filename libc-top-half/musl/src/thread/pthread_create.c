@@ -38,6 +38,46 @@ weak_alias(dummy_0, __membarrier_init);
  * the full root-cause trace.
  */
 
+#ifndef __wasilibc_unmodified_upstream
+/*
+ * firebox#456 Phase 9 — sweep-wake every still-held __lock the current
+ * thread has registered. Called from BOTH __pthread_exit termination
+ * paths (DT_DETACHED branch + main path) immediately before
+ * __wasi_thread_exit, so no orphan futex on a stack-allocated
+ * __lock-word can survive the asyncify-escape teardown class.
+ *
+ * Per-entry wake count is INT_MAX (= __wake's cnt<0 convention for
+ * "wake every waiter") because we don't know how many waiters the
+ * orphaned lock has, and waking too many is correctness-neutral (the
+ * spurious wakeups just re-evaluate __futexwait's predicate and
+ * re-sleep). Waking too few would leave waiters orphaned and defeat
+ * the fix. priv=1 matches the __wake call inside __unlock.
+ *
+ * After the sweep, count is zeroed so a subsequent (impossible-but-
+ * cheap-to-defend) re-entry doesn't double-wake. The array slots
+ * are left as-is; they are unreachable once the count is zero.
+ *
+ * No-op when count is zero — the common case for a healthy thread
+ * that ran __pthread_exit through its normal control flow with every
+ * __lock matched by an __unlock. The fix is asymptotically free for
+ * healthy teardowns; the cost surfaces only when the bug is being
+ * mitigated.
+ *
+ * See struct pthread's firebox_held_locks block in pthread_impl.h,
+ * class lesson thread_teardown_via_guest_asyncify_escape, and
+ * work/tasks/459-pthread-exit-wake-emit-fix/.
+ */
+static void firebox_pthread_exit_sweep_wake(pthread_t self)
+{
+	unsigned n = self->firebox_held_locks_count;
+	for (unsigned i = 0; i < n; ++i) {
+		volatile int *addr = self->firebox_held_locks[i];
+		if (addr) __wake(addr, -1, 1);
+	}
+	self->firebox_held_locks_count = 0;
+}
+#endif
+
 _Noreturn void __pthread_exit(void *result)
 {
 	pthread_t self = __pthread_self();
@@ -166,6 +206,11 @@ _Noreturn void __pthread_exit(void *result)
 		// do it manually here
 		__tl_unlock();
 		free(self->map_base);
+		/* firebox#456 Phase 9 — wake any waiters on locks this thread
+		 * acquired but did not release through a normal __unlock
+		 * (e.g. because the asyncify-rewound continuation skipped the
+		 * release). DETACHED-exit path. */
+		firebox_pthread_exit_sweep_wake(self);
 		for (;;) __wasi_thread_exit(0);
 	}
 #endif
@@ -180,6 +225,12 @@ _Noreturn void __pthread_exit(void *result)
 	// __syscall(SYS_exit) would unlock the thread, list
 	// do it manually here
 	__tl_unlock();
+	/* firebox#456 Phase 9 — wake any waiters on locks this thread
+	 * acquired but did not release through a normal __unlock. Main
+	 * (JOINABLE) exit path; runs AFTER the joiner wake on
+	 * &self->detach_state above, so any waiter on this thread's
+	 * pthread_join is already woken via the canonical path. */
+	firebox_pthread_exit_sweep_wake(self);
 	for (;;) __wasi_thread_exit(0);
 #endif
 }
