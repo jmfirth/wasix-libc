@@ -101,6 +101,46 @@ struct pthread {
 	 * once a handler has run. volatile int so __futexwait / __wake see
 	 * a consistent address. */
 	volatile int sigsuspend_tick;
+	/* firebox#456 Phase 9 — per-thread held-lock array for the
+	 * sweep-wake fix to the wasi-libc __pthread_exit asyncify-escape
+	 * orphan-futex class.
+	 *
+	 * Background: the worker-thread teardown chain in __pthread_exit
+	 * goes through Binaryen-asyncify-instrumented basic blocks gated
+	 * on global.get __asyncify_state == 1 (Unwinding). A
+	 * guest-managed asyncify cycle (e.g. Ruby's rb_wasm_rt_start
+	 * Fiber driver) can land a rewound continuation that runs
+	 * __lock(acquire) but skips the matching __unlock(release) — the
+	 * lock-word futex is left at the locked-contended state (= 2 in
+	 * musl's encoding) with no matching __wake ever fired. A
+	 * subsequent acquirer's __futexwait blocks forever; the host's
+	 * AsyncifyPoller never re-polls because no wake notification ever
+	 * arrives. Witnesses: firebox#456 (Ruby Thread#join), #444
+	 * residual (Python proc-macro side-module M5.2), #380 H-δ.1 (Go).
+	 *
+	 * Sweep-wake fix shape: every successful __lock acquisition
+	 * records the lock-word address in this array; every __unlock
+	 * release removes it. __pthread_exit walks the array just before
+	 * __wasi_thread_exit and emits __wake(addr, INT_MAX, 1) for every
+	 * remaining entry — closing the orphan regardless of which side
+	 * of the asyncify state machine the teardown actually executed.
+	 *
+	 * 16 slots is empirically ample — the deepest measured __lock
+	 * nesting in any cluster witness (Ruby gem install, Python
+	 * proc-macro side-module, Go #380 H-δ.1) is 3. Overflow on
+	 * registration is silently ignored (the lock still operates
+	 * correctly; the sweep-wake guarantee weakens to "best effort
+	 * for the first 16 currently-held locks"), strictly better than
+	 * the pre-fix baseline of zero coverage. `_overflow` is a
+	 * monotonic counter for post-hoc inspection; if it ever becomes
+	 * non-zero in production traces, lift the cap.
+	 *
+	 * See class_lesson_thread_teardown_via_guest_asyncify_escape.md
+	 * and work/tasks/459-pthread-exit-wake-emit-fix/README.md. */
+#define __FIREBOX_HELD_LOCKS_CAP 16
+	volatile int *firebox_held_locks[__FIREBOX_HELD_LOCKS_CAP];
+	unsigned firebox_held_locks_count;
+	unsigned firebox_held_locks_overflow;
 #endif
 
 	/* Part 3 -- the positions of these fields relative to
