@@ -363,8 +363,93 @@ __attribute__((__import_module__("asyncify"),
                __import_name__("stop_unwind")))
 extern void __firebox_456_asyncify_stop_unwind(void);
 
+/* firebox#456 Phase 3a -- counter probe. The Phase 2 STOP-and-report
+ * left an unanswered question: the wasm disassembly shows an
+ * unconditional `call $__wasilibc_thread_escape_recover` from
+ * wasi_thread_start, both functions on the asyncify-removelist, yet
+ * the empirical trace still shows the deadlocking worker escaping
+ * with state==1 and result_tag=`ok_unit_ESCAPE` -- as if the call
+ * never fired. A destructive probe (helper body replaced with an
+ * immediate __wasi_thread_exit(0)) was inconclusive: it produced
+ * the same escape, but at this layer the destructive probe cannot
+ * distinguish "call never fires" from "call fires but the trap
+ * doesn't propagate to the host as we expect".
+ *
+ * This atomic counter survives every theory: every entry into
+ * __wasilibc_thread_escape_recover bumps it before any other work.
+ * The host can read it via the exported getter __firebox_456_get_recover_count
+ * (and/or the exported global) post-run:
+ *   - count == 0  -> the call truly is not firing. The fix layer is
+ *                    Binaryen (the removelist-caller -> removelist-
+ *                    callee continuation is being swallowed).
+ *   - count >  0  -> the call IS firing. The fix layer is helper-
+ *                    body sequencing (asyncify_stop_unwind / wake /
+ *                    __wasi_thread_exit shape is wrong).
+ *
+ * The counter and getter are exported via __attribute__((export_name(...)))
+ * + __attribute__((visibility("default"))); the host reads them through
+ * wasmer's instance.exports.get_global / get_function APIs after the
+ * repro completes (or, for a hang case, after the watchdog timeout).
+ *
+ * Remove after firebox#456 closes. See
+ * work/tasks/456-*\/reports/2026-05-23-phase3a-recover-counter-probe-*.md
+ * for the measurement.
+ */
+__attribute__((visibility("default")))
+_Atomic uint32_t __firebox_456_recover_count = 0;
+
+__attribute__((export_name("__firebox_456_get_recover_count")))
+uint32_t __firebox_456_get_recover_count(void)
+{
+    return atomic_load(&__firebox_456_recover_count);
+}
+
 _Noreturn hidden void __wasilibc_thread_escape_recover(void)
 {
+    // firebox#456 Phase 3a probe: FIRST instruction, before any other
+    // work. Measures "did the call reach this function" -- NOT "did
+    // the function complete its work" -- so the count is reliable
+    // even if a subsequent step (stop_unwind, wake, __wasi_thread_exit)
+    // is the failing one.
+    uint32_t prev = atomic_fetch_add(&__firebox_456_recover_count, 1);
+
+    // firebox#456 Phase 3a probe redundancy: in addition to the
+    // host-readable counter (above), emit a recognizable stderr line
+    // so a non-instrumented test harness (just `timeout firebox run
+    // ... 2>err.log`) can also detect the entry. Direct __wasi_fd_write
+    // (not fprintf/dprintf) because stdio may have been corrupted by
+    // the escape path -- a malloc'd FILE could be mid-mutation. The
+    // message text is grep-able from a captured stderr stream even
+    // if the watchdog killed the process before the host could read
+    // the exported global.
+    {
+        char msg[64];
+        // "FIREBOX_456_RECOVER_ENTRY tid_count=NNN\n"
+        // 64 bytes is enough room for the prefix + a uint32 count + LF
+        // + NUL. atomic_fetch_add returns the PREVIOUS value, so the
+        // first entry prints tid_count=0, second prints tid_count=1, etc.
+        // The kernel `tid` is not used in this message (cheap probe) --
+        // it lives in the trace instead.
+        unsigned count = (unsigned)prev;
+        int n = 0;
+        const char *prefix = "FIREBOX_456_RECOVER_ENTRY tid_count=";
+        for (const char *p = prefix; *p; p++) msg[n++] = *p;
+        if (count == 0) {
+            msg[n++] = '0';
+        } else {
+            char tmp[16];
+            int t = 0;
+            while (count > 0) { tmp[t++] = '0' + (count % 10); count /= 10; }
+            while (t > 0) msg[n++] = tmp[--t];
+        }
+        msg[n++] = '\n';
+        // fd 2 = stderr. Use the WASI syscall directly via the
+        // __wasi_fd_write thunk wasix-libc already exposes.
+        __wasi_ciovec_t iov = { .buf = (uint8_t *)msg, .buf_len = (size_t)n };
+        size_t nwritten;
+        (void)__wasi_fd_write(2, &iov, 1, &nwritten);
+    }
+
     // Step 1: drain the asyncify state machine. After this returns
     // __asyncify_state == 0 (Normal). Calls below run on instrumented
     // frames whose state==0 entry-discriminator lets the body execute.
