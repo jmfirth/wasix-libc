@@ -302,18 +302,35 @@ void __wasm_signal(int sig) {
 		__wasm_in_handler[sig] = 1;
 	}
 
-	/* SIG_DFL (0): fall through to default_handler. SIG_IGN (1): POSIX
-	 * "ignore" — the sentinel is NOT callable; treat as no-op. Without
-	 * this, ksa.handler(sig) lowers to call_indirect on table slot 1
-	 * and traps "uninitialized element". */
-	if (ksa.handler != 0 && (uintptr_t)ksa.handler != 1) {
+	/* Dispatch decision tree (#468 fix — fnptr-as-sentinel collision):
+	 *
+	 *   ksa.handler != 0    → user handler (or SIG_IGN, which is
+	 *                         &__SIG_IGN — a real no-op function in
+	 *                         wasix-libc, not the upstream-musl literal
+	 *                         (void*)1 sentinel). Call it; SIG_IGN
+	 *                         self-implements "ignore" by being a no-op.
+	 *   default_handler != 0 → SIG_DFL with the libc default installed.
+	 *   else                → SIG_DFL with no default: drop. Correct for
+	 *                         SIGCHLD/SIGURG/SIGWINCH (POSIX "ignore"
+	 *                         default) when no handler is registered.
+	 *
+	 * Previously the dispatch arm carried `(uintptr_t)ksa.handler != 1`
+	 * as a SIG_IGN guard inherited from upstream musl (where SIG_IGN is
+	 * the in-band sentinel `(void(*)(int))1`). That guard is double-wrong
+	 * on wasix-libc: (a) wasix-libc's <signal.h> already redefines
+	 * SIG_IGN to `&__SIG_IGN` (a real callable no-op function in
+	 * src/signal/signal.c) precisely BECAUSE wasm function pointers are
+	 * __indirect_function_table indices and literal 1 IS a valid slot;
+	 * (b) the guard then mis-rejects any real handler that wasm-ld
+	 * happens to place at table slot 1 — silently dropping every signal
+	 * for the smallest possible C canary. See #468 RCA + class lesson
+	 * class_lesson_wasm_fnptr_is_table_index_not_address. */
+	if (ksa.handler != 0) {
 		ksa.handler(sig);
-	} else if (ksa.handler == 0 && default_handler != 0) {
+	} else if (default_handler != 0) {
 		default_handler(sig);
 	}
-	/* else: SIG_IGN, or SIG_DFL with default_handler unset — drop.
-	 * Correct action for SIGCHLD/SIGURG/SIGWINCH/SIGCONT (POSIX
-	 * "ignore" default) when no user handler is installed. */
+	/* else: SIG_DFL with default_handler unset — drop. */
 
 	if (!(ksa.flags & SA_NODEFER)) {
 		__wasm_in_handler[sig] = 0;
@@ -350,7 +367,25 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 {
 	struct k_sigaction ksa, ksa_old;
 	if (sa) {
+#ifdef __wasilibc_unmodified_upstream
+		/* Native: SIG_IGN is the in-band sentinel (void(*)(int))1 and
+		 * address 1 is unmapped, so `> 1UL` is the exact "real
+		 * callable handler" filter. */
 		if ((uintptr_t)sa->sa_handler > 1UL) {
+#else
+		/* Wasm: function pointers are __indirect_function_table
+		 * indices; slot 1 is the first ordinary user-code slot.
+		 * The `> 1UL` filter (companion to the SIG_IGN literal-1
+		 * sentinel) would misclassify a real handler placed by
+		 * wasm-ld at table slot 1 as SIG_IGN, failing to record it
+		 * in handler_set and failing to set __eintr_valid_flag.
+		 * wasix-libc redefines SIG_IGN as &__SIG_IGN (a real callable
+		 * no-op function); the correct filter is therefore sentinel
+		 * equality against the macros, not address-range arithmetic.
+		 * See #468 RCA + class lesson
+		 * class_lesson_wasm_fnptr_is_table_index_not_address. */
+		if (sa->sa_handler != SIG_DFL && sa->sa_handler != SIG_IGN) {
+#endif
 			a_or_l(handler_set+(sig-1)/(8*sizeof(long)),
 				1UL<<(sig-1)%(8*sizeof(long)));
 
