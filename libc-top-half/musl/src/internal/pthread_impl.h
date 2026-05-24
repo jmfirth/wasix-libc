@@ -303,12 +303,26 @@ hidden void __vm_unlock(void);
  * paths force-clear + wake the orphan. */
 hidden void __firebox_lock_sweep_wake_one(volatile int *l);
 
-/* firebox#473 — register/deregister a lock-word address into the
- * calling thread's held-lock array. Exposed as hidden symbols so
- * lock primitives outside __lock.c (today: stdio/__lockfile.c's
- * per-FILE f->lock) can participate in the Phase 9 __pthread_exit
- * sweep-wake without needing a parallel held-list. Same shape, same
- * sweep, same orphan-protection guarantee. */
+/* firebox#473 / #489 — register/deregister a lock-word address into
+ * the calling thread's held-lock array. Exposed as hidden symbols so
+ * lock primitives outside __lock.c can participate in the Phase 9
+ * __pthread_exit sweep-wake without needing a parallel held-list.
+ *
+ * Registered participants (extends the class lesson
+ * [[thread_teardown_via_guest_asyncify_escape]]):
+ *   1. __lock.c          — generic __lock/__unlock (atexit, atfork,
+ *                          malloc, thread-list — every LOCK()-macro
+ *                          caller).         [#456 Phase 9]
+ *   2. stdio/__lockfile.c — per-FILE f->lock (fclose, fflush, fread,
+ *                          __fseeko, ftell, fwrite, vfprintf — all 7
+ *                          callers via FLOCK macros).    [#473]
+ *   3. pthread_cond_timedwait.c — static-inline lock()/unlock()
+ *                          protecting pthread_cond_t._c_lock AND
+ *                          per-waiter node.barrier.  Diagnosed via
+ *                          Phase 4 wasm-memory snapshot pinpointing
+ *                          cargo's std::sync::Condvar wedge.   [#489]
+ *
+ * Same shape, same sweep, same orphan-protection guarantee. */
 hidden void __firebox_register_held_lock(volatile int *l);
 hidden void __firebox_deregister_held_lock(volatile int *l);
 #endif
