@@ -41,16 +41,54 @@ static inline void lock(volatile int *l)
 		do __wait(l, 0, 2, 1);
 		while (a_cas(l, 0, 2));
 	}
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#489 — register the lock-word in the calling thread's
+	 * Phase 9 held-lock array. This primitive protects c->_c_lock (the
+	 * pthread_cond_t internal mutex) and per-waiter node.barrier; both
+	 * are vulnerable to the [[thread_teardown_via_guest_asyncify_escape]]
+	 * orphan class. Phase 4 diagnosis confirmed cargo (Python #444
+	 * wedge) parks on a stale l=2 cv lock-word with no live owner; the
+	 * static-inline lock here had no held-list participation, so the
+	 * __pthread_exit sweep couldn't release it.
+	 *
+	 * Same shape as __lock.c (#456 Phase 9) and __lockfile.c (#473):
+	 * register on every successful acquire, deregister-before-release
+	 * in unlock(). The two acquire paths above (fast a_cas(l,0,1) and
+	 * the contended a_cas(l,0,2) at loop exit) both reach this point
+	 * having taken ownership of the lock, so a single register at the
+	 * function's tail covers both. */
+	__firebox_register_held_lock(l);
+#endif
 }
 
 static inline void unlock(volatile int *l)
 {
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#489 — deregister BEFORE the a_swap release-to-waiters,
+	 * same ordering rationale as __unlock in __lock.c and __unlockfile
+	 * in __lockfile.c (#473): a concurrent __pthread_exit sweep on this
+	 * thread must not observe the lock as on-our-held-list AFTER it has
+	 * been released to other threads, or we'd emit a spurious wake on
+	 * an address some other cv caller now legitimately holds. */
+	__firebox_deregister_held_lock(l);
+#endif
 	if (a_swap(l, 0)==2)
 		__wake(l, 1, 1);
 }
 
 static inline void unlock_requeue(volatile int *l, volatile int *r, int w)
 {
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#489 — same deregister-before-release as unlock() above.
+	 * unlock_requeue is invoked from the wake-and-handoff path
+	 * (pthread_cond_timedwait.c:170) where the calling thread holds
+	 * either c->_c_lock or a node.barrier acquired via lock() above.
+	 * Without deregistration here, the held-list entry survives the
+	 * a_store(l, 0) release, and a subsequent __pthread_exit sweep
+	 * would emit a spurious wake on a lock-word some other waiter now
+	 * legitimately holds. */
+	__firebox_deregister_held_lock(l);
+#endif
 	a_store(l, 0);
 #ifdef __wasilibc_unmodified_upstream
 	if (w) __wake(l, 1, 1);
