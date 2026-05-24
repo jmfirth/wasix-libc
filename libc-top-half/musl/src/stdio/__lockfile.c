@@ -23,17 +23,29 @@ int __lockfile(FILE *f)
 	 * which is harmless on freed memory in the asyncify class (no
 	 * dereference, just an opaque host-side wake). See work/tasks/473-*
 	 * and class_lesson_thread_teardown_via_guest_asyncify_escape. */
-	if (!owner) { __firebox_register_held_lock(&f->lock); return 1; }
+	if (!owner) {
+		__firebox_register_held_lock(&f->lock);
+		/* firebox#489 Phase 4a: probe fast-path file-lock acquire (kind=2 FILE) */
+		__firebox_trace_lock_acquire((uintptr_t)&f->lock, 2u);
+		return 1;
+	}
 #else
 	if (!owner) return 1;
 #endif
 	while ((owner = a_cas(&f->lock, 0, tid|MAYBE_WAITERS))) {
 		if ((owner & MAYBE_WAITERS) ||
-		    a_cas(&f->lock, owner, owner|MAYBE_WAITERS)==owner)
+		    a_cas(&f->lock, owner, owner|MAYBE_WAITERS)==owner) {
+#ifndef __wasilibc_unmodified_upstream
+			/* firebox#489 Phase 4a: probe file-lock contended wait (kind=2 FILE) */
+			__firebox_trace_lock_contended((uintptr_t)&f->lock, 2u);
+#endif
 			__futexwait(&f->lock, owner|MAYBE_WAITERS, 1);
+		}
 	}
 #ifndef __wasilibc_unmodified_upstream
 	__firebox_register_held_lock(&f->lock);
+	/* firebox#489 Phase 4a: probe contended-loop file-lock acquire (kind=2 FILE) */
+	__firebox_trace_lock_acquire((uintptr_t)&f->lock, 2u);
 #endif
 	return 1;
 }
@@ -51,6 +63,8 @@ void __unlockfile(FILE *f)
 	 * entry exists for any acquire that returned 1 from __lockfile,
 	 * regardless of whether waiters arrived later. */
 	__firebox_deregister_held_lock(&f->lock);
+	/* firebox#489 Phase 4a: probe file-lock release (kind=2 FILE) */
+	__firebox_trace_lock_release((uintptr_t)&f->lock, 2u);
 #endif
 	if (a_swap(&f->lock, 0) & MAYBE_WAITERS)
 		__wake(&f->lock, 1, 1);

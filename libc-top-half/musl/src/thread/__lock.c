@@ -160,7 +160,12 @@ void __lock(volatile int *l)
 	int current = a_cas(l, 0, INT_MIN + 1);
 	if (need_locks < 0) libc.need_locks = 0;
 #ifndef __wasilibc_unmodified_upstream
-	if (!current) { __firebox_register_held_lock(l); return; }
+	if (!current) {
+		__firebox_register_held_lock(l);
+		/* firebox#489 Phase 4a: probe fast-path acquire (kind=1 LOCK) */
+		__firebox_trace_lock_acquire((uintptr_t)l, 1u);
+		return;
+	}
 #else
 	if (!current) return;
 #endif
@@ -170,7 +175,12 @@ void __lock(volatile int *l)
 		// assertion: current >= 0
 		int val = a_cas(l, current, INT_MIN + (current + 1));
 #ifndef __wasilibc_unmodified_upstream
-		if (val == current) { __firebox_register_held_lock(l); return; }
+		if (val == current) {
+			__firebox_register_held_lock(l);
+			/* firebox#489 Phase 4a: probe spin-loop acquire (kind=1 LOCK) */
+			__firebox_trace_lock_acquire((uintptr_t)l, 1u);
+			return;
+		}
 #else
 		if (val == current) return;
 #endif
@@ -185,13 +195,22 @@ void __lock(volatile int *l)
 		/* We can only go into wait, if we know that somebody holds the
 		 * lock and will eventually wake us up, again. */
 		if (current < 0) {
+#ifndef __wasilibc_unmodified_upstream
+			/* firebox#489 Phase 4a: probe contended wait (kind=1 LOCK) */
+			__firebox_trace_lock_contended((uintptr_t)l, 1u);
+#endif
 			__futexwait(l, current, 1);
 			current -= INT_MIN + 1;
 		}
 		/* assertion: current > 0, the count includes us already. */
 		int val = a_cas(l, current, INT_MIN + current);
 #ifndef __wasilibc_unmodified_upstream
-		if (val == current) { __firebox_register_held_lock(l); return; }
+		if (val == current) {
+			__firebox_register_held_lock(l);
+			/* firebox#489 Phase 4a: probe contended-loop acquire (kind=1 LOCK) */
+			__firebox_trace_lock_acquire((uintptr_t)l, 1u);
+			return;
+		}
 #else
 		if (val == current) return;
 #endif
@@ -211,6 +230,12 @@ void __unlock(volatile int *l)
 		 * wasteful. Doing it first means the sweep only ever wakes
 		 * addresses we provably still hold. */
 		__firebox_deregister_held_lock(l);
+		/* firebox#489 Phase 4a: probe release (kind=1 LOCK).  Emitted
+		 * BEFORE the atomic release so the host trace orders this
+		 * event before any __wake on the same lock — matches the
+		 * "ordered before release-to-waiters" invariant the held-list
+		 * deregister already relies on. */
+		__firebox_trace_lock_release((uintptr_t)l, 1u);
 #endif
 		if (a_fetch_add(l, -(INT_MIN + 1)) != (INT_MIN + 1)) {
 			__wake(l, 1, 1);

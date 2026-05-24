@@ -34,17 +34,35 @@ struct waiter {
 
 /* Self-synchronized-destruction-safe lock functions */
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#489 Phase 4a: kind=5 = pthread_cond internal (cv `_c_lock` and
+ * per-waiter `node.barrier`).  This is the prime suspect for the
+ * Python #444 thiserror wedge — futex_wait `expected=2` matches the
+ * contended-state transition `a_cas(l, 1, 2)` below.  See
+ * work/tasks/489-* + Phase 3 disambiguation report. */
+#define FIREBOX_KIND_COND 5u
+#endif
+
 static inline void lock(volatile int *l)
 {
 	if (a_cas(l, 0, 1)) {
 		a_cas(l, 1, 2);
+#ifndef __wasilibc_unmodified_upstream
+		__firebox_trace_lock_contended((uintptr_t)l, FIREBOX_KIND_COND);
+#endif
 		do __wait(l, 0, 2, 1);
 		while (a_cas(l, 0, 2));
 	}
+#ifndef __wasilibc_unmodified_upstream
+	__firebox_trace_lock_acquire((uintptr_t)l, FIREBOX_KIND_COND);
+#endif
 }
 
 static inline void unlock(volatile int *l)
 {
+#ifndef __wasilibc_unmodified_upstream
+	__firebox_trace_lock_release((uintptr_t)l, FIREBOX_KIND_COND);
+#endif
 	if (a_swap(l, 0)==2)
 		__wake(l, 1, 1);
 }

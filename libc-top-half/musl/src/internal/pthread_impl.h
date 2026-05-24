@@ -11,6 +11,9 @@
 #endif
 #include <errno.h>
 #include <limits.h>
+#ifndef __wasilibc_unmodified_upstream
+#include <stdint.h>  /* firebox#489: uintptr_t / uint32_t for trace probe decls */
+#endif
 #ifdef __wasilibc_unmodified_upstream
 #include <sys/mman.h>
 #endif
@@ -311,6 +314,16 @@ hidden void __firebox_lock_sweep_wake_one(volatile int *l);
  * sweep, same orphan-protection guarantee. */
 hidden void __firebox_register_held_lock(volatile int *l);
 hidden void __firebox_deregister_held_lock(volatile int *l);
+
+/* firebox#489 Phase 4a — lock-acquire/release probe.  Emits one host-
+ * visible trace event per call via a TLS scratch buffer + the existing
+ * wasix `futex_wake` import (see __firebox_trace_lock.c for the full
+ * wire shape).  Investigation-only; no fix consumes these symbols.
+ * Kinds: 1=LOCK (__lock/__unlock), 2=FILE (__lockfile/__unlockfile),
+ * 3=DLOPEN, 4=MALLOC. */
+hidden void __firebox_trace_lock_acquire(uintptr_t addr, uint32_t kind);
+hidden void __firebox_trace_lock_release(uintptr_t addr, uint32_t kind);
+hidden void __firebox_trace_lock_contended(uintptr_t addr, uint32_t kind);
 #endif
 
 extern hidden volatile int __thread_list_lock;

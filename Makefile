@@ -282,6 +282,7 @@ LIBC_TOP_HALF_MUSL_SOURCES += \
         stdio/ftrylockfile.c \
         stdio/funlockfile.c \
         thread/__lock.c \
+        thread/__firebox_trace_lock.c \
         thread/__wait.c \
         thread/__timedwait.c \
         thread/default_attr.c \
