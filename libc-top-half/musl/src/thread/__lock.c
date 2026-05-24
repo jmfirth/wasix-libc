@@ -40,7 +40,17 @@
  * the match is usually at slot count-1). On match we swap-with-end
  * and decrement count — the array semantics are an unordered set,
  * not a stack, so the swap is safe. */
-static void register_held_lock(volatile int *l)
+/* firebox#473 (2026-05-23): exposed as hidden symbols (was: static) so
+ * the file-lock primitive in stdio/__lockfile.c can use the same
+ * per-thread held-lock array for orphan-protection. The lock-word
+ * shape and the sweep-wake invariant are identical between the
+ * __lock/__unlock primitive and __lockfile/__unlockfile — both store
+ * an atomic int that 'locked' callers CAS-acquire and 'unlocking'
+ * callers a_swap-release, and both are followed by an optional
+ * __wake. Sharing the held-list means Phase 9's __pthread_exit sweep
+ * transparently covers file locks too, with no struct-pthread change
+ * and no second sweep helper. See work/tasks/473-*. */
+hidden void __firebox_register_held_lock(volatile int *l)
 {
 	pthread_t self = __pthread_self();
 	unsigned n = self->firebox_held_locks_count;
@@ -52,7 +62,7 @@ static void register_held_lock(volatile int *l)
 	self->firebox_held_locks_count = n + 1;
 }
 
-static void deregister_held_lock(volatile int *l)
+hidden void __firebox_deregister_held_lock(volatile int *l)
 {
 	pthread_t self = __pthread_self();
 	unsigned n = self->firebox_held_locks_count;
@@ -64,12 +74,81 @@ static void deregister_held_lock(volatile int *l)
 			return;
 		}
 	}
-	/* Not found: a __unlock without a matching __lock on this thread.
-	 * This happens normally during the asyncify-escape teardown path
-	 * (the very class of bug this fix exists to mitigate) — the rewound
-	 * continuation can call __unlock without having called the matching
-	 * __lock on the same logical control-flow path. Silently ignore;
-	 * the sweep-wake at __pthread_exit will close any orphans. */
+	/* Not found: an __unlock(file) without a matching __lock(file) on
+	 * this thread. This happens normally during the asyncify-escape
+	 * teardown path (the very class of bug this fix exists to mitigate)
+	 * — the rewound continuation can call __unlock without having
+	 * called the matching __lock on the same logical control-flow path.
+	 * Silently ignore; the sweep-wake at __pthread_exit will close any
+	 * orphans. */
+}
+
+/* firebox#470/#472 — targeted per-export-boundary sweep-wake helper.
+ *
+ * Phase 9 sweeps the entire held-lock array at __pthread_exit, which
+ * covers the worker-thread teardown class. But several lock-using
+ * helpers in libc (__funcs_on_exit, __fork_handler) walk a handler
+ * list with LOCK/UNLOCK gated around each callback invocation, and the
+ * Binaryen-asyncify rewind can land the post-callback continuation
+ * past the matching UNLOCK without ever reaching __pthread_exit. The
+ * orphan persists; any later call to that same function blocks
+ * forever on the lock word.
+ *
+ * __firebox_lock_sweep_wake_one(l) is meant to be called at the export
+ * boundary of those helpers (after the legitimate UNLOCK position):
+ *
+ *   - Healthy path: the prior UNLOCK already deregistered `l` from
+ *     this thread's held-list and cleared the lock word. The scan
+ *     finds nothing; helper is a no-op.
+ *
+ *   - Asyncify-escape path: `l` is still on this thread's held-list
+ *     because the UNLOCK was skipped. The helper:
+ *       1. Removes `l` from the held-list (so a later __pthread_exit
+ *          sweep doesn't double-wake).
+ *       2. Atomically forces the lock word to 0 (a_swap), so future
+ *          acquirers see an unlocked state.
+ *       3. Wakes every waiter (__wake(l, -1, 1) — INT_MAX cnt, priv=1
+ *          matching __unlock's wake call). They re-evaluate
+ *          __futexwait's predicate against the now-0 lock word and
+ *          proceed past the wait.
+ *
+ * Force-clearing the lock word from outside the proper __unlock path
+ * is safe in this regime: the asyncify rewind has logically advanced
+ * past the UNLOCK position (the function "returned" successfully); the
+ * skipped atomic is exactly what we are restoring here. The thread no
+ * longer believes it owns the lock — its held-list entry is the only
+ * remaining record, which we are also clearing.
+ *
+ * This helper is hidden + exported (linked as a normal symbol, not
+ * static) so it can be called from atexit.c, fork.c, and any future
+ * caller in the class. See work/tasks/470-*, work/tasks/472-*. */
+hidden void __firebox_lock_sweep_wake_one(volatile int *l)
+{
+	pthread_t self = __pthread_self();
+	unsigned n = self->firebox_held_locks_count;
+	for (unsigned i = n; i-- > 0; ) {
+		if (self->firebox_held_locks[i] == l) {
+			/* Remove from held-list first so any concurrent sweep
+			 * (e.g. __pthread_exit's bulk walk) doesn't see this slot
+			 * after we've fired the wake below. Same ordering rationale
+			 * as __firebox_deregister_held_lock above. */
+			self->firebox_held_locks[i] = self->firebox_held_locks[n - 1];
+			self->firebox_held_locks[n - 1] = 0;
+			self->firebox_held_locks_count = n - 1;
+			/* Force-clear the lock word so waiters' __futexwait
+			 * predicate (`l[0] == expected`) flips to false and they
+			 * proceed past the wait when woken below. Without this,
+			 * the wake is wasted: waiters re-check, see the lock-word
+			 * still in the locked-contended state the asyncify-rewound
+			 * continuation left behind, and re-sleep. */
+			a_swap(l, 0);
+			__wake(l, -1, 1);
+			return;
+		}
+	}
+	/* Not on the held-list: nothing to sweep. Either the legitimate
+	 * UNLOCK already ran (healthy path — the common case), or we never
+	 * acquired the lock in this dynamic extent in the first place. */
 }
 #endif
 
@@ -81,7 +160,7 @@ void __lock(volatile int *l)
 	int current = a_cas(l, 0, INT_MIN + 1);
 	if (need_locks < 0) libc.need_locks = 0;
 #ifndef __wasilibc_unmodified_upstream
-	if (!current) { register_held_lock(l); return; }
+	if (!current) { __firebox_register_held_lock(l); return; }
 #else
 	if (!current) return;
 #endif
@@ -91,7 +170,7 @@ void __lock(volatile int *l)
 		// assertion: current >= 0
 		int val = a_cas(l, current, INT_MIN + (current + 1));
 #ifndef __wasilibc_unmodified_upstream
-		if (val == current) { register_held_lock(l); return; }
+		if (val == current) { __firebox_register_held_lock(l); return; }
 #else
 		if (val == current) return;
 #endif
@@ -112,7 +191,7 @@ void __lock(volatile int *l)
 		/* assertion: current > 0, the count includes us already. */
 		int val = a_cas(l, current, INT_MIN + current);
 #ifndef __wasilibc_unmodified_upstream
-		if (val == current) { register_held_lock(l); return; }
+		if (val == current) { __firebox_register_held_lock(l); return; }
 #else
 		if (val == current) return;
 #endif
@@ -131,7 +210,7 @@ void __unlock(volatile int *l)
 		 * longer hold) and emit a spurious __wake — harmless but
 		 * wasteful. Doing it first means the sweep only ever wakes
 		 * addresses we provably still hold. */
-		deregister_held_lock(l);
+		__firebox_deregister_held_lock(l);
 #endif
 		if (a_fetch_add(l, -(INT_MIN + 1)) != (INT_MIN + 1)) {
 			__wake(l, 1, 1);

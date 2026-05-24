@@ -291,6 +291,28 @@ hidden void __vm_wait(void);
 hidden void __vm_lock(void);
 hidden void __vm_unlock(void);
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#470/#472 — targeted per-export-boundary sweep-wake helper for
+ * the asyncify-rewind orphan class (see __lock.c for full rationale).
+ *
+ * Callers: any libc helper that LOCK/UNLOCKs a process-wide static
+ * lock around an indirect callback that may asyncify-rewind past the
+ * UNLOCK position. Today: __funcs_on_exit (atexit lock) and
+ * __fork_handler (atfork lock). Call this AFTER the normal UNLOCK at
+ * the function's export boundary; healthy paths are no-ops, escape
+ * paths force-clear + wake the orphan. */
+hidden void __firebox_lock_sweep_wake_one(volatile int *l);
+
+/* firebox#473 — register/deregister a lock-word address into the
+ * calling thread's held-lock array. Exposed as hidden symbols so
+ * lock primitives outside __lock.c (today: stdio/__lockfile.c's
+ * per-FILE f->lock) can participate in the Phase 9 __pthread_exit
+ * sweep-wake without needing a parallel held-list. Same shape, same
+ * sweep, same orphan-protection guarantee. */
+hidden void __firebox_register_held_lock(volatile int *l);
+hidden void __firebox_deregister_held_lock(volatile int *l);
+#endif
+
 extern hidden volatile int __thread_list_lock;
 
 extern hidden volatile int __abort_lock[1];

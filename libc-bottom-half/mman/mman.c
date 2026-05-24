@@ -219,9 +219,18 @@ int msync (void *addr, size_t length, int flags) {
         return -1;
     }
 
-    if ((map->prot & PROT_WRITE) != 0) {
-        errno = EINVAL;
-        return -1;
+    // firebox#467: msync is semantically meaningful for PROT_WRITE
+    // mappings — that is the case where the user has written through the
+    // mapping and wants those bytes flushed to the backing fd. A
+    // PROT_READ-only mapping has nothing to flush; treat as a no-op
+    // (return 0) per POSIX (msync on a read-only mapping is permitted
+    // and returns 0). The previous check was inverted: it accepted
+    // exactly the no-op case and rejected every legitimate caller,
+    // silently dropping the explicit-flush idiom every editor / DB /
+    // package manager uses. See work/tasks/467-* and
+    // crates/firebox-diff differential corpus `file-mmap-write-read`.
+    if ((map->prot & PROT_WRITE) == 0) {
+        return 0;
     }
 
     if ((map_flags & MAP_ANON) == 0) {

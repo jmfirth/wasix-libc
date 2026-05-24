@@ -3,6 +3,9 @@
 #include "libc.h"
 #include "lock.h"
 #include "fork_impl.h"
+#ifndef __wasilibc_unmodified_upstream
+#include "pthread_impl.h"  /* firebox#470: __firebox_lock_sweep_wake_one */
+#endif
 
 #define malloc __libc_malloc
 #define calloc __libc_calloc
@@ -37,6 +40,20 @@ void __funcs_on_exit()
 		func(arg);
 		LOCK(lock);
 	}
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#470: musl intentionally leaves `lock` held when the walk
+	 * completes (process is about to _Exit, no further callers). But
+	 * if a handler invocation rewound through Binaryen-asyncify past
+	 * the UNLOCK/LOCK pair bracketing it, the held-locks accounting
+	 * on this thread is out of sync with the lock-word reality. The
+	 * targeted sweep clears the held-list slot and force-clears the
+	 * lock word + wakes any waiters that may have arrived via
+	 * concurrent __cxa_atexit calls on other threads (atypical at
+	 * process-exit but possible). Safe at any point post-walk: lock
+	 * is logically released either way. See work/tasks/470-* and
+	 * class_lesson_thread_teardown_via_guest_asyncify_escape. */
+	__firebox_lock_sweep_wake_one(lock);
+#endif
 }
 
 void __cxa_finalize(void *dso)
