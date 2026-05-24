@@ -1,6 +1,9 @@
 #include <pthread.h>
 #include "libc.h"
 #include "lock.h"
+#ifndef __wasilibc_unmodified_upstream
+#include "pthread_impl.h"  /* firebox#472: __firebox_lock_sweep_wake_one */
+#endif
 
 static struct atfork_funcs {
 	void (*prepare)(void);
@@ -28,6 +31,24 @@ void __fork_handler(int who)
 			funcs = p;
 		}
 		UNLOCK(lock);
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#472: targeted sweep-wake at the parent/child phase's
+		 * export boundary. If any handler invocation (parent or child
+		 * callback) Binaryen-asyncify-rewound past the post-callback
+		 * loop-iteration's implicit lock-state-restore — or past the
+		 * final UNLOCK above — the atfork_lock is orphaned. A long-lived
+		 * process that forks repeatedly (Ruby Process.fork, system(),
+		 * any spawn) then walls on every subsequent __fork_handler(-1)
+		 * blocking forever on the static atfork_lock.
+		 *
+		 * Sweep is restricted to the who>=0 branch because the who<0
+		 * (prepare) branch INTENTIONALLY holds the lock across the
+		 * fork syscall (released by the matching who>=0 call in both
+		 * parent and child). Sweeping there would prematurely release
+		 * the lock, allowing a concurrent pthread_atfork registration
+		 * to race the in-flight fork. See work/tasks/472-*. */
+		__firebox_lock_sweep_wake_one(lock);
+#endif
 	}
 }
 
