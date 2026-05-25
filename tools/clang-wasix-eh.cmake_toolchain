@@ -1,7 +1,20 @@
 # Cmake toolchain description file for the Makefile for WASI
 cmake_minimum_required(VERSION 3.5.0)
 
-set(COMPILE_FLAGS "-O2 -matomics -mbulk-memory -mmutable-globals -pthread -mthread-model posix -ftls-model=local-exec -fno-trapping-math -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -fwasm-exceptions")
+# -mllvm -wasm-use-legacy-eh=false: emit the new wasm-EH instructions
+# (try_table / throw_ref) instead of the legacy `try` / `catch` form.
+# Required for Firebox (firebox#124 phase 2): the production wasmer pin
+# (`firebox-542-layer-12-cross-coroutine-unwind`) validates wasm with
+# the new-style EH feature ON and rejects modules that mix legacy `try`
+# in (the validator rejects with `legacy_exceptions feature required for
+# try instruction`). All EH-on libc++abi/libunwind/libc++ objects must
+# emit new-style EH consistently. Pairs with the same flag passed to
+# wasix-libc itself in scripts/wasix-libc/build.sh --ehpic.
+# -mllvm -wasm-enable-sjlj: enable the wasm-native setjmp/longjmp
+# lowering used by libsetjmp.a and the wasix-libc sig{set,long}jmp
+# implementations; libunwind's personality path and libcxxabi's
+# __cxa_throw also rely on this lowering being present.
+set(COMPILE_FLAGS "-O2 -matomics -mbulk-memory -mmutable-globals -pthread -mthread-model posix -ftls-model=local-exec -fno-trapping-math -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -fwasm-exceptions -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false")
 set(LINK_FLAGS "-lwasi-emulated-mman -lwasi-emulated-process-clocks -lwasi-emulated-getpid -Wl,--shared-memory -Wl,--max-memory=4294967296 -Wl,--import-memory -Wl,--export-dynamic -Wl,--export=__heap_base -Wl,--export=__stack_pointer -Wl,--export=__data_end -Wl,--export=__wasm_init_tls -Wl,--export=__wasm_signal -Wl,--export=__tls_size -Wl,--export=__tls_align -Wl,--export=__tls_base -Wl,-mllvm,--wasm-enable-sjlj")
 
 set(CMAKE_SYSTEM_NAME WASI) # Generic for now, to not trigger a Warning
