@@ -116,31 +116,18 @@ void firebox_529_cond_wait_trace(int stage, int rc) {
  *   return — fix layer is wasmer-fork asyncify executor (per
  *   [[class_lesson_consumer_side_annotation_over_host_side_heuristic]]).
  *
- * Stage 30 chosen so it can't collide with #529's 1..4 or #533's
- * 11..17 (mutex_trylock) / 21..29 (mutex_timedlock). The stage field
- * here is symbolic — rc carries the caller's tid for debugging
- * (correlates the reached-probe with cond_wait_fail's tid field). */
+ * CRITICAL: this function deliberately does NOT touch TLS, c, or m. The
+ * earlier draft passed `__pthread_self()->tid` but that caused 20/20
+ * canary OOB regressions — a wasi thread can enter pthread_cond_wait
+ * before its TLS is fully wired (or under the very wedge condition we're
+ * trying to observe), so the probe MUST be TLS-free. Emits an unsigned
+ * marker only. */
 static __attribute__((noinline,used))
-void firebox_533_cond_wait_reached(int tid) {
-	char buf[80];
-	size_t off = 0;
-	static const char prefix[] = "FIREBOX_533_COND_WAIT_REACHED tid=";
-	for (size_t i = 0; i < sizeof(prefix) - 1; ++i) {
-		buf[off++] = prefix[i];
-	}
-	if (tid < 0) { buf[off++] = '-'; tid = -tid; }
-	if (tid == 0) {
-		buf[off++] = '0';
-	} else {
-		char tmp[12]; size_t n = 0;
-		while (tid > 0) { tmp[n++] = (char)('0' + (tid % 10)); tid /= 10; }
-		while (n--) buf[off++] = tmp[n];
-	}
-	buf[off++] = '\n';
-
+void firebox_533_cond_wait_reached(void) {
+	static const char msg[] = "FIREBOX_533_COND_WAIT_REACHED\n";
 	__wasi_ciovec_t iov;
-	iov.buf = (const uint8_t *)buf;
-	iov.buf_len = off;
+	iov.buf = (const uint8_t *)msg;
+	iov.buf_len = sizeof(msg) - 1;
 	__wasi_size_t nwritten;
 	(void)__wasi_fd_write(2, &iov, 1, &nwritten);
 }
@@ -253,20 +240,24 @@ int __pthread_cond_timedwait(pthread_cond_t *restrict c, pthread_mutex_t *restri
 {
 #ifndef __wasilibc_unmodified_upstream
 	/* firebox#533 — unconditional reached-probe; FIRST statement of
-	 * the function body, before any field-deref of c or m, so that even
-	 * a wedge that corrupts c/m can't suppress this emit. The H1
-	 * discriminator: if libuv reports cond_wait_fail (a non-zero return
-	 * from this function) AND this stamp does NOT appear on the same
-	 * run, then the function was never entered — the non-zero return
-	 * libuv observes is a stack-unwinding/asyncify-rewind artifact, and
-	 * the wedge is below this layer in the wasmer-fork asyncify
-	 * executor.
+	 * the function body, before any field-deref of c, m, OR TLS, so that
+	 * even a wedge that corrupts c/m/TLS can't suppress this emit. The
+	 * H1 discriminator: if libuv reports cond_wait_fail (a non-zero
+	 * return from this function) AND this stamp does NOT appear on the
+	 * same run, then the function was never entered — the non-zero
+	 * return libuv observes is a stack-unwinding/asyncify-rewind
+	 * artifact, and the wedge is below this layer in the wasmer-fork
+	 * asyncify executor.
 	 *
-	 * Note: this DOES introduce a stderr write on EVERY pthread_cond_wait
-	 * call in the canary, which is intentional — we need the per-run
-	 * presence/absence signal. Volume is bounded by libuv's call pattern
-	 * (small fixed number of cond_wait calls per worker, not per fd op). */
-	firebox_533_cond_wait_reached(__pthread_self()->tid);
+	 * Note: this DOES introduce a stderr write on EVERY
+	 * pthread_cond_wait call in the canary, which is intentional — we
+	 * need the per-run presence/absence signal. Volume is bounded by
+	 * libuv's call pattern (small fixed number of cond_wait calls per
+	 * worker, not per fd op). The probe is intentionally TLS-free: an
+	 * earlier draft passed __pthread_self()->tid but that caused 20/20
+	 * canary OOB regressions because a wasi thread can enter
+	 * pthread_cond_wait before its TLS is fully initialised. */
+	firebox_533_cond_wait_reached();
 #endif
 
 	struct waiter node = { 0 };
