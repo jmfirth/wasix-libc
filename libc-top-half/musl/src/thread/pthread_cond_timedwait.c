@@ -2,6 +2,94 @@
 
 #ifndef __wasilibc_unmodified_upstream
 #include <common/clock.h>
+#include <wasi/api.h>
+#include <stdint.h>
+#include <stddef.h>
+#endif
+
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#529 — pthread_cond_wait return-path instrumentation.
+ *
+ * Predecessor: Edge.js cascade-9 cycle-6 (#527) instrumented libuv's
+ * abort() call sites and pinned the wedge to
+ *   libuv:unix/thread.c:940:cond_wait_fail
+ * — i.e. `uv_cond_wait()` calls `pthread_cond_wait(cond, mutex)` and
+ * receives a non-zero return, which libuv (correctly per POSIX) treats
+ * as a contract violation and aborts on. libuv's usage is textbook-
+ * correct (the worker holds the global mutex per src/threadpool.c:77);
+ * the wedge is in the cond_wait implementation beneath.
+ *
+ * `pthread_cond_wait(c, m)` is a one-liner that tail-calls
+ * `pthread_cond_timedwait(c, m, 0)` (libc-top-half/musl/src/thread/
+ * pthread_cond_wait.c), so instrumenting THIS function with ts==NULL
+ * covers both entry points.
+ *
+ * Non-zero return paths in __pthread_cond_timedwait:
+ *   - EPERM  (stage=1): line 120, ERRORCHECK/RECURSIVE mutex not owned
+ *                       by calling thread.
+ *   - EINVAL (stage=2): line 123, ts->tv_nsec out of range (cannot fire
+ *                       for pthread_cond_wait — ts==NULL).
+ *   - e from inner do-while loop (stage=3): __timedwait_cp result.
+ *                       Per __timedwait.c only 0/EINTR/ETIMEDOUT/
+ *                       ECANCELED can surface; ECANCELED can leak out
+ *                       via the masked cancel-state path.
+ *   - tmp from pthread_mutex_lock(m) at relock (stage=4): overrides
+ *                       e on the relock path. This is the most
+ *                       contended candidate per POSIX — mutex
+ *                       ownership tracking under contention.
+ *
+ * Emission shape mirrors firebox_526_abort_trace (libc-top-half/musl/
+ * src/exit/abort.c) per #526's emission discipline:
+ *   - raw __wasi_fd_write (no stdio — stdio mutex may be the wedge actor)
+ *   - hand-rolled itoa (no snprintf — locale lock + reentrancy)
+ *   - stack buffer (no malloc — heap may be wedged)
+ * The one syscall per emit is intentional for atomicity wrt other
+ * threads' stderr writes.
+ *
+ * Retirement: when #529's RCA closes cascade-9 at the actual layer
+ * (tracked in docs/reference/forks.md §5 retirement registry). The
+ * stamping site is removed in lockstep.
+ */
+static __attribute__((noinline,used))
+void firebox_529_cond_wait_trace(int stage, int rc) {
+	/* Buffer sized for the prefix + " stage=NN rc=NNNNN\n" + slack. */
+	char buf[64];
+	size_t off = 0;
+	static const char prefix[] = "FIREBOX_529_COND_WAIT_RETURN stage=";
+	for (size_t i = 0; i < sizeof(prefix) - 1; ++i) {
+		buf[off++] = prefix[i];
+	}
+	/* Async-signal-safe single-digit itoa for stage (1..4). */
+	if (stage < 0) { buf[off++] = '-'; stage = -stage; }
+	if (stage == 0) {
+		buf[off++] = '0';
+	} else {
+		char tmp[12]; size_t n = 0;
+		while (stage > 0) { tmp[n++] = (char)('0' + (stage % 10)); stage /= 10; }
+		while (n--) buf[off++] = tmp[n];
+	}
+	static const char mid[] = " rc=";
+	for (size_t i = 0; i < sizeof(mid) - 1; ++i) {
+		buf[off++] = mid[i];
+	}
+	/* Async-signal-safe itoa for rc (can be negative if a raw -errno
+	 * leaked through; we render the sign for full fidelity). */
+	if (rc < 0) { buf[off++] = '-'; rc = -rc; }
+	if (rc == 0) {
+		buf[off++] = '0';
+	} else {
+		char tmp[12]; size_t n = 0;
+		while (rc > 0) { tmp[n++] = (char)('0' + (rc % 10)); rc /= 10; }
+		while (n--) buf[off++] = tmp[n];
+	}
+	buf[off++] = '\n';
+
+	__wasi_ciovec_t iov;
+	iov.buf = (const uint8_t *)buf;
+	iov.buf_len = off;
+	__wasi_size_t nwritten;
+	(void)__wasi_fd_write(2, &iov, 1, &nwritten);
+}
 #endif
 
 /*
@@ -116,11 +204,27 @@ int __pthread_cond_timedwait(pthread_cond_t *restrict c, pthread_mutex_t *restri
 #endif
 	volatile int *fut;
 
-	if ((m->_m_type&15) && (m->_m_lock&INT_MAX) != __pthread_self()->tid)
+	if ((m->_m_type&15) && (m->_m_lock&INT_MAX) != __pthread_self()->tid) {
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#529 stage=1: ERRORCHECK/RECURSIVE mutex not owned
+		 * by calling thread. Most likely surface if the wedge is
+		 * mutex-ownership tracking drift under concurrent contention. */
+		firebox_529_cond_wait_trace(1, EPERM);
+#endif
 		return EPERM;
+	}
 
-	if (ts && ts->tv_nsec >= 1000000000UL)
+	if (ts && ts->tv_nsec >= 1000000000UL) {
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#529 stage=2: invalid ts->tv_nsec. CANNOT FIRE for
+		 * pthread_cond_wait callers (ts==NULL); stamped only for
+		 * completeness — its appearance would mean the caller is a
+		 * pthread_cond_timedwait user with bad input, NOT the
+		 * cascade-9 wedge. */
+		firebox_529_cond_wait_trace(2, EINVAL);
+#endif
 		return EINVAL;
+	}
 
 	__pthread_testcancel();
 
@@ -193,7 +297,19 @@ relock:
 	/* Errors locking the mutex override any existing error or
 	 * cancellation, since the caller must see them to know the
 	 * state of the mutex. */
-	if ((tmp = pthread_mutex_lock(m))) e = tmp;
+	if ((tmp = pthread_mutex_lock(m))) {
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#529 stage=4: pthread_mutex_lock(m) failed on the
+		 * relock path. POSIX: pthread_mutex_lock returns EAGAIN,
+		 * ENOMEM, EDEADLK, EOWNERDEAD, ENOTRECOVERABLE, EPERM.
+		 * In a libuv-style usage (NORMAL or RECURSIVE init), the
+		 * realistic failures are EAGAIN/EOWNERDEAD/ENOTRECOVERABLE
+		 * — all of which point at lower-layer wasi-libc mutex
+		 * bookkeeping under concurrent contention rather than libuv. */
+		firebox_529_cond_wait_trace(4, tmp);
+#endif
+		e = tmp;
+	}
 
 	if (oldstate == WAITING) goto done;
 
@@ -220,6 +336,19 @@ done:
 		__pthread_testcancel();
 		__pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
 	}
+
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#529 stage=3: composite non-zero return at function exit.
+	 * Catches anything that wasn't caught by stage=1/2/4: ECANCELED
+	 * leaking through the masked-cancel guard, an unexpected
+	 * __timedwait_cp result, or any e value re-assembled across the
+	 * relock + cancellation epilogue. Stage 4 already fires for
+	 * pthread_mutex_lock failures, so a stage=3 with a value that
+	 * matches a recent stage=4 means BOTH paths contributed. */
+	if (e != 0) {
+		firebox_529_cond_wait_trace(3, e);
+	}
+#endif
 
 	return e;
 }
