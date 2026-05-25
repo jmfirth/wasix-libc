@@ -40,7 +40,7 @@ void __funcs_on_exit()
 		func(arg);
 		LOCK(lock);
 	}
-#ifndef __wasilibc_unmodified_upstream
+#if !defined(__wasilibc_unmodified_upstream) && defined(_REENTRANT)
 	/* firebox#470: musl intentionally leaves `lock` held when the walk
 	 * completes (process is about to _Exit, no further callers). But
 	 * if a handler invocation rewound through Binaryen-asyncify past
@@ -51,7 +51,15 @@ void __funcs_on_exit()
 	 * concurrent __cxa_atexit calls on other threads (atypical at
 	 * process-exit but possible). Safe at any point post-walk: lock
 	 * is logically released either way. See work/tasks/470-* and
-	 * class_lesson_thread_teardown_via_guest_asyncify_escape. */
+	 * class_lesson_thread_teardown_via_guest_asyncify_escape.
+	 *
+	 * firebox#552: gated on _REENTRANT to match the same guard on the
+	 * `lock` variable definition (line 27-30). Without this gate the
+	 * single-threaded (THREAD_MODEL=single, no _REENTRANT) ehpic-nothreads
+	 * build fails with "use of undeclared identifier 'lock'" because
+	 * the lock array only exists in reentrant builds. In single-threaded
+	 * builds there is no sibling thread to wake, so the sweep is a
+	 * no-op semantically — gating it out is correct, not a workaround. */
 	__firebox_lock_sweep_wake_one(lock);
 #endif
 }
