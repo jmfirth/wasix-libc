@@ -78,8 +78,21 @@ static void firebox_pthread_exit_sweep_wake(pthread_t self)
 }
 #endif
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#526 — breadcrumb stamp for the thread-teardown path. Sibling
+ * to class_lesson_thread_teardown_via_guest_asyncify_escape — the
+ * __pthread_exit path's lock/futex bookkeeping was the bug class fixed
+ * by #489 Phase 9 sweep-wake, and #516's evidence places the cascade-9
+ * wedge in a structurally similar window. See
+ * libc-top-half/musl/src/exit/abort.c for the full mechanism. */
+extern void firebox_526_stamp(const char *crumb);
+#endif
+
 _Noreturn void __pthread_exit(void *result)
 {
+#ifndef __wasilibc_unmodified_upstream
+	firebox_526_stamp("__pthread_exit");
+#endif
 	pthread_t self = __pthread_self();
 	sigset_t set;
 

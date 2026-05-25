@@ -15,6 +15,20 @@
 #include "atomic.h"
 #endif
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#526 — breadcrumb stamps for the signal-driven abort path.
+ * core_handler / terminate_handler / stop_handler are the default
+ * sighandlers that wasix-libc installs for SIGABRT and friends; each
+ * fprintf(stderr,...) + abort() if the corresponding signal fires.
+ * The fprintf may or may not flush before abort takes us down (the
+ * #516 evidence trail did NOT show "Program received fatal signal"
+ * messages, suggesting either: (a) the wedge is NOT signal-driven,
+ * or (b) the fprintf-stderr path is blocked by the same wedge — the
+ * breadcrumb disambiguates because it bypasses stdio). See
+ * libc-top-half/musl/src/exit/abort.c for the full mechanism. */
+extern void firebox_526_stamp(const char *crumb);
+#endif
+
 static int unmask_done;
 static unsigned long handler_set[_NSIG/(8*sizeof(long))];
 #ifdef __wasilibc_unmodified_upstream
@@ -54,18 +68,27 @@ void __get_handler_set(sigset_t *set)
 
 _Noreturn
 static void core_handler(int sig) {
+#ifndef __wasilibc_unmodified_upstream
+    firebox_526_stamp("core_handler");
+#endif
     fprintf(stderr, "Program recieved fatal signal: %s\n", strsignal(sig));
     abort();
 }
 
 _Noreturn
 static void terminate_handler(int sig) {
+#ifndef __wasilibc_unmodified_upstream
+    firebox_526_stamp("terminate_handler");
+#endif
     fprintf(stderr, "Program recieved termination signal: %s\n", strsignal(sig));
     abort();
 }
 
 _Noreturn
 static void stop_handler(int sig) {
+#ifndef __wasilibc_unmodified_upstream
+    firebox_526_stamp("stop_handler");
+#endif
     fprintf(stderr, "Program recieved stop signal: %s\n", strsignal(sig));
     abort();
 }
