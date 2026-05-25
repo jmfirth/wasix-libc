@@ -1,5 +1,68 @@
 #include "pthread_impl.h"
 
+#ifndef __wasilibc_unmodified_upstream
+#include <wasi/api.h>
+#include <stdint.h>
+#include <stddef.h>
+
+/* firebox#533 — pthread_mutex_timedlock return-path instrumentation.
+ * See pthread_mutex_trylock.c for the cycle-8 framing. Stages 21..29
+ * reserved for this TU; 11..17 belong to pthread_mutex_trylock.c.
+ *
+ * Stages:
+ *   stage=21: post-__pthread_mutex_trylock non-EBUSY return at top
+ *             (line 76). Forwards e.g. EAGAIN/ENOTRECOVERABLE/EOWNERDEAD
+ *             from the trylock layer; if the trylock stamps emit a
+ *             matching stage=11..17, the wedge is at the trylock layer.
+ *             If THIS stamps but NO trylock stamp matches, the wedge is
+ *             between trylock's return and timedlock's return-check
+ *             (extremely unlikely — direct stack return).
+ *   stage=22: pthread_mutex_timedlock_pi non-zero return (gated on
+ *             __wasilibc_unmodified_upstream — won't fire under wasi
+ *             since the entire pi branch is upstream-only).
+ *   stage=23: final non-zero exit (line 101). Catches any non-zero r
+ *             surfaced from the __timedwait + relock retry loop.
+ *
+ * Emission identical to firebox_529_cond_wait_trace per #529's discipline.
+ */
+static __attribute__((noinline,used))
+void firebox_533_timedlock_trace(int stage, int rc) {
+	char buf[80];
+	size_t off = 0;
+	static const char prefix[] = "FIREBOX_533_MUTEX_LOCK_RETURN stage=";
+	for (size_t i = 0; i < sizeof(prefix) - 1; ++i) {
+		buf[off++] = prefix[i];
+	}
+	if (stage < 0) { buf[off++] = '-'; stage = -stage; }
+	if (stage == 0) {
+		buf[off++] = '0';
+	} else {
+		char tmp[12]; size_t n = 0;
+		while (stage > 0) { tmp[n++] = (char)('0' + (stage % 10)); stage /= 10; }
+		while (n--) buf[off++] = tmp[n];
+	}
+	static const char mid[] = " rc=";
+	for (size_t i = 0; i < sizeof(mid) - 1; ++i) {
+		buf[off++] = mid[i];
+	}
+	if (rc < 0) { buf[off++] = '-'; rc = -rc; }
+	if (rc == 0) {
+		buf[off++] = '0';
+	} else {
+		char tmp[12]; size_t n = 0;
+		while (rc > 0) { tmp[n++] = (char)('0' + (rc % 10)); rc /= 10; }
+		while (n--) buf[off++] = tmp[n];
+	}
+	buf[off++] = '\n';
+
+	__wasi_ciovec_t iov;
+	iov.buf = (const uint8_t *)buf;
+	iov.buf_len = off;
+	__wasi_size_t nwritten;
+	(void)__wasi_fd_write(2, &iov, 1, &nwritten);
+}
+#endif
+
 #ifdef __wasilibc_unmodified_upstream
 #define IS32BIT(x) !((x)+0x80000000ULL>>32)
 #define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
@@ -73,7 +136,15 @@ int __pthread_mutex_timedlock(pthread_mutex_t *restrict m, const struct timespec
 	int r, t, priv = (type & 128) ^ 128;
 
 	r = __pthread_mutex_trylock(m);
-	if (r != EBUSY) return r;
+	if (r != EBUSY) {
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#533 stage=21: top-level __pthread_mutex_trylock
+		 * returned non-EBUSY (may be 0 success or any other errno).
+		 * Stamp only on non-zero, since zero is the success path. */
+		if (r != 0) firebox_533_timedlock_trace(21, r);
+#endif
+		return r;
+	}
 
 #ifdef __wasilibc_unmodified_upstream
 	if (type&8) return pthread_mutex_timedlock_pi(m, at);
@@ -98,6 +169,13 @@ int __pthread_mutex_timedlock(pthread_mutex_t *restrict m, const struct timespec
 		a_dec(&m->_m_waiters);
 		if (r && r != EINTR) break;
 	}
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#533 stage=23: final exit from the spin+wait+retry loop.
+	 * Only stamps on non-zero (the success path normally exits via the
+	 * trylock branch at stage=21 with r==0, but the loop can also exit
+	 * with r==0 after a successful contended acquire). */
+	if (r != 0) firebox_533_timedlock_trace(23, r);
+#endif
 	return r;
 }
 

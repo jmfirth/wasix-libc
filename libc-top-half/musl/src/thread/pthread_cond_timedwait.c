@@ -90,6 +90,60 @@ void firebox_529_cond_wait_trace(int stage, int rc) {
 	__wasi_size_t nwritten;
 	(void)__wasi_fd_write(2, &iov, 1, &nwritten);
 }
+
+/* firebox#533 — unconditional reached-probe at function entry.
+ *
+ * #529 instrumented every non-zero return path (stages 1..4) and found
+ * the libuv cond_wait_fail crumb fires on 3-4 runs across 30+ but ZERO
+ * stage stamps emit. Three hypotheses:
+ *
+ *   H1 (most likely): trap/longjmp/asyncify-unwind escape before normal
+ *       return. libuv's `if (pthread_cond_wait(...))` sees a non-zero
+ *       return via stack unwinding (asyncify rewind into a frame with
+ *       the wrong %rax), not via normal `ret`. Sibling to
+ *       [[class_lesson_thread_teardown_via_guest_asyncify_escape]].
+ *
+ *   H2: prologue check at line 207 (__pthread_self()->tid lookup) traps
+ *       OR symbol gets linker-rewritten elsewhere.
+ *
+ *   H3: LLVM LTO inlined the calls, then DCE'd via constant-prop on
+ *       `e == 0` dataflow inferred from the inlined call site.
+ *
+ * If the reached-probe stamps AND cond_wait_fail crumb fires → H2 or H3
+ *   (function IS entered but normal-return stamps don't survive).
+ * If the reached-probe does NOT stamp AND cond_wait_fail crumb fires →
+ *   H1 CONFIRMED: function is NEVER entered yet libuv reads a non-zero
+ *   return — fix layer is wasmer-fork asyncify executor (per
+ *   [[class_lesson_consumer_side_annotation_over_host_side_heuristic]]).
+ *
+ * Stage 30 chosen so it can't collide with #529's 1..4 or #533's
+ * 11..17 (mutex_trylock) / 21..29 (mutex_timedlock). The stage field
+ * here is symbolic — rc carries the caller's tid for debugging
+ * (correlates the reached-probe with cond_wait_fail's tid field). */
+static __attribute__((noinline,used))
+void firebox_533_cond_wait_reached(int tid) {
+	char buf[80];
+	size_t off = 0;
+	static const char prefix[] = "FIREBOX_533_COND_WAIT_REACHED tid=";
+	for (size_t i = 0; i < sizeof(prefix) - 1; ++i) {
+		buf[off++] = prefix[i];
+	}
+	if (tid < 0) { buf[off++] = '-'; tid = -tid; }
+	if (tid == 0) {
+		buf[off++] = '0';
+	} else {
+		char tmp[12]; size_t n = 0;
+		while (tid > 0) { tmp[n++] = (char)('0' + (tid % 10)); tid /= 10; }
+		while (n--) buf[off++] = tmp[n];
+	}
+	buf[off++] = '\n';
+
+	__wasi_ciovec_t iov;
+	iov.buf = (const uint8_t *)buf;
+	iov.buf_len = off;
+	__wasi_size_t nwritten;
+	(void)__wasi_fd_write(2, &iov, 1, &nwritten);
+}
 #endif
 
 /*
@@ -197,6 +251,24 @@ enum {
 
 int __pthread_cond_timedwait(pthread_cond_t *restrict c, pthread_mutex_t *restrict m, const struct timespec *restrict ts)
 {
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#533 — unconditional reached-probe; FIRST statement of
+	 * the function body, before any field-deref of c or m, so that even
+	 * a wedge that corrupts c/m can't suppress this emit. The H1
+	 * discriminator: if libuv reports cond_wait_fail (a non-zero return
+	 * from this function) AND this stamp does NOT appear on the same
+	 * run, then the function was never entered — the non-zero return
+	 * libuv observes is a stack-unwinding/asyncify-rewind artifact, and
+	 * the wedge is below this layer in the wasmer-fork asyncify
+	 * executor.
+	 *
+	 * Note: this DOES introduce a stderr write on EVERY pthread_cond_wait
+	 * call in the canary, which is intentional — we need the per-run
+	 * presence/absence signal. Volume is bounded by libuv's call pattern
+	 * (small fixed number of cond_wait calls per worker, not per fd op). */
+	firebox_533_cond_wait_reached(__pthread_self()->tid);
+#endif
+
 	struct waiter node = { 0 };
 	int e, seq, clock = c->_c_clock, cs, shared=0, oldstate, tmp;
 #ifndef __wasilibc_unmodified_upstream
