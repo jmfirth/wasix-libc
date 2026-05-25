@@ -118,15 +118,13 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
 		return ENOTRECOVERABLE;
 	}
 	if (own || (old && !(type & 4))) {
-#ifndef __wasilibc_unmodified_upstream
-		/* firebox#533 stage=13: EBUSY — mutex already held by another
-		 * thread (own!=0) OR was held and the type doesn't tolerate
-		 * waiters (i.e. trylock contention). For NORMAL mutexes this
-		 * is the standard "contended" path, NOT a wedge — but it MAY
-		 * surface in the cascade-9 dominant crumb depending on libuv's
-		 * mutex_lock retry loop. */
-		firebox_533_mutex_lock_trace(13, EBUSY);
-#endif
+		/* firebox#533: stage=13 (EBUSY) intentionally NOT stamped.
+		 * Standard contention path — fires on every contended trylock
+		 * (millions of calls under libuv load). Earlier draft emitted
+		 * here and caused 22/22 OOB regression via stderr-write storm
+		 * + thread-OOB on the resulting fd-table contention. EBUSY
+		 * isn't a terminal abort cause for libuv anyway — libuv loops
+		 * around it via __pthread_mutex_timedlock's retry. */
 		return EBUSY;
 	}
 
@@ -153,11 +151,8 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
 #endif
 			return ENOTRECOVERABLE;
 		}
-#ifndef __wasilibc_unmodified_upstream
-		/* firebox#533 stage=15: EBUSY — CAS lost (mutex acquired by
-		 * another thread between our read of _m_lock and our CAS). */
-		firebox_533_mutex_lock_trace(15, EBUSY);
-#endif
+		/* firebox#533: stage=15 (EBUSY-CAS-lost) intentionally NOT
+		 * stamped. Same hot-path rationale as stage=13 above. */
 		return EBUSY;
 	}
 
