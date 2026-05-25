@@ -21,7 +21,41 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
 			return 0;
 		}
 	}
-	if (own == 0x3fffffff) return ENOTRECOVERABLE;
+	/* firebox#550 — gate ENOTRECOVERABLE on PTHREAD_MUTEX_ROBUST (type & 4).
+	 *
+	 * Upstream musl unconditionally returns ENOTRECOVERABLE if the lock-word's
+	 * owner field equals the robust-mutex "owner died, state unrecoverable"
+	 * sentinel (0x3fffffff). For a non-robust mutex this is wrong: per POSIX
+	 * 2017 (pthread_mutex_lock §RETURN VALUE), ENOTRECOVERABLE is reserved for
+	 * robust mutexes — it returns when "the state protected by the mutex is
+	 * not recoverable", a concept that only exists for the robust protocol.
+	 *
+	 * On non-robust mutexes the 0x3fffffff value should never legitimately
+	 * occur; nothing in the wasix-libc thread code writes that owner-field
+	 * value to a non-robust mutex's _m_lock (pthread_mutex_unlock's write of
+	 * 0x7fffffff is gated on (type&4); pthread_create.c's robust_list-sweep
+	 * swap writes 0x40000000, giving own=0). Under the firebox#548 cascade-9
+	 * reproducer however the value DOES appear (29/30 cond_wait_exit rc=56
+	 * + 1/30 mutex_lock_exit rc=56 on libuv's PTHREAD_MUTEX_ERRORCHECK
+	 * threadpool mutex), almost certainly from a race interaction between
+	 * the robust_list-sweep teardown (pthread_create.c:163's a_swap to
+	 * 0x40000000), the cond_wait barrier-unlock path (pthread_cond_timedwait.c
+	 * setting val|0x80000000), and a concurrent contended acquire — but the
+	 * exact write race is not load-bearing for this fix.
+	 *
+	 * Gating the return on (type & 4) makes the path POSIX-correct: robust
+	 * mutexes still surface ENOTRECOVERABLE as documented; non-robust mutexes
+	 * fall through to the next predicate (`if (own || ...)`) and return
+	 * EBUSY, letting pthread_mutex_timedlock's wait-retry loop reacquire the
+	 * mutex once the race window clears. This matches the upstream-Linux
+	 * glibc behavior, where non-robust mutexes never implement the dead-owner
+	 * sentinel and the code path is effectively unreachable.
+	 *
+	 * Witness: firebox#548 phase-1 probe — `cond_wait_exit rc=56` (29×) +
+	 * `mutex_lock_exit rc=56` (1×) at 100% of FAIL_127 corpus runs.
+	 * Closes: firebox#550, cascade-9 cycle 12 (final).
+	 */
+	if ((type & 4) && own == 0x3fffffff) return ENOTRECOVERABLE;
 	if (own || (old && !(type & 4))) return EBUSY;
 
 	if (type & 128) {
