@@ -123,6 +123,44 @@ __wasi_errno_t __wasi_fd_pipe(
     return (uint16_t) ret;
 }
 
+/*
+ * firebox#712 (GUI O1): general ioctl passthrough.
+ *
+ * Hand-added (NOT regenerated from wasix_v1.witx — the witx does not yet
+ * carry fd_ioctl). The host syscall is fd_ioctl(fd, request, argp, ret):
+ * the guest passes the full Linux _IOC(dir, type, nr, size) `request` and
+ * an `argp` pointer into its own linear memory; the host decodes the
+ * request's direction/size, dispatches to the device's VirtualFile::ioctl
+ * handler, and writes the ioctl's integer return through `ret`. The errno
+ * is the function's return value. See the wasmer fork's
+ * lib/wasix/src/syscalls/wasix/fd_ioctl.rs (firebox#705) and
+ * docs/architecture/framebuffer-device.md §3 (O1). This is the import a
+ * real program's ioctl(2) default case (sys/ioctl/ioctl.c) resolves to,
+ * so fbterm / SDL fbcon / libinput reach the framebuffer + evdev devices.
+ *
+ * The __import_module__ decoration is load-bearing: an undecorated extern
+ * would land under the default "env" module and the host (which registers
+ * under "wasix_32v1") would never link it (the import-module-name drift
+ * class lesson). This file is the wasm-only generated thunk TU, so no
+ * `#ifdef __wasm__` weak-default gate is needed — every thunk here is an
+ * unconditional wasm import, the same shape as the fd_dup2/tty_get thunks
+ * above. `wasm-objdump -j Import` on a consumer confirms the module/name.
+ */
+int32_t __imported_wasix_32v1_fd_ioctl(int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("fd_ioctl")
+));
+
+__wasi_errno_t __wasi_fd_ioctl(
+    __wasi_fd_t fd,
+    uint32_t request,
+    void *argp,
+    int32_t *retptr0
+){
+    int32_t ret = __imported_wasix_32v1_fd_ioctl((int32_t) fd, (int32_t) request, (intptr_t) argp, (intptr_t) retptr0);
+    return (uint16_t) ret;
+}
+
 int32_t __imported_wasix_32v1_tty_get(int32_t arg0) __attribute__((
     __import_module__("wasix_32v1"),
     __import_name__("tty_get")

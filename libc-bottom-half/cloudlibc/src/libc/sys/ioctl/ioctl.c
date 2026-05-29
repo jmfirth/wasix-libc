@@ -118,9 +118,45 @@ int ioctl(int fildes, int request, ...) {
       }
       return 0;
     }
-    default:
-      // Invalid request.
-      errno = EINVAL;
-      return -1;
+    default: {
+      // firebox#712 (GUI O1): every ioctl the dedicated cases above don't
+      // handle routes to the general WASIX fd_ioctl syscall, the Linux
+      // "one syscall, per-driver handler" shape. This is what lets a real
+      // program (fbterm, SDL fbcon, libinput) reach a device's ioctl table
+      // — e.g. ioctl(fd, FBIOGET_VSCREENINFO, &vinfo) reaches the
+      // framebuffer device's handler. Previously this returned EINVAL,
+      // which made every device ioctl unreachable from userspace.
+      //
+      // The host decodes the full _IOC(dir, type, nr, size) request and
+      // marshals `argp` in the direction(s) the request encodes (see the
+      // wasmer fork's fd_ioctl.rs). We pass `request` through unchanged
+      // (cast to uint32_t — the encoded form Linux uses) and forward the
+      // single pointer-or-integer argument. We deliberately treat the
+      // variadic arg as a pointer (`void *`): every _IOC-encoded ioctl that
+      // takes an argument takes a pointer to its struct, and an integer arg
+      // (the rare _IO(...) with an int) is passed by-value as an int that
+      // fits a pointer-width slot on wasm32 — the host reads only as many
+      // bytes as the request's size field (or the device's arg-size hint)
+      // declares, so a by-value int is harmless when size==0.
+      va_list ap;
+      va_start(ap, request);
+      void *argp = va_arg(ap, void *);
+      va_end(ap);
+
+      // The ioctl's integer return value (Linux ioctls return >= 0 on
+      // success; getters/setters return 0). The host writes it here.
+      int32_t ioctl_ret = 0;
+      __wasi_errno_t error =
+          __wasi_fd_ioctl(fildes, (uint32_t)request, argp, &ioctl_ret);
+      if (error != 0) {
+        // Linux ioctl() reports failure as -1 with errno set. A device that
+        // doesn't implement the request yields ENOTTY ("inappropriate ioctl
+        // for device"), exactly as on Linux.
+        errno = error;
+        return -1;
+      }
+      // Success: return the driver's integer result (0 for the fb getters).
+      return ioctl_ret;
+    }
   }
 }
