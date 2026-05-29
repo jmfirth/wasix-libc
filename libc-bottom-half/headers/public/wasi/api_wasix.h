@@ -3902,6 +3902,27 @@ __wasi_errno_t __wasi_fd_pipe(
     __wasi_fd_t *retptr1
 ) __attribute__((__warn_unused_result__));
 /**
+ * Performs a device-specific ioctl(2) on an open file descriptor.
+ *
+ * firebox#712 (GUI O1): the general WASIX ioctl entry point — the Linux
+ * "one syscall, per-driver handler" shape. `request` is the full Linux
+ * `_IOC(dir, type, nr, size)` number; `argp` points at the request's
+ * argument structure in linear memory (may be NULL for argument-less
+ * ioctls). The ioctl's integer return value is written through `retptr0`
+ * (0 on success, as on Linux); the function returns the errno. A device
+ * that does not implement `request` — or a regular file / pipe / socket,
+ * which implement no ioctls — yields `__WASI_ERRNO_NOTTY`.
+ *
+ * Hand-added: not yet in wasix_v1.witx. See the wasmer fork's
+ * lib/wasix/src/syscalls/wasix/fd_ioctl.rs (firebox#705).
+ */
+__wasi_errno_t __wasi_fd_ioctl(
+    __wasi_fd_t fd,
+    uint32_t request,
+    void *argp,
+    int32_t *retptr0
+) __attribute__((__warn_unused_result__));
+/**
  * Retrieves the current state of the TTY
  */
 __wasi_errno_t __wasi_tty_get(
