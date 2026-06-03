@@ -176,9 +176,20 @@ fn print_alias(ret: &mut String, name: &Id, dest: &TypeRef) {
         }
         _ => {
             if name.as_str() == "size" {
-                // Special-case "size" as "uint32_t" -- TODO: Encode this in witx.
+                // firebox#796: `$size` is now `usize` (pointer-width) in witx, so
+                // `__wasi_size_t` must follow the target width: uint64_t on wasm64,
+                // uint32_t on wasm32. Keyed off the witx-computed memory size so the
+                // typedef stays consistent with the `_Static_assert(sizeof ...)` below
+                // (8 on a 64-bit target, 4 on 32-bit). Previously hardcoded uint32_t
+                // (the "TODO: encode in witx" hack) which made wasm64 size params i32.
+                let size_ty = if dest.mem_size_align().size == 8 {
+                    "uint64_t"
+                } else {
+                    "uint32_t"
+                };
                 ret.push_str(&format!(
-                    "typedef uint32_t __wasi_{}_t;\n",
+                    "typedef {} __wasi_{}_t;\n",
+                    size_ty,
                     ident_name(name)
                 ));
             } else {

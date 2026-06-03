@@ -68,11 +68,109 @@ struct map {
     int fd;
 };
 
+// firebox#796: MAP_FIXED support for blink's wasm64 linear mapping.
+//
+// Blink built for wasm64 has CAN_64BIT=1 → HasLinearMapping() true → it places
+// guest memory at host offset == guest VA (ToHost(va)=va+kSkew, kSkew==0) via
+// mmap(addr, ..., MAP_FIXED). The malloc/aligned_alloc path below cannot honor a
+// fixed address, so a fixed request is handled specially: grow the wasm linear
+// memory to cover [addr, addr+len), fill it (file pread or zero), and return
+// addr. This makes the guest's emulated address space coincide with linear-
+// memory offsets — the whole point of the wasm64 port (collapses the software
+// MMU). NOTE (#796 PoC): correctness for arbitrary workloads still requires
+// blink's own malloc heap to be disjoint from the guest vaspace (a layout
+// redesign — see task 796); small static ELFs whose fixed segments fall in
+// otherwise-unused linear memory work today. munmap of a fixed mapping is a
+// no-op (wasm memory can't shrink; blink tracks guest maps itself). A small
+// registry records fixed ranges so munmap/msync distinguish them from the
+// malloc-backed mappings (whose header lives one page below the user addr).
+#define WASIX_MMAN_FIXED_MAX 4096
+static struct { uintptr_t addr; size_t len; } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
+static int g_fixed_count;
+
+static int wasix_fixed_is_registered(uintptr_t addr) {
+    for (int i = 0; i < g_fixed_count; i++) {
+        if (g_fixed_maps[i].addr == addr) return 1;
+    }
+    return 0;
+}
+
+static int wasix_fixed_unregister(uintptr_t addr) {
+    for (int i = 0; i < g_fixed_count; i++) {
+        if (g_fixed_maps[i].addr == addr) {
+            g_fixed_maps[i] = g_fixed_maps[--g_fixed_count];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void *wasix_mmap_fixed(void *addr, size_t length, int flags, int fd,
+                              off_t offset) {
+    uintptr_t target = (uintptr_t)addr;
+    size_t need;
+    if (__builtin_add_overflow(target, length, &need)) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    // Grow the single wasm linear memory to cover [target, target+length).
+    size_t have = (size_t)__builtin_wasm_memory_size(0) * (size_t)65536;
+    if (need > have) {
+        size_t grow_pages = (need - have + 65535) / 65536;
+        if (__builtin_wasm_memory_grow(0, grow_pages) == (size_t)-1) {
+            errno = ENOMEM;
+            return MAP_FAILED;
+        }
+    }
+    if ((flags & MAP_ANON) == 0) {
+        char *body = (char *)addr;
+        size_t rem = length;
+        off_t off = offset;
+        while (rem > 0) {
+            const ssize_t n = pread(fd, body, rem, off);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                return MAP_FAILED;
+            }
+            if (n == 0) {           // short file — zero-fill the remainder
+                memset(body, 0, rem);
+                break;
+            }
+            rem -= (size_t)n;
+            off += n;
+            body += (size_t)n;
+        }
+    } else {
+        memset(addr, 0, length);
+    }
+    if (!wasix_fixed_is_registered(target) && g_fixed_count < WASIX_MMAN_FIXED_MAX) {
+        g_fixed_maps[g_fixed_count].addr = target;
+        g_fixed_maps[g_fixed_count].len = length;
+        g_fixed_count++;
+    }
+    return addr;
+}
+
 void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset) {
+    // firebox#796: a fixed-address request (blink's wasm64 linear mapping) is
+    // placed AT addr rather than malloc'd. Blink's MAP_FIXED maps to the host's
+    // MAP_FIXED (0x10); its MAP_DEMAND ("place here but don't clobber existing")
+    // maps to MAP_FIXED_NOREPLACE (0x100000) — both mean "the mapping MUST land
+    // at addr", which is exactly the linear-mapping requirement. (We don't honor
+    // the NOREPLACE "fail if occupied" semantics for the PoC; blink's loader
+    // targets free guest VA.) PROT_EXEC is allowed (blink maps executable guest
+    // segments PROT_READ|PROT_EXEC; on wasm the page is data either way — the JIT
+    // executes via the host, not guest page perms).
+    int fixed_req = (flags & MAP_FIXED) != 0;
+#ifdef MAP_FIXED_NOREPLACE
+    fixed_req = fixed_req || (flags & MAP_FIXED_NOREPLACE) != 0;
+#endif
+    if (fixed_req && addr != NULL && length != 0) {
+        return wasix_mmap_fixed(addr, length, flags, fd, offset);
+    }
     // Check for unsupported flags.
     if ((flags & (MAP_PRIVATE | MAP_SHARED)) == 0 ||
-        (flags & MAP_FIXED) != 0 ||
 #ifdef MAP_SHARED_VALIDATE
         (flags & MAP_SHARED_VALIDATE) == MAP_SHARED_VALIDATE ||
 #endif
@@ -176,6 +274,12 @@ void *mmap(void *addr, size_t length, int prot, int flags,
 }
 
 int munmap(void *addr, size_t length) {
+    // firebox#796: a fixed mapping (blink wasm64 linear mapping) has no
+    // malloc backing — the wasm linear memory can't shrink, and blink tracks
+    // the guest's maps itself, so just drop the registry entry and succeed.
+    if (wasix_fixed_unregister((uintptr_t)addr)) {
+        return 0;
+    }
     // Recover the header that lives one page below the user address.
     // Symmetric to the mmap return: addr == base + WASIX_MMAN_PAGE_SIZE.
     void *base = (char *)addr - WASIX_MMAN_PAGE_SIZE;
@@ -206,6 +310,12 @@ int munmap(void *addr, size_t length) {
 }
 
 int msync (void *addr, size_t length, int flags) {
+    // firebox#796: fixed mappings (blink wasm64 linear mapping) have no
+    // header and no separate backing file to flush — the bytes already live in
+    // linear memory. Treat msync as a no-op success.
+    if (wasix_fixed_is_registered((uintptr_t)addr)) {
+        return 0;
+    }
     // Header recovery: see munmap() for layout. addr is page-aligned by
     // construction; the header sits exactly one page below it.
     struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);

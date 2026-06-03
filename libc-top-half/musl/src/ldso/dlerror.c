@@ -80,7 +80,7 @@ hidden void __dl_seterr(const char *fmt, ...)
 
 static int stub_invalid_handle(void *h)
 {
-	__dl_seterr("Invalid library handle %p", (void *)h);
+	__dl_seterr("Invalid library handle %p", (void *)(uintptr_t)h);
 	return 1;
 }
 

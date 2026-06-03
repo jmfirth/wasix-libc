@@ -22,7 +22,7 @@ wasi_thread_start:
 
 	# Set up the TLS area
 	local.get   1  # start_arg
-	i32.load    8  # tls_base
+	i64.load    8  # tls_base
 	call __wasm_init_tls
 
 	# Make the C function do the rest of work.

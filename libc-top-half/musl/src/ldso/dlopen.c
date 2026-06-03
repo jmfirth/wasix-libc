@@ -27,5 +27,5 @@ void *dlopen(const char *file, int mode)
 		return NULL;
 	}
 
-	return (void *)ret;
+	return (void *)(uintptr_t)ret;
 }

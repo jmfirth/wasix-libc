@@ -9,7 +9,7 @@ void *dlsym(void *restrict p, const char *restrict s)
 	char err_buf[256];
 	err_buf[0] = '\0';
 
-	int err = __wasi_dlsym((__wasi_dl_handle_t)p, s, (uint8_t *)err_buf, sizeof(err_buf), &ret);
+	int err = __wasi_dlsym((__wasi_dl_handle_t)(uintptr_t)p, s, (uint8_t *)err_buf, sizeof(err_buf), &ret);
 
 	if (err != 0)
 	{
@@ -24,5 +24,5 @@ void *dlsym(void *restrict p, const char *restrict s)
 		return NULL;
 	}
 
-	return (void *)ret;
+	return (void *)(uintptr_t)ret;
 }

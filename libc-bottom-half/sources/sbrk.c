@@ -18,6 +18,18 @@ extern unsigned char __heap_base;
 // contract upstream wasi-libc had (no thread safety on bare sbrk).
 static unsigned char *brk_ptr = NULL;
 
+// firebox#796: optional ceiling for the malloc arena. Default = no cap.
+//
+// An embedder that shares the single wasm linear memory between its own malloc
+// heap AND a separately-managed high region — e.g. blink's wasm64 linear-mapping
+// mode, where the guest's address space occupies linear [kSkew, ...) and is
+// grown directly via memory.grow — sets this to confine sbrk below that region.
+// Without it, once the high region has grown the memory, sbrk's "fits in
+// already-addressable memory" branch (below) would walk brk_ptr straight into
+// it. A pure ABI addition: left at UINTPTR_MAX it is a no-op, so other wasm
+// programs are unaffected.
+uintptr_t __wasilibc_sbrk_max = (uintptr_t)-1;
+
 // Bare-bones implementation of sbrk.
 //
 // Firebox patch (wasix-libc 0021): walks a static brk_ptr through linear memory
@@ -59,6 +71,17 @@ void *sbrk(intptr_t increment) {
     // memory.
     uintptr_t mem_end = __builtin_wasm_memory_size(0) * PAGESIZE;
     unsigned char *new_brk = brk_ptr + increment;
+
+    // firebox#796: refuse to grow the heap past the embedder-set ceiling. This
+    // keeps the malloc arena disjoint from a high linear-memory region the
+    // embedder owns (blink's kSkew-relocated guest). dlmalloc treats the -1 as
+    // OOM and returns NULL for that allocation, rather than corrupting the
+    // guest region. No-op when unset (UINTPTR_MAX).
+    if ((uintptr_t)new_brk > __wasilibc_sbrk_max) {
+        errno = ENOMEM;
+        return (void *)-1;
+    }
+
     if ((uintptr_t)new_brk <= mem_end) {
         // Fits — just advance brk_ptr and return the previous break.
         unsigned char *old_brk = brk_ptr;
