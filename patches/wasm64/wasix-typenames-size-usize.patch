@@ -1,0 +1,18 @@
+diff --git a/phases/snapshot/witx/typenames.witx b/phases/snapshot/witx/typenames.witx
+index 29811e3..62c540f 100644
+--- a/phases/snapshot/witx/typenames.witx
++++ b/phases/snapshot/witx/typenames.witx
+@@ -466,7 +466,12 @@
+ ;; Type names used by low-level WASI interfaces - these are hidden and should
+ ;; instead be maintained in the WASI witx.
+ 
+-(typename hidden $size u32)
++;; firebox#796: `$size` is pointer-width (size_t), not a fixed u32. On a memory64
++;; target (Blink-on-wasm64) `usize` is i64, matching the wasmer Memory64 host's
++;; `M::Offset` for `$size`-typed args (e.g. sock_listen `$backlog`); on wasm32
++;; `usize` is i32 (identical to the old `u32`). This is the wasix surface that
++;; feeds api_wasix.h / the wasix_64v1 imports.
++(typename hidden $size usize)
+ (typename hidden $filesize u64)
+ (typename hidden $timestamp u64)
+ (typename hidden $clockid

@@ -1,0 +1,18 @@
+diff --git a/phases/snapshot/witx/typenames.witx b/phases/snapshot/witx/typenames.witx
+index 893e5b2..64d7b13 100644
+--- a/phases/snapshot/witx/typenames.witx
++++ b/phases/snapshot/witx/typenames.witx
+@@ -5,7 +5,12 @@
+ ;; This is a `witx` file. See [here](https://github.com/WebAssembly/WASI/tree/master/docs/witx.md)
+ ;; for an explanation of what that means.
+ 
+-(typename $size u32)
++;; firebox#796: `$size` is pointer-width (size_t), not a fixed u32. On a memory64
++;; target (Blink-on-wasm64) it must be i64 to match the standard memory64 WASI
++;; ABI + the wasmer Memory64 host; on wasm32 `usize` is still i32 (identical to
++;; the old `u32`). The build64.sh `$buf_len $size -> usize` seds were a partial
++;; hand-fix of this; making `$size` itself `usize` generalizes it.
++(typename $size usize)
+ 
+ ;;; Non-negative file size or length of a region within a file.
+ (typename $filesize u64)
