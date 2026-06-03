@@ -14,6 +14,13 @@
 # (see work/tasks/797-* + work/tasks/796-*/reports/2026-06-03-wasm64-sysroot-
 # reproducibility-addendum.md).
 #
+# firebox#800: the 7 Firebox WASIX extension fns (fd_lock / fd_lock_range / fd_chmod /
+# path_chmod / path_lchmod / path_mknod / fd_ioctl) NO LONGER live in the regenerated
+# files — they were extracted to the committed, firebox-owned
+# libc-bottom-half/sources/__wasixlibc_firebox.c + headers/public/wasi/api_firebox.h.
+# So a regen + #if-wrap is now CLEAN: wasm64-overlay.sh is RETIRED (do not re-apply it).
+# The router api.h below includes api_firebox.h so callers see the decls.
+#
 # DETERMINISM (vs the old `git reset --hard` + `git pull origin main`, which both
 # discarded local state and injected upstream non-determinism):
 #   - The WASI submodules are PINNED. We never reset/pull them.
@@ -78,6 +85,7 @@ cp -f libc-bottom-half/headers/public/wasi/api.h libc-bottom-half/headers/public
 cat > libc-bottom-half/headers/public/wasi/api.h <<EOF
 #include "api_wasi.h"
 #include "api_wasix.h"
+#include "api_firebox.h"
 #include "api_poly.h"
 EOF
 

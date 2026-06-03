@@ -11,7 +11,7 @@
 
 #include <errno.h>
 #include <sys/file.h>
-#include <wasi/api_wasix.h>
+#include <wasi/api_firebox.h> /* firebox#800: __wasix_fd_lock decl moved out of the generated api_wasix.h */
 
 int flock(int fd, int op)
 {
