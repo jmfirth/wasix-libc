@@ -56,16 +56,40 @@ hidden void __firebox_register_held_lock(volatile int *l)
 	unsigned n = self->firebox_held_locks_count;
 	if (n >= __FIREBOX_HELD_LOCKS_CAP) {
 		self->firebox_held_locks_overflow++;
-		return;
+	} else {
+		self->firebox_held_locks[n] = l;
+		self->firebox_held_locks_count = n + 1;
 	}
-	self->firebox_held_locks[n] = l;
-	self->firebox_held_locks_count = n + 1;
+	/* firebox#811 Phase 2 — ALSO register the lock-word with the HOST
+	 * held-list (WasiFutexState.held) via the futex_register_held
+	 * syscall, so the host-side thread-exit sweep (#811 Phase 1) covers
+	 * this address even when the owner thread never reaches the GUEST
+	 * sweep (firebox_pthread_exit_sweep_wake fires only on cooperative
+	 * __pthread_exit, never on the main-thread exit() short-circuit or a
+	 * host-killed worker). This is the single choke point that routes
+	 * the cv-internal lock (pthread_cond_timedwait.c, the #814 cargo
+	 * teardown orphan), __lock, and __lockfile to BOTH held-lists.
+	 *
+	 * Register on the cap-overflow path too: the host list is a HashMap
+	 * with no 16-entry cap, so it still covers what the guest array
+	 * dropped. The host dedups (addr,tid) — a double-register is a
+	 * benign no-op (futex_register_held.rs duplicate handling). */
+	__firebox_host_register_held(l);
 }
 
 hidden void __firebox_deregister_held_lock(volatile int *l)
 {
 	pthread_t self = __pthread_self();
 	unsigned n = self->firebox_held_locks_count;
+	/* firebox#811 Phase 2 — deregister from the HOST held-list FIRST,
+	 * mirroring the deregister-before-release ordering the guest array
+	 * already uses (and the rust-std #496 pattern): the host syscall
+	 * must drop our ownership claim before __unlock's release atomic
+	 * announces the lock to other threads, so a concurrent host sweep
+	 * never wakes an address we no longer hold. Always fire it (even on
+	 * the not-found guest-array path below) — the host treats a
+	 * deregister-without-register as a benign no-op. */
+	__firebox_host_deregister_held(l);
 	for (unsigned i = n; i-- > 0; ) {
 		if (self->firebox_held_locks[i] == l) {
 			self->firebox_held_locks[i] = self->firebox_held_locks[n - 1];

@@ -44,3 +44,24 @@ __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd,const char *path,size_t path_le
 int32_t __imported_wasix_fbx_fd_ioctl(int32_t,int32_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_ioctl")));
 __wasi_errno_t __wasi_fd_ioctl(__wasi_fd_t fd,uint32_t request,void *argp,int32_t *retptr0){return (uint16_t)__imported_wasix_fbx_fd_ioctl((int32_t)fd,(int32_t)request,(intptr_t)argp,(intptr_t)retptr0);}
 #endif
+
+/* firebox#811 Phase 2 — HOST held-list registration syscalls.
+ *
+ * The host (jmfirth/wasmer#firebox-patches) records (lock-word-addr, tid)
+ * in WasiFutexState.held; #811 Phase 1's host thread-exit sweep clears the
+ * word AND wakes waiters for every addr the exiting tid still holds. These
+ * two wrappers let the musl lock primitives register/deregister their
+ * lock-word addresses with that host list (see __lock.c's shared helpers).
+ *
+ * The single argument is the linear-memory OFFSET of the lock word
+ * (host signature: WasmPtr<u32, M>). It is passed as intptr_t — i32 on
+ * wasm32, i64 on wasm64 — so the import resolves under both wasix_32v1 and
+ * wasix_64v1 (the #797 target split). rust-std (#496) hardcodes i32 because
+ * it is wasm32-only; the libc path is dual-target, so it mirrors the
+ * (intptr_t) pointer-passing convention of the wrappers above. The host
+ * derives the tid; the return is always Success (best-effort: duplicate
+ * register / unmatched deregister are benign no-ops host-side). */
+int32_t __imported_wasix_fbx_futex_register_held(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("futex_register_held")));
+int32_t __imported_wasix_fbx_futex_deregister_held(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("futex_deregister_held")));
+void __firebox_host_register_held(volatile int *l){(void)__imported_wasix_fbx_futex_register_held((intptr_t)l);}
+void __firebox_host_deregister_held(volatile int *l){(void)__imported_wasix_fbx_futex_deregister_held((intptr_t)l);}

@@ -77,6 +77,19 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
 	}
 
 success:
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#811 Phase 2 — register the lock word with the host
+	 * held-list on a successful FIRST acquisition (the word-transition
+	 * paths: the a_cas at :73, or the goto from the robust
+	 * ENOTRECOVERABLE-clear at :16). The RECURSIVE re-lock returns early
+	 * at :21 (m_count++) WITHOUT reaching here, so this fires once per
+	 * logical ownership — balanced against the single deregister on the
+	 * a_swap-reaching unlock path. The host dedups (addr,tid), so the
+	 * rare double via the :16 goto is a benign no-op. Covers libuv #808
+	 * and the contended __pthread_mutex_lock/timedlock slow paths, which
+	 * delegate here. */
+	__firebox_host_register_held(&m->_m_lock);
+#endif
 	if ((type&8) && m->_m_waiters) {
 		int priv = (type & 128) ^ 128;
 #ifdef __wasilibc_unmodified_upstream
@@ -104,8 +117,20 @@ success:
 
 int __pthread_mutex_trylock(pthread_mutex_t *m)
 {
-	if ((m->_m_type&15) == PTHREAD_MUTEX_NORMAL)
+	if ((m->_m_type&15) == PTHREAD_MUTEX_NORMAL) {
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#811 Phase 2 — NORMAL trylock: a_cas returns the OLD
+		 * word; 0 means we just acquired (the lock was free). Register
+		 * with the host held-list only on that acquired transition. This
+		 * also covers the contended __pthread_mutex_timedlock retry loop,
+		 * which calls back here on each spin until it wins. */
+		int prev = a_cas(&m->_m_lock, 0, EBUSY);
+		if (!prev) __firebox_host_register_held(&m->_m_lock);
+		return prev & EBUSY;
+#else
 		return a_cas(&m->_m_lock, 0, EBUSY) & EBUSY;
+#endif
+	}
 	return __pthread_mutex_trylock_owner(m);
 }
 

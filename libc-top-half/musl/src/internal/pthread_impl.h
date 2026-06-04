@@ -325,6 +325,15 @@ hidden void __firebox_lock_sweep_wake_one(volatile int *l);
  * Same shape, same sweep, same orphan-protection guarantee. */
 hidden void __firebox_register_held_lock(volatile int *l);
 hidden void __firebox_deregister_held_lock(volatile int *l);
+
+/* firebox#811 Phase 2 — thin wrappers over the host futex_register_held /
+ * futex_deregister_held syscalls (defined in the #800 overlay
+ * libc-bottom-half/sources/__wasixlibc_firebox.c). Called from the shared
+ * __firebox_{register,deregister}_held_lock helpers in __lock.c so the
+ * musl lock family (cv-internal lock, __lock, __lockfile) also routes to
+ * the HOST held-list that #811 Phase 1's thread-exit sweep covers. */
+hidden void __firebox_host_register_held(volatile int *l);
+hidden void __firebox_host_deregister_held(volatile int *l);
 #endif
 
 extern hidden volatile int __thread_list_lock;

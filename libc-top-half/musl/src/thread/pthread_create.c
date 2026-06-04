@@ -72,7 +72,21 @@ static void firebox_pthread_exit_sweep_wake(pthread_t self)
 	unsigned n = self->firebox_held_locks_count;
 	for (unsigned i = 0; i < n; ++i) {
 		volatile int *addr = self->firebox_held_locks[i];
-		if (addr) __wake(addr, -1, 1);
+		if (addr) {
+			/* firebox#810/#814 — CLEAR the lock word to 0 BEFORE waking.
+			 * A bare __wake re-parks: the woken waiter re-reads the still-
+			 * contended word and its __futexwait predicate (`*l == expected`)
+			 * is still true, so it sleeps again — the lost-wake never
+			 * resolves. Force the word to the unlocked value (0) first, so
+			 * the woken waiter sees an unlocked lock and proceeds (or
+			 * re-acquires via its a_cas(l,0,·) retry). This matches the
+			 * correct clear+wake shape already used by
+			 * __firebox_lock_sweep_wake_one (__lock.c) and the host-side
+			 * Phase-1 sweep (sweep_held_futexes_on_thread_exit). Without
+			 * this, the guest sweep was a no-op for every contended orphan. */
+			a_swap(addr, 0);
+			__wake(addr, -1, 1);
+		}
 	}
 	self->firebox_held_locks_count = 0;
 }

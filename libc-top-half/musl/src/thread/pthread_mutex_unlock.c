@@ -46,6 +46,17 @@ int __pthread_mutex_unlock(pthread_mutex_t *m)
 		cont = a_swap(&m->_m_lock, new);
 	}
 #else
+		/* firebox#811 Phase 2 — deregister from the host held-list BEFORE
+		 * the a_swap release-to-waiters, mirroring __unlock's
+		 * deregister-before-release ordering: drop our ownership claim
+		 * before the word announces the lock to other threads, so a
+		 * concurrent host sweep never wakes an address we no longer hold.
+		 * Reached ONLY on the genuine release path — the EPERM (:18) and
+		 * RECURSIVE m_count-- (:20) early returns above never get here, so
+		 * a recursively-held mutex is not deregistered until its final
+		 * release. Balanced against the single register in trylock's
+		 * success path. */
+		__firebox_host_deregister_held(&m->_m_lock);
 		cont = a_swap(&m->_m_lock, new);
 #endif
 	if (type != PTHREAD_MUTEX_NORMAL && !priv) {
