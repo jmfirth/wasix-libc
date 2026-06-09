@@ -18,6 +18,26 @@ extern unsigned char __heap_base;
 // contract upstream wasi-libc had (no thread safety on bare sbrk).
 static unsigned char *brk_ptr = NULL;
 
+// firebox#853: end of the region sbrk OWNS — the addressable memory captured
+// at first call, plus pages sbrk itself obtained via memory.grow. sbrk must
+// never walk brk_ptr into pages it did not obtain: the HOST also calls
+// memory.grow at runtime (e.g. the wasmer dynamic linker reserving
+// per-side-module TLS arenas at dlopen, or side-module memory regions), and
+// those pages are NOT heap. The previous "fits in addressable memory" check
+// (`new_brk <= memory.size * PAGESIZE`) walked brk_ptr straight through such
+// foreign regions, so dlmalloc chunks overlapped the dynamic linker's TLS
+// arenas — every thread-spawn's TLS-image write then clobbered live heap
+// (the firebox#852/#853 in-guest rustc/icu4x corruption: garbage vtable
+// funcrefs, "len is 0" metadata decodes, OOB traps). This is the dynamic
+// generalization of the #796 static ceiling (`__wasilibc_sbrk_max` confines
+// sbrk below ONE region known at startup; `owned_end` confines it to regions
+// sbrk provably obtained, whenever foreign grows happen). On Linux, brk()
+// never hands out mmap'd ranges because the kernel arbitrates both
+// allocators; in wasm the host's grows are invisible to the guest, so sbrk
+// must self-limit and go DISCONTIGUOUS past foreign regions (dlmalloc
+// supports non-contiguous MORECORE via add_segment).
+static uintptr_t owned_end = 0;
+
 // firebox#796: optional ceiling for the malloc arena. Default = no cap.
 //
 // An embedder that shares the single wasm linear memory between its own malloc
@@ -32,17 +52,25 @@ uintptr_t __wasilibc_sbrk_max = (uintptr_t)-1;
 
 // Bare-bones implementation of sbrk.
 //
-// Firebox patch (wasix-libc 0021): walks a static brk_ptr through linear memory
-// instead of unconditionally calling memory.grow. memory.grow is now only
-// invoked as a fallback when brk_ptr would exceed the currently addressable
-// memory.size. This makes malloc work for binaries declaring fixed-size shared
-// memory (`(memory N N shared)`), where memory.grow always fails and the
-// upstream sbrk implementation makes every malloc return NULL — fatal for any
-// C code that allocates, including the wasi-libc preopen-init constructor.
+// Firebox patch (wasix-libc 0021, ownership model since firebox#853): walks a
+// static brk_ptr through the region sbrk OWNS (initial memory captured at
+// first call + pages obtained by sbrk's own memory.grow calls) instead of
+// through all addressable memory. memory.grow is invoked when brk_ptr would
+// exceed the owned region. The original 0021 motivation is preserved: for
+// binaries declaring fixed-size shared memory (`(memory N N shared)`),
+// memory.grow always fails, and the initial owned region [&__heap_base,
+// memory.size * PAGESIZE) — captured before anything else can grow — is what
+// makes malloc work there at all.
 void *sbrk(intptr_t increment) {
-    // Lazy init: first call sets brk to __heap_base.
+    // Lazy init: first call sets brk to __heap_base and captures the initial
+    // addressable region as sbrk-owned. This runs from libc startup
+    // (preopen-init constructor's first malloc), before any dlopen or other
+    // runtime host-side grow can have happened, so everything addressable at
+    // this point is link/load-time layout: data, stacks, and the initial
+    // heap arena.
     if (brk_ptr == NULL) {
         brk_ptr = &__heap_base;
+        owned_end = __builtin_wasm_memory_size(0) * PAGESIZE;
     }
 
     // sbrk(0) returns the current break pointer.
@@ -67,10 +95,27 @@ void *sbrk(intptr_t increment) {
     // `pages_needed`), not for the brk_ptr advance itself, so non-page-aligned
     // increments are now permitted.
 
-    // Compute the new break and check whether it fits in already-addressable
-    // memory.
-    uintptr_t mem_end = __builtin_wasm_memory_size(0) * PAGESIZE;
     unsigned char *new_brk = brk_ptr + increment;
+
+    // firebox#842: detect 32-bit pointer overflow at the wasm32 4 GiB ceiling.
+    // `increment > 0` here (the <= 0 cases returned above), so a `new_brk` that
+    // lands BELOW `brk_ptr` can only mean the add wrapped past 2^32. Without this
+    // guard the wrapped (small) `new_brk` slips under BOTH the `__wasilibc_sbrk_max`
+    // check and the owned-region fast-path below, so sbrk hands dlmalloc a chunk
+    // that straddles 2^32 — dlmalloc then writes chunk metadata / the caller
+    // writes payload past the addressable end → "out of bounds memory access" in
+    // dlmalloc + low-memory corruption, instead of a clean OOM. This is the
+    // mechanism behind firebox#674's "rustc.wasm dlmalloc OOB at the 4 GiB
+    // ceiling" (heavy compiles — e.g. cryptography/ICU4X — that genuinely reach
+    // 4 GiB crash mid-build instead of failing gracefully; the durable
+    // compile-it answer is wasm64, but on wasm32 the failure must at least be a
+    // clean OOM). Returning -1 lets dlmalloc report allocation failure normally.
+    // On memory64 `brk_ptr` is 64-bit and never reaches 2^64, so this is a
+    // harmless no-op there.
+    if ((uintptr_t)new_brk < (uintptr_t)brk_ptr) {
+        errno = ENOMEM;
+        return (void *)-1;
+    }
 
     // firebox#796: refuse to grow the heap past the embedder-set ceiling. This
     // keeps the malloc arena disjoint from a high linear-memory region the
@@ -82,15 +127,18 @@ void *sbrk(intptr_t increment) {
         return (void *)-1;
     }
 
-    if ((uintptr_t)new_brk <= mem_end) {
-        // Fits — just advance brk_ptr and return the previous break.
+    // firebox#853: only walk within the sbrk-owned region — NOT all
+    // addressable memory (foreign host-side grows are not heap; see
+    // `owned_end` above).
+    if ((uintptr_t)new_brk <= owned_end) {
         unsigned char *old_brk = brk_ptr;
         brk_ptr = new_brk;
         return old_brk;
     }
 
-    // Doesn't fit — try to grow memory enough to cover the requested increment.
-    uintptr_t shortfall = (uintptr_t)new_brk - mem_end;
+    // Need more pages. Grow enough to cover the shortfall past the owned
+    // region.
+    uintptr_t shortfall = (uintptr_t)new_brk - owned_end;
     uintptr_t pages_needed = (shortfall + PAGESIZE - 1) / PAGESIZE;
     uintptr_t old_pages = __builtin_wasm_memory_grow(0, pages_needed);
     if (old_pages == SIZE_MAX) {
@@ -98,9 +146,42 @@ void *sbrk(intptr_t increment) {
         errno = ENOMEM;
         return (void *)-1;
     }
+    uintptr_t grow_base = old_pages * PAGESIZE;
 
-    // Growth succeeded — advance brk_ptr.
-    unsigned char *old_brk = brk_ptr;
-    brk_ptr = new_brk;
-    return old_brk;
+    if (grow_base == owned_end) {
+        // Contiguous with the owned region (the common case: nobody else grew
+        // since our last grow). Extend ownership and advance.
+        owned_end = grow_base + pages_needed * PAGESIZE;
+        unsigned char *old_brk = brk_ptr;
+        brk_ptr = new_brk;
+        return old_brk;
+    }
+
+    // firebox#853: a foreign grow (dynamic linker / embedder) happened since
+    // we last extended — `[owned_end, grow_base)` belongs to someone else and
+    // must NOT be handed to dlmalloc. Start a fresh, discontiguous heap
+    // region at `grow_base` (dlmalloc treats the jump as a new segment). The
+    // tail of the old region `[brk_ptr, owned_end)` is abandoned (at most a
+    // page's worth on top of dlmalloc's own request rounding — dlmalloc never
+    // assumes it owns memory sbrk didn't return).
+    uintptr_t fresh_have = pages_needed * PAGESIZE;
+    if ((uintptr_t)increment > fresh_have) {
+        // The fresh region must hold the WHOLE increment by itself (the old
+        // region's tail can't be combined across the foreign hole). Grow the
+        // difference; require contiguity with our fresh region.
+        uintptr_t more = ((uintptr_t)increment - fresh_have + PAGESIZE - 1) / PAGESIZE;
+        uintptr_t op2 = __builtin_wasm_memory_grow(0, more);
+        if (op2 == SIZE_MAX || op2 * PAGESIZE != grow_base + fresh_have) {
+            // Out of memory, or yet another foreign grow interleaved between
+            // our two grows (pathological). Fail this allocation cleanly —
+            // dlmalloc reports OOM / retries; nothing is corrupted. The
+            // already-grown pages are abandoned (zero-filled, demand-paged).
+            errno = ENOMEM;
+            return (void *)-1;
+        }
+        fresh_have += more * PAGESIZE;
+    }
+    brk_ptr = (unsigned char *)(grow_base + (uintptr_t)increment);
+    owned_end = grow_base + fresh_have;
+    return (void *)grow_base;
 }
