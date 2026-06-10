@@ -1,0 +1,73 @@
+# Cmake toolchain description file for the WASI single-threaded EH+PIC
+# libc++/libc++abi/libunwind build (firebox#552).
+#
+# Sibling of clang-wasix-eh.cmake_toolchain. Differences from the
+# threaded variant:
+#
+#   * Triple is wasm32-wasip1 (single-threaded) instead of
+#     wasm32-wasmer-wasi. Python/Ruby C-extension build chains use
+#     `--target=wasm32-wasip1`; the EH-on libs MUST match that triple.
+#
+#   * No -matomics / -mbulk-memory / -mmutable-globals / -pthread.
+#     Single-threaded consumers can't link against modules that import
+#     a shared memory or expose TLS exports. The wasi-libc Makefile's
+#     THREAD_MODEL=single path conditionally drops these flags.
+#
+#   * No -Wl,--shared-memory / --import-memory / --export=__wasm_init_tls
+#     / TLS exports. Same reason as above.
+#
+#   * -mllvm -wasm-use-legacy-eh=false STILL applies — emits new-style
+#     wasm-EH (try_table / throw_ref) instructions. The wasm-EH
+#     feature itself is orthogonal to threading: a single-threaded
+#     program can throw exceptions just fine. The
+#     `firebox-542-layer-12-cross-coroutine-unwind` wasmer pin requires
+#     this for any module shipping EH.
+#
+#   * -mllvm -wasm-enable-sjlj STILL applies — needed for libsetjmp.a
+#     and wasi-libc's setjmplongjmp implementations even without
+#     threads.
+#
+#   * -ftls-model=local-exec is dropped — without -pthread, errno is
+#     a plain global (see firebox#323 + the static variant's
+#     __FIREBOX_NO_TLS_ERRNO__ baking in scripts/wasix-libc/build.sh).
+#
+# This toolchain is consumed by build-libcxx-ehpic.sh --nothreads, which
+# in turn produces the EH-on libc++/libc++abi/libunwind staged under
+# scripts/wasix-libc/sysroot-patched-ehpic-nothreads/lib/wasm32-wasip1/.
+cmake_minimum_required(VERSION 3.5.0)
+
+set(COMPILE_FLAGS "-O2 -fno-trapping-math -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -fPIC -fwasm-exceptions -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false")
+set(LINK_FLAGS "-lwasi-emulated-mman -lwasi-emulated-process-clocks -lwasi-emulated-getpid -Wl,-mllvm,--wasm-enable-sjlj")
+
+set(CMAKE_SYSTEM_NAME WASI)
+set(CMAKE_SYSTEM_VERSION 1)
+set(CMAKE_SYSTEM_PROCESSOR wasm32)
+set(CMAKE_C_COMPILER_ID Clang)
+set(triple wasm32-wasip1)
+set(CMAKE_C_COMPILER_TARGET ${triple})
+set(CMAKE_CXX_COMPILER_TARGET ${triple})
+set(CMAKE_ASM_COMPILER_TARGET ${triple})
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMPILE_FLAGS}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMPILE_FLAGS}")
+set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} ${LINK_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LINK_FLAGS}")
+
+if(DEFINED ENV{CC})
+    set(CMAKE_C_COMPILER $ENV{CC})
+else()
+    set(CMAKE_C_COMPILER clang)
+endif()
+if(DEFINED ENV{CXX})
+    set(CMAKE_CXX_COMPILER $ENV{CXX})
+else()
+    set(CMAKE_CXX_COMPILER clang++)
+endif()
+set(CMAKE_LINKER wasm-ld)
+set(CMAKE_AR llvm-ar)
+
+# Don't look in the sysroot for executables to run during the build
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+# Only look in the sysroot (not in the host paths) for the rest
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
