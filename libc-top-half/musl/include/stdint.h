@@ -102,6 +102,21 @@ typedef uint64_t uint_least64_t;
 #define UINT16_C(c) c
 #define UINT32_C(c) c ## U
 
+/* musl's LP64 heuristic: 64-bit pointer => int64_t is `long`, suffix `L`.
+ *
+ * firebox#824 axis-1 made wasm64 a normal LP64 target (arch/wasm64 `_Int64 = long`
+ * + clang's WebAssembly64TargetInfo `Int64Type/IntMaxType = SignedLong`), so on
+ * wasm64 int64_t/intmax_t ARE `long` and this heuristic is CORRECT: UINTPTR_MAX ==
+ * UINT64_MAX (64-bit pointers) routes wasm64 to the `L` branch, matching the
+ * typedef. wasm32 keeps `_Int64 = long long` (its `long` is 32-bit) and naturally
+ * takes the `LL` branch (UINTPTR_MAX != UINT64_MAX). Native LP64 is unchanged.
+ *
+ * This REVERTS the prior fix's `&& !defined(__wasm__)` guard, which forced BOTH
+ * wasm arches to the `LL` branch back when both defined `_Int64 = long long`. Under
+ * axis-1 that guard is now WRONG for wasm64 (it would emit `LL`/`long long` while
+ * int64_t == `long`, recreating the two-distinct-64-bit-types split that made the
+ * {int32_t,int64_t}+long overload set ambiguous — the MCDwarf wall). Each arch's
+ * pointer width now selects the correct suffix on its own. */
 #if UINTPTR_MAX == UINT64_MAX
 #define INT64_C(c) c ## L
 #define UINT64_C(c) c ## UL
