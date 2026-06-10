@@ -1,0 +1,13 @@
+diff --git a/phases/snapshot/witx/wasix_v1.witx b/phases/snapshot/witx/wasix_v1.witx
+index 6e9a1f6..98bc3fa 100644
+--- a/phases/snapshot/witx/wasix_v1.witx
++++ b/phases/snapshot/witx/wasix_v1.witx
+@@ -889,7 +889,7 @@
+     ;;; Reference to the array of events
+     (param $event (@witx pointer $epoll_event))
+     ;;; Maximum number of events that will be returned in the array
+-    (param $maxevents $size)
++    (param $maxevents u32) ;; firebox#824: maxevents is fixed i32 (host ABI), not $size
+     ;;; Timeout for the wait event
+     (param $timeout $timestamp)
+     ;;; The number of events returned.

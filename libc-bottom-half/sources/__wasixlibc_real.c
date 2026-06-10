@@ -1112,7 +1112,16 @@ __wasi_errno_t __wasi_epoll_ctl(
     return (uint16_t) ret;
 }
 
-int32_t __imported_wasix_64v1_epoll_wait(int32_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) __attribute__((
+/* Firebox #824: epoll_wait $maxevents is i32, NOT i64. The witx types it as $size
+ * (usize), so the mechanical $size->usize wasm64 widening (build64.sh) lowers it to
+ * i64 here — but the wasmer Memory64 HOST deliberately pins maxevents to a fixed i32
+ * (lib/wasix/.../epoll_wait.rs, `maxevents: i32`, an upstream-wasmer ABI choice the
+ * wasix Rust crate also honors). An i64 here emits the import under (i32,i64,i64,...)
+ * which conflicts with the host's (i32,i64,i32,...). arg2 is therefore int32_t.
+ * The durable generator-side fix is patches/wasm64/wasix-epoll-maxevents-fixed-i32.patch
+ * (retypes $maxevents away from $size); this hand-edit keeps the committed generated
+ * file — the actual per-build source — correct without a regen. */
+int32_t __imported_wasix_64v1_epoll_wait(int32_t arg0, int64_t arg1, int32_t arg2, int64_t arg3, int64_t arg4) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("epoll_wait")
 ));
@@ -1124,7 +1133,7 @@ __wasi_errno_t __wasi_epoll_wait(
     __wasi_timestamp_t timeout,
     __wasi_size_t *retptr0
 ){
-    int32_t ret = __imported_wasix_64v1_epoll_wait((int32_t) epfd, (int64_t) event, (int64_t) maxevents, (int64_t) timeout, (intptr_t) retptr0);
+    int32_t ret = __imported_wasix_64v1_epoll_wait((int32_t) epfd, (int64_t) event, (int32_t) maxevents, (int64_t) timeout, (intptr_t) retptr0);
     return (uint16_t) ret;
 }
 
@@ -1176,7 +1185,13 @@ __wasi_errno_t __wasi_dlsym(
     return (uint16_t) ret;
 }
 
-int32_t __imported_wasix_64v1_call_dynamic(int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int32_t arg5) __attribute__((
+/* firebox#824 (WALL TAKE-2): $function_id is a u32 function-TABLE index (host ABI),
+   not a usize/$function_pointer. arg0 i64->i32 so this import matches the host's
+   (i32,i64,i64,i64,i64,i32); the remaining args are real memory pointers / $size and
+   stay i64. The durable source is patches/wasm64/wasix-function-pointer-fixed-u32.patch
+   (applied by build64.sh); this generated file IS the per-build source, so it carries
+   the fix directly (mirrors the context_create / epoll_wait.maxevents hand-fixes). */
+int32_t __imported_wasix_64v1_call_dynamic(int32_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int32_t arg5) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("call_dynamic")
 ));
@@ -1189,11 +1204,18 @@ __wasi_errno_t __wasi_call_dynamic(
     __wasi_pointersize_t results_len,
     __wasi_bool_t strict
 ){
-    int32_t ret = __imported_wasix_64v1_call_dynamic((int64_t) function_id, (intptr_t) values, (intptr_t) values_len, (int64_t) results, (int64_t) results_len, (int32_t) strict);
+    int32_t ret = __imported_wasix_64v1_call_dynamic((int32_t) function_id, (intptr_t) values, (intptr_t) values_len, (int64_t) results, (int64_t) results_len, (int32_t) strict);
     return (uint16_t) ret;
 }
 
-int32_t __imported_wasix_64v1_closure_prepare(int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6) __attribute__((
+/* firebox#824 (WALL TAKE-2): the two function-TABLE ids ($backing_function_id arg0,
+   $closure_id arg1) and the two closure-array LENGTHS ($argument_types_len arg3,
+   $result_types_len arg5) are u32 in the host ABI, not usize. arg0,arg1,arg3,arg5
+   i64->i32 so this import matches the host's (i32,i32,i64,i32,i64,i32,i64). The two
+   array POINTERS (arg2 $argument_types, arg4 $result_types) and the user_data_ptr
+   (arg6) are real memory pointers and stay i64. Durable source:
+   patches/wasm64/wasix-function-pointer-fixed-u32.patch (applied by build64.sh). */
+int32_t __imported_wasix_64v1_closure_prepare(int32_t arg0, int32_t arg1, int64_t arg2, int32_t arg3, int64_t arg4, int32_t arg5, int64_t arg6) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("closure_prepare")
 ));
@@ -1207,7 +1229,7 @@ __wasi_errno_t __wasi_closure_prepare(
     size_t result_types_len,
     uint8_t * user_data_ptr
 ){
-    int32_t ret = __imported_wasix_64v1_closure_prepare((int64_t) backing_function_id, (int64_t) closure_id, (intptr_t) argument_types, (intptr_t) argument_types_len, (intptr_t) result_types, (intptr_t) result_types_len, (int64_t) user_data_ptr);
+    int32_t ret = __imported_wasix_64v1_closure_prepare((int32_t) backing_function_id, (int32_t) closure_id, (intptr_t) argument_types, (int32_t) argument_types_len, (intptr_t) result_types, (int32_t) result_types_len, (int64_t) user_data_ptr);
     return (uint16_t) ret;
 }
 
@@ -1223,7 +1245,10 @@ __wasi_errno_t __wasi_closure_allocate(
     return (uint16_t) ret;
 }
 
-int32_t __imported_wasix_64v1_closure_free(int64_t arg0) __attribute__((
+/* firebox#824 (WALL TAKE-2): $closure_id is a u32 function-TABLE index (host ABI),
+   not a usize/$function_pointer. arg0 i64->i32 so this import matches the host's
+   (i32). Durable source: patches/wasm64/wasix-function-pointer-fixed-u32.patch. */
+int32_t __imported_wasix_64v1_closure_free(int32_t arg0) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("closure_free")
 ));
@@ -1231,11 +1256,16 @@ int32_t __imported_wasix_64v1_closure_free(int64_t arg0) __attribute__((
 __wasi_errno_t __wasi_closure_free(
     __wasi_function_pointer_t closure_id
 ){
-    int32_t ret = __imported_wasix_64v1_closure_free((int64_t) closure_id);
+    int32_t ret = __imported_wasix_64v1_closure_free((int32_t) closure_id);
     return (uint16_t) ret;
 }
 
-int32_t __imported_wasix_64v1_reflect_signature(int64_t arg0, int64_t arg1, int32_t arg2, int64_t arg3, int32_t arg4, int64_t arg5) __attribute__((
+/* firebox#824 (WALL TAKE-2): $function_id is a u32 function-TABLE index (host ABI),
+   not a usize/$function_pointer. arg0 i64->i32 so this import matches the host's
+   (i32,i64,i32,i64,i32,i64); arg1/arg3 (the two array pointers) and arg5 (retptr0)
+   are real memory pointers and stay i64, arg2/arg4 (uint16_t lengths) are already i32.
+   Durable source: patches/wasm64/wasix-function-pointer-fixed-u32.patch. */
+int32_t __imported_wasix_64v1_reflect_signature(int32_t arg0, int64_t arg1, int32_t arg2, int64_t arg3, int32_t arg4, int64_t arg5) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("reflect_signature")
 ));
@@ -1248,11 +1278,17 @@ __wasi_errno_t __wasi_reflect_signature(
     uint16_t result_types_len,
     __wasi_reflection_result_t *retptr0
 ){
-    int32_t ret = __imported_wasix_64v1_reflect_signature((int64_t) function_id, (int64_t) argument_types, (int32_t) argument_types_len, (int64_t) result_types, (int32_t) result_types_len, (intptr_t) retptr0);
+    int32_t ret = __imported_wasix_64v1_reflect_signature((int32_t) function_id, (int64_t) argument_types, (int32_t) argument_types_len, (int64_t) result_types, (int32_t) result_types_len, (intptr_t) retptr0);
     return (uint16_t) ret;
 }
 
-int32_t __imported_wasix_64v1_context_create(int64_t arg0, int64_t arg1) __attribute__((
+/* firebox#824 (WALL TAKE-2): $entrypoint is a u32 function-TABLE index (host ABI),
+   not a usize/$function_pointer. arg1 i64->i32 so this import matches the host's
+   (i64,i32); arg0 (new_context_ptr) is a real memory pointer and stays i64. The
+   durable source is patches/wasm64/wasix-function-pointer-fixed-u32.patch (applied
+   by build64.sh); this generated file IS the per-build source, so it carries the
+   fix directly (mirrors the epoll_wait.maxevents hand-fix). */
+int32_t __imported_wasix_64v1_context_create(int64_t arg0, int32_t arg1) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("context_create")
 ));
@@ -1261,7 +1297,7 @@ __wasi_errno_t __wasi_context_create(
     __wasi_context_id_t * new_context_ptr,
     __wasi_function_pointer_t entrypoint
 ){
-    int32_t ret = __imported_wasix_64v1_context_create((int64_t) new_context_ptr, (int64_t) entrypoint);
+    int32_t ret = __imported_wasix_64v1_context_create((int64_t) new_context_ptr, (int32_t) entrypoint);
     return (uint16_t) ret;
 }
 

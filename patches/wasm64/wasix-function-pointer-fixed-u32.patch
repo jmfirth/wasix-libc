@@ -1,0 +1,69 @@
+diff --git a/phases/snapshot/witx/wasix_v1.witx b/phases/snapshot/witx/wasix_v1.witx
+index 6e9a1f6..41dbf06 100644
+--- a/phases/snapshot/witx/wasix_v1.witx
++++ b/phases/snapshot/witx/wasix_v1.witx
+@@ -930,7 +930,7 @@
+     ;;;
+     ;;; Your module needs to either import or export the table to be able
+     ;;; to call this function.
+-    (param $function_id $function_pointer)
++    (param $function_id u32) ;; firebox#824: $function_pointer is a u32 table index (host ABI), not usize
+     ;;; A buffer with the parameters to pass to the function.
+     ;;; This buffer is expected to contain all parameters sequentially
+     ;;;
+@@ -966,16 +966,24 @@
+     ;;;   uint8_t* values - a pointer to a buffer containing the arguments. See call_dynamic for more details.
+     ;;;   uint8_t* results - a pointer to a buffer where the results will be written. See call_dynamic for more details.
+     ;;;   void* user_data_ptr - the user_data_ptr that was passed to closure_prepare
+-    (param $backing_function_id $function_pointer)
++    (param $backing_function_id u32) ;; firebox#824: $function_pointer is a u32 table index (host ABI), not usize
+     ;;; An index into the indirect function table that was previously allocated with closure_alloc
+     ;;;
+     ;;; After closure_prepare the slot in the indirect function table will contain a funcref to a closure with the requested signature.
+     ;;; Every call to the closure will be translated to a call to the backing function.
+-    (param $closure_id $function_pointer)
++    (param $closure_id u32) ;; firebox#824: $function_pointer is a u32 table index (host ABI), not usize
+     ;;; A list of types of the arguments that the closure will take.
+-    (param $argument_types $wasm_value_type_array)
++    ;;; firebox#824: lowered as an explicit (pointer + u32 length) instead of a
++    ;;; (list ...), because the wasmer Memory64 HOST pins the closure-array LENGTH
++    ;;; to a fixed u32 (i32), not usize. A bare `(list)` would lower its length to
++    ;;; usize -> i64 on Memory64 and conflict with the host's (i32) for arg3.
++    (param $argument_types (@witx pointer $wasm_value_type)) ;; Not a list: host length is fixed u32
++    (param $argument_types_len u32)
+     ;;; A list of types that the closure will return.
+-    (param $result_types $wasm_value_type_array)
++    ;;; firebox#824: same as $argument_types — explicit (pointer + u32 length) so the
++    ;;; generated closure_prepare import's arg5 matches the host's fixed-u32 (i32) length.
++    (param $result_types (@witx pointer $wasm_value_type)) ;; Not a list: host length is fixed u32
++    (param $result_types_len u32)
+     ;;; A pointer to a buffer that will be passed to the closure when it is executed.
+     (param $user_data_ptr (@witx pointer u8))
+     (result $error (expected (error $errno)))
+@@ -991,7 +999,7 @@
+   ;;; After this call it is undefined what happens when you call the funcref at the index specified by closure_id.
+   (@interface func (export "closure_free")
+     ;;; An index into the indirect function table that was previously allocated with closure_allocate
+-    (param $closure_id $function_pointer)
++    (param $closure_id u32) ;; firebox#824: $function_pointer is a u32 table index (host ABI), not usize
+     (result $error (expected (error $errno)))
+   )
+   
+@@ -1014,7 +1022,7 @@
+     ;;; An index into the indirect function table.
+     ;;;
+     ;;; If there is no function at the requested slot, `EINVAL` will be returned.
+-    (param $function_id $function_pointer)
++    (param $function_id u32) ;; firebox#824: $function_pointer is a u32 table index (host ABI), not usize
+     ;;; A buffer for a list of types that the function takes as arguments.
+     ;;;
+     ;;; - If the buffer is too small to hold all argument types, it and
+@@ -1048,7 +1056,7 @@
+   ;;; See wasix/context.h for more details
+   (@interface func (export "context_create")
+       (param $new_context_ptr (@witx pointer $context_id))
+-      (param $entrypoint $function_pointer)
++      (param $entrypoint u32) ;; firebox#824: $function_pointer is a u32 table index (host ABI), not usize
+       (result $error (expected (error $errno)))
+   )
+ 

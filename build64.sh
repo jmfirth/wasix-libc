@@ -52,6 +52,8 @@ TN=phases/snapshot/witx/typenames.witx
 restore_submodules() {
   git -C "$WASIX_SUB" checkout -- "$TN" 2>/dev/null || true
   git -C "$WASI_SUB"  checkout -- "$TN" 2>/dev/null || true
+  # firebox#824: also revert the epoll maxevents witx retype (see below).
+  git -C "$WASIX_SUB" checkout -- phases/snapshot/witx/wasix_v1.witx 2>/dev/null || true
 }
 trap restore_submodules EXIT
 
@@ -60,6 +62,28 @@ git -C "$WASIX_SUB" checkout -- "$TN"
 git -C "$WASI_SUB"  checkout -- "$TN"
 git -C "$WASIX_SUB" apply "$REPO/patches/wasm64/wasix-typenames-size-usize.patch"
 git -C "$WASI_SUB"  apply "$REPO/patches/wasm64/wasi-typenames-size-usize.patch"
+
+# firebox#824: epoll_wait's $maxevents is witx-typed $size, so the $size->usize
+# widening above would lower it to i64 — but the wasmer Memory64 HOST deliberately
+# pins maxevents to a fixed i32 (an upstream-wasmer ABI choice the wasix Rust crate
+# also honors). Retype just that one param to a fixed u32 so the generated wasix_64v1
+# epoll_wait import matches the host (i32,i64,i32,i64,i64) instead of conflicting at
+# (i32,i64,i64,...). Targets wasix_v1.witx (not typenames.witx), reverted below.
+WASIX_WITX=phases/snapshot/witx/wasix_v1.witx
+git -C "$WASIX_SUB" checkout -- "$WASIX_WITX"
+git -C "$WASIX_SUB" apply "$REPO/patches/wasm64/wasix-epoll-maxevents-fixed-i32.patch"
+
+# firebox#824 (WALL TAKE-2): $function_pointer is witx-typed `usize`, so the
+# $size->usize widening lowers every function-TABLE index (call_dynamic/closure_*/
+# reflect_signature/context_create) to i64 — but the wasmer Memory64 HOST hand-codes
+# each as a fixed `u32`->i32 (a table index never needs 64 bits; same flavor as the
+# epoll_wait.maxevents outlier above, and matching the wasix-0.13 crate fix in
+# scripts/build-rust-stage0/run.sh). Without this, context_create's C binding (the
+# one wasix-libc binding rustc.wasm actually links from this family) imports as
+# (i64,i64) and the host rejects it ((i64,i32)). Retypes the 6 function-id PARAMS
+# to u32; the closure_allocate RESULT stays $function_pointer (a real retptr).
+# Same apply-on-clean / revert-in-trap idiom as the epoll patch.
+git -C "$WASIX_SUB" apply "$REPO/patches/wasm64/wasix-function-pointer-fixed-u32.patch"
 
 # --- wasix surface (feeds api_wasix.h / the wasix_64v1 imports) ---
 cargo run --manifest-path tools/wasix-headers/Cargo.toml generate-libc --64bit
