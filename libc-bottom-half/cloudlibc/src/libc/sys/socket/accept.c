@@ -7,7 +7,9 @@
 #include <assert.h>
 #include <wasi/api.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <unistd.h>
 
 int accept(int socket, struct sockaddr *restrict addr, socklen_t *restrict addrlen) {
   return accept4(socket, addr, addrlen, 0);
@@ -29,6 +31,21 @@ int accept4(int socket, struct sockaddr *restrict addr, socklen_t *restrict addr
     return -1;
   }
 
-  wasi_to_sockaddr(&peer_addr, addr, addrlen);  
+  // Linux accept4(SOCK_CLOEXEC) marks the accepted fd close-on-exec.
+  // SOCK_CLOEXEC was validated as legal above but then silently dropped:
+  // sock_accept_v2 only carries NONBLOCK, and the runtime creates accepted
+  // fds with empty fdflagsext — so the accepted connection leaked into
+  // every spawned child (firebox#ENM finding C5). Set it post-hoc; the
+  // syscall has no fdflagsext parameter.
+  if (flags & SOCK_CLOEXEC) {
+    if (fcntl(ret, F_SETFD, FD_CLOEXEC) < 0) {
+      int saved_errno = errno;
+      close(ret);
+      errno = saved_errno;
+      return -1;
+    }
+  }
+
+  wasi_to_sockaddr(&peer_addr, addr, addrlen);
   return ret;
 }
