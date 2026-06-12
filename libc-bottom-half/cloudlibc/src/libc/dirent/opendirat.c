@@ -10,8 +10,11 @@
 #include <unistd.h>
 
 DIR *__wasilibc_nocwd_opendirat(int dir, const char *dirname) {
-  // Open directory.
-  int fd = __wasilibc_nocwd_openat_nomode(dir, dirname, O_RDONLY | O_NONBLOCK | O_DIRECTORY);
+  // Open directory. O_CLOEXEC matches musl/glibc opendir: a DIR*'s fd must
+  // not leak into spawned children (firebox#ENM finding C6); openat routes
+  // it atomically through path_open2's fdflagsext.
+  int fd = __wasilibc_nocwd_openat_nomode(
+      dir, dirname, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC);
   if (fd == -1)
     return NULL;
 
