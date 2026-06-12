@@ -42,7 +42,10 @@ int fcntl(int fildes, int cmd, ...) {
       int flags = va_arg(ap, int);
       va_end(ap);
 
-      __wasi_fdflagsext_t fd_flags = flags | FD_CLOEXEC ? __WASI_FDFLAGSEXT_CLOEXEC : 0;
+      /* `(flags & FD_CLOEXEC)`, not `flags | FD_CLOEXEC`: the latter is
+       * always nonzero (and `|` binds tighter than `?:`), which made
+       * F_SETFD unable to CLEAR the CLOEXEC flag. */
+      __wasi_fdflagsext_t fd_flags = (flags & FD_CLOEXEC) ? __WASI_FDFLAGSEXT_CLOEXEC : 0;
       __wasi_errno_t error =
           __wasi_fd_fdflags_set(fildes, fd_flags);
       if (error != 0) {
