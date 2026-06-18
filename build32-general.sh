@@ -123,10 +123,18 @@ prepare_wasix_libc() {
     cargo run --manifest-path tools/wasi-headers/Cargo.toml generate-libc
     cp -f libc-bottom-half/headers/public/wasi/api.h libc-bottom-half/headers/public/wasi/api_wasi.h
     
-    # Emit the API header
+    # Emit the API header (router). MUST include api_firebox.h: the 7 committed,
+    # firebox-owned WASIX extension fns (fd_lock/fd_lock_range/fd_chmod/path_chmod/
+    # path_lchmod/path_mknod/fd_ioctl — firebox#800) are declared there, and
+    # fcntl.c (__wasix_fd_lock_range) + ioctl.c (__wasi_fd_ioctl) call them. The
+    # generate-libc step above OVERWRITES the committed api.h (which carries this
+    # include), so re-emitting without api_firebox.h strands those decls and the
+    # exnref/eh build fails with implicit-declaration errors. Matches build64.sh's
+    # router (#800) — one router shape across both width regen paths.
     cat > libc-bottom-half/headers/public/wasi/api.h<<EOF
 #include "api_wasi.h"
 #include "api_wasix.h"
+#include "api_firebox.h"
 #include "api_poly.h"
 EOF
 }
