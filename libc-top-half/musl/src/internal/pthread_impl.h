@@ -230,6 +230,10 @@ hidden void __reset_tls();
 hidden void __membarrier_init(void);
 hidden void __dl_thread_cleanup(void);
 hidden void __testcancel();
+/* firebox#5RE — honor a pending ASYNCHRONOUS cancel even where deferred
+ * cancellation is bracketed off (the __timedwait non-cp wrapper, e.g.
+ * pthread_mutex_lock). No-op outside PTHREAD_CANCEL_ASYNCHRONOUS mode. */
+hidden void __testcancel_async();
 hidden void __do_cleanup_push(struct __ptcb *);
 hidden void __do_cleanup_pop(struct __ptcb *);
 hidden void __pthread_tsd_run_dtors();

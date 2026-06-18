@@ -21,6 +21,56 @@ long __cancel()
 	return -ECANCELED;
 }
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#5RE — WASIX deferred-cancellation model.
+ *
+ * Upstream musl delivers a cancel as SIGCANCEL and a kernel-installed
+ * `cancel_handler` redirects the target thread's PC to `__cp_cancel` while
+ * it is inside the async-cancel region (`__cp_begin`..`__cp_end`) of
+ * `__syscall_cp_asm`. WASIX has no signal-context PC redirection and no
+ * inline-asm syscall region, so that machinery (all `#ifdef
+ * __wasilibc_unmodified_upstream` below) is absent.
+ *
+ * The faithful WASIX equivalent is POSIX *deferred* cancellation (the
+ * default `PTHREAD_CANCEL_DEFERRED` type): the cancel-requested flag is
+ * set by `pthread_cancel` and observed at the next *cancellation point*.
+ * `__testcancel` is that observation; it calls `__cancel`, which (when
+ * cancellation is enabled) calls `pthread_exit(PTHREAD_CANCELED)` — and
+ * `__pthread_exit` already runs the `pthread_cleanup_push` handler LIFO
+ * unwind + TSD destructors (libc-top-half/musl/src/thread/pthread_create.c).
+ * So the only WASIX-specific work is: (1) define a real `__testcancel`
+ * (overriding the weak `dummy` in pthread_testcancel.c), and (2) make the
+ * cancellation points (`pthread_testcancel`, the cancellable wait
+ * `__timedwait_cp`, and `sleep`/`nanosleep`) call it. The SIGCANCEL sent by
+ * `pthread_cancel` below exists only to *wake* a target parked in a
+ * blocking syscall so it re-runs the cancellation point promptly; the guest
+ * `__wasm_signal` benignly drops 33 (musl reserves 32/33/34), the runtime
+ * wake interrupts the parked wait, and the wait wrapper's `__testcancel`
+ * then unwinds the thread. POSIX: a cancellation point "shall act as a
+ * point at which a pending cancellation … is acted upon."
+ */
+void __testcancel()
+{
+	pthread_t self = __pthread_self();
+	if (self->cancel && self->canceldisable != PTHREAD_CANCEL_DISABLE)
+		__cancel();
+}
+
+/* firebox#5RE — act on a pending ASYNCHRONOUS cancel regardless of the
+ * deferred-cancellation disable bracket. Async cancellation
+ * (PTHREAD_CANCEL_ASYNCHRONOUS) is defined to take effect at any point in
+ * execution, so it must fire even inside the non-cancellation-point
+ * `__timedwait` wrapper (which brackets the wait in PTHREAD_CANCEL_DISABLE).
+ * Deferred cancellation is left to `__testcancel`, which honors the bracket.
+ * No-op unless this thread is in ASYNCHRONOUS mode with a pending cancel. */
+void __testcancel_async()
+{
+	pthread_t self = __pthread_self();
+	if (self->cancel && self->cancelasync)
+		pthread_exit(PTHREAD_CANCELED);
+}
+#endif
+
 #ifdef __wasilibc_unmodified_upstream
 long __syscall_cp_asm(volatile void *, syscall_arg_t,
                       syscall_arg_t, syscall_arg_t, syscall_arg_t,
@@ -112,6 +162,27 @@ int pthread_cancel(pthread_t t)
 			pthread_exit(PTHREAD_CANCELED);
 		return 0;
 	}
+#else
+	/* firebox#5RE — record the cancel request on the target. The store must
+	 * be visible before the wake so the woken target observes it at its next
+	 * cancellation point. (Upstream sets this too — line above — but only on
+	 * the unmodified_upstream path; on WASIX the flag was never set, so
+	 * pthread_cancel was a pure no-op even when delivery worked.) */
+	a_store(&t->cancel, 1);
+	if (t == pthread_self()) {
+		/* Self-cancel: an asynchronous self-cancel takes effect immediately;
+		 * a deferred self-cancel is acted on at the next cancellation point
+		 * (e.g. the pthread_testcancel that pthread_setcanceltype issues, or
+		 * the next blocking wait). */
+		if (t->canceldisable == PTHREAD_CANCEL_ENABLE && t->cancelasync)
+			pthread_exit(PTHREAD_CANCELED);
+		return 0;
+	}
+	/* Cross-thread: wake the target so a thread parked in a blocking syscall
+	 * re-runs its cancellation point promptly. SIGCANCEL itself is dropped by
+	 * the guest dispatcher (musl-reserved 33); the wake is the load-bearing
+	 * effect. A running (non-blocked) target acts on the flag at its next
+	 * cancellation point, exactly as deferred cancellation prescribes. */
 #endif
 	return pthread_kill(t, SIGCANCEL);
 }

@@ -60,6 +60,22 @@ int __timedwait_cp(volatile int *addr, int val,
 		top = &to;
 	}
 
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#5RE — act on a pending ASYNCHRONOUS cancel BEFORE parking, so a
+	 * cancel that arrived after the caller decided to wait but before this
+	 * thread actually parks in `__futex4_cp` is honored without depending on a
+	 * subsequent futex wake. Together with the post-wait `__testcancel_async`
+	 * below this covers both orderings (cancel-before-park / cancel-during-
+	 * park) — the cancel-during-park case is delivered by the runtime's futex
+	 * EINTR-epoch wake. Without this pre-check, an async cancel that races
+	 * ahead of a PERMANENT park (e.g. a contended `pthread_mutex_lock` whose
+	 * holder never releases) would never be acted on (stochastic
+	 * setcanceltype/1-1). Deferred cancellation is intentionally NOT checked
+	 * here: this is the cancel-DISABLED `__timedwait` wrapper path, and only
+	 * async cancellation is defined to fire where deferred is bracketed off. */
+	__testcancel_async();
+#endif
+
 	r = -__futex4_cp(addr, FUTEX_WAIT|priv, val, top);
 	if (r != EINTR && r != ETIMEDOUT && r != ECANCELED) r = 0;
 #ifdef __wasilibc_unmodified_upstream
@@ -68,6 +84,34 @@ int __timedwait_cp(volatile int *addr, int val,
 	 * when NO interrupting signal handlers have been installed, and
 	 * works by sigaction tracking whether that's the case. */
 	if (r == EINTR && !__eintr_valid_flag) r = 0;
+#endif
+
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#5RE — __timedwait_cp is a POSIX cancellation point (the
+	 * cancellable form used by pthread_cond_wait / sem_wait). Upstream musl
+	 * acts on a pending cancel via the SIGCANCEL handler redirecting the PC
+	 * to __cp_cancel mid-syscall; WASIX has no such handler. Instead, a
+	 * pthread_cancel wakes a parked target (the runtime enqueue interrupts
+	 * the futex wait — firebox#5RE wasmer arm), `__futex4_cp` returns, and we
+	 * observe the pending cancel HERE and unwind. `__testcancel` is a no-op
+	 * unless this thread has a pending cancel with cancellation enabled, in
+	 * which case it calls `__cancel` → `pthread_exit(PTHREAD_CANCELED)`,
+	 * running the registered cleanup handlers (LIFO) + TSD destructors.
+	 * Placed after the wait so a thread that blocks, then gets a cancel, acts
+	 * on it on return — the deferred-cancellation contract.
+	 *
+	 * `__testcancel_async` additionally honors a pending ASYNCHRONOUS cancel
+	 * EVEN when deferred cancellation is bracketed off — async cancellation
+	 * (PTHREAD_CANCEL_ASYNCHRONOUS) is defined to take effect at any time,
+	 * including inside the non-cancellation-point `__timedwait` wrapper that
+	 * pthread_mutex_lock uses (which sets PTHREAD_CANCEL_DISABLE around the
+	 * wait). Without this, an async-cancel of a thread blocked on a contended
+	 * mutex is never acted on (the deferred `__testcancel` sees DISABLE and
+	 * the mutex wrapper just re-waits). matches glibc/upstream-musl, where the
+	 * SIGCANCEL handler's `cancelasync` branch fires regardless of the
+	 * deferred state. */
+	__testcancel_async();
+	__testcancel();
 #endif
 
 	return r;
