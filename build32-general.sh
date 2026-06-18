@@ -111,8 +111,12 @@ prepare_wasix_libc() {
     # Build the extensions
     cargo run --manifest-path tools/wasix-headers/Cargo.toml generate-libc
     cp -f libc-bottom-half/headers/public/wasi/api.h libc-bottom-half/headers/public/wasi/api_wasix.h
-    sed -i 's|__wasi__|__wasix__|g' libc-bottom-half/headers/public/wasi/api_wasix.h
-    sed -i 's|__wasi_api_h|__wasix_api_h|g' libc-bottom-half/headers/public/wasi/api_wasix.h
+    # firebox: use the `-i.bak` backup-suffix form (then drop the backup) — it is
+    # the one in-place-edit spelling accepted by BOTH GNU sed and BSD/macOS sed.
+    # GNU `sed -i 's|…|…|' f` (no suffix) is rejected by BSD sed, which reads the
+    # next token as the backup suffix. Avoids any host-`sed`-flavor knowledge.
+    sed -i.bak 's|__wasi__|__wasix__|g' libc-bottom-half/headers/public/wasi/api_wasix.h && rm -f libc-bottom-half/headers/public/wasi/api_wasix.h.bak
+    sed -i.bak 's|__wasi_api_h|__wasix_api_h|g' libc-bottom-half/headers/public/wasi/api_wasix.h && rm -f libc-bottom-half/headers/public/wasi/api_wasix.h.bak
     cp -f libc-bottom-half/sources/__wasilibc_real.c libc-bottom-half/sources/__wasixlibc_real.c
     
     # Build WASI

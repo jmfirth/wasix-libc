@@ -32,9 +32,11 @@
 #
 # REQUIREMENTS:
 #   - CC must point at the wasi-sdk clang (Apple clang can't target wasm64).
-#   - `sed` must be GNU sed (`sed -i` GNU form). On macOS:
-#       mkdir -p /tmp/sedshim && ln -sf "$(which gsed)" /tmp/sedshim/sed
-#       CC=$WASI_SDK/bin/clang PATH=/tmp/sedshim:$PATH bash build64.sh
+#   - `sed` portability: the in-place edits below use the `-i.bak` backup-suffix
+#     form (then drop the `.bak`), which is the one `sed -i` spelling accepted by
+#     BOTH GNU sed and BSD/macOS sed. No GNU-sed shim is required (the prior
+#     "must be GNU sed / link gsed onto PATH" workaround is gone — firebox#5RE);
+#     run directly on macOS: CC=$WASI_SDK/bin/clang bash build64.sh
 
 set -Eeuxo pipefail
 
@@ -88,8 +90,8 @@ git -C "$WASIX_SUB" apply "$REPO/patches/wasm64/wasix-function-pointer-fixed-u32
 # --- wasix surface (feeds api_wasix.h / the wasix_64v1 imports) ---
 cargo run --manifest-path tools/wasix-headers/Cargo.toml generate-libc --64bit
 cp -f libc-bottom-half/headers/public/wasi/api.h libc-bottom-half/headers/public/wasi/api_wasix.h
-sed -i 's|__wasi__|__wasix__|g' libc-bottom-half/headers/public/wasi/api_wasix.h
-sed -i 's|__wasi_api_h|__wasix_api_h|g' libc-bottom-half/headers/public/wasi/api_wasix.h
+sed -i.bak 's|__wasi__|__wasix__|g' libc-bottom-half/headers/public/wasi/api_wasix.h && rm -f libc-bottom-half/headers/public/wasi/api_wasix.h.bak
+sed -i.bak 's|__wasi_api_h|__wasix_api_h|g' libc-bottom-half/headers/public/wasi/api_wasix.h && rm -f libc-bottom-half/headers/public/wasi/api_wasix.h.bak
 cp -f libc-bottom-half/sources/__wasilibc_real.c libc-bottom-half/sources/__wasixlibc_real.c
 
 # --- preview1 surface (feeds api_wasi.h) ---
@@ -99,8 +101,8 @@ cp -r -f "$WASI_SUB"/phases/* build/temp/WASI/phases
 mv -f build/temp/WASI/phases/snapshot/witx/wasi_snapshot_preview1.witx build/temp/WASI/phases/snapshot/witx/wasix_v1.witx
 # Redundant now that $size itself is `usize` (these were the partial buf_len
 # hand-fix the typename widening subsumes); kept as harmless belt-and-braces.
-sed -i 's|(field $buf_len $size)|(field $buf_len usize)|g' build/temp/WASI/phases/snapshot/witx/typenames.witx
-sed -i 's|(param $buf_len $size)|(param $buf_len usize)|g' build/temp/WASI/phases/snapshot/witx/wasix_v1.witx
+sed -i.bak 's|(field $buf_len $size)|(field $buf_len usize)|g' build/temp/WASI/phases/snapshot/witx/typenames.witx && rm -f build/temp/WASI/phases/snapshot/witx/typenames.witx.bak
+sed -i.bak 's|(param $buf_len $size)|(param $buf_len usize)|g' build/temp/WASI/phases/snapshot/witx/wasix_v1.witx && rm -f build/temp/WASI/phases/snapshot/witx/wasix_v1.witx.bak
 cargo clean --manifest-path build/temp/Cargo.toml
 cargo run --manifest-path build/temp/Cargo.toml generate-libc --64bit
 cp -f libc-bottom-half/headers/public/wasi/api.h libc-bottom-half/headers/public/wasi/api_wasi.h
