@@ -307,7 +307,14 @@ struct start_args {
 	 */
 	void *pthread_self_ptr;
 
-	void *reserved[9];	// this is reserved for future WASI changes, makes the struct 64 bytes or 128 bytes on 64bit
+	/*
+	 * firebox#9S3: `control` is the parent->child start gate (reused from the
+	 * first reserved slot so struct size + the stack@0/tls_base@4 offsets that
+	 * wasi_thread_start.s hardcodes are unchanged). 1 = parent still linking
+	 * the thread, child must wait; 0 = parent done, child may run start_func.
+	 */
+	volatile int control;
+	void *reserved[8];	// remaining WASI reserve; keeps the struct 64/128 bytes
 	size_t stack_size;
 	size_t guard_size;
 #endif
@@ -367,6 +374,20 @@ hidden void __wasi_thread_start_C(int tid, void *p)
 	// whichever thread (parent or child) reaches this point first can proceed
 	// without waiting.
 	atomic_store((atomic_int *) &(self->tid), tid);
+
+	/*
+	 * firebox#9S3: wait until the parent (pthread_create) has finished linking
+	 * this thread into the thread list before running the user start function.
+	 * Without this, a fast-returning start_func can reach __pthread_exit's
+	 * `self->next == self` check before the parent links us and take the
+	 * `exit(0)` whole-process-teardown fast-path (the "threads should not
+	 * terminate unexpectedly" panic + worker table-access traps). The volatile
+	 * read + __wait are the same primitives upstream musl uses for
+	 * args->control (musl has no a_load; control is declared volatile int, and
+	 * __wait provides the futex-level ordering on the wake side).
+	 */
+	while (args->control)
+		__wait(&args->control, 0, 1, 1);
 
 	// Register the signal-dispatch callback for THIS thread. Wasmer's
 	// signal handling stores the "signal callback registered" bit in a
@@ -613,6 +634,12 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 	args->pthread_self_ptr = (void *)new;
 	args->stack_size = new->stack_size;		// used by WASIX for stack migration and asyncify support
 	args->guard_size = new->guard_size;		// used by WASIX for stack overflow guards using mmap
+
+	/*
+	 * firebox#9S3: arm the start gate BEFORE spawning. The child will block in
+	 * __wasi_thread_start_C until we release it after the thread-list link.
+	 */
+	args->control = 1;
 #endif
 
 	__tl_lock();
@@ -666,6 +693,19 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 		if (!--libc.threads_minus_1) libc.need_locks = 0;
 	}
 	__tl_unlock();
+#ifndef __wasilibc_unmodified_upstream
+	/*
+	 * firebox#9S3: the thread is now linked into the thread list; release the
+	 * child's start gate so it may run its start_func. On spawn failure the
+	 * child never started, so the release is harmless. Done AFTER __tl_unlock
+	 * so the child's first __tl_lock (in __pthread_exit) doesn't contend with
+	 * us while we still hold it.
+	 */
+	if (ret >= 0) {
+		a_store(&args->control, 0);
+		__wake(&args->control, 1, 1);
+	}
+#endif
 #ifdef __wasilibc_unmodified_upstream
 	__restore_sigs(&set);
 #endif
