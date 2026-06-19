@@ -10,11 +10,17 @@
 #define _WASI_EMULATED_MMAN 1
 #endif
 #include <stdlib.h>
+#include <stdint.h>
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+// firebox#TTB: the POSIX mmap(2) precondition errnos (EBADF/EACCES/EOVERFLOW)
+// are derived from the file descriptor's WASI rights and the offset/length
+// arithmetic. <wasi/api.h> provides __wasi_fd_fdstat_get + the
+// __WASI_RIGHTS_FD_{READ,WRITE} / __WASI_FILETYPE_REGULAR_FILE constants.
+#include <wasi/api.h>
 
 // POSIX mmap(2) requires returned addresses to be aligned to
 // sysconf(_SC_PAGESIZE). On WebAssembly the architectural page is 65536
@@ -151,6 +157,80 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int flags, int fd,
     return addr;
 }
 
+// firebox#TTB: validate the POSIX mmap(2) preconditions for a file-backed
+// mapping and return the MANDATED errno (EBADF / EACCES / EOVERFLOW) before
+// any allocation, matching musl/Linux. The faithful source of "is this fd
+// valid / readable / writable" on WASI is the descriptor's capability rights
+// (`fs_rights_base`), exactly as fcntl(F_GETFL) derives the access mode — an
+// O_RDONLY fd carries __WASI_RIGHTS_FD_READ and not FD_WRITE; O_WRONLY the
+// reverse (see libc-bottom-half/cloudlibc/.../fcntl/openat.c rights map).
+//
+// On success returns 0; on a precondition failure sets errno and returns -1.
+// ANON mappings have no fd and skip every fd-derived check (caller gates on
+// MAP_ANON before calling).
+//
+//   EBADF     : fildes is not a valid open file descriptor (mmap/19-1).
+//               __wasi_fd_fdstat_get returns __WASI_ERRNO_BADF for a closed or
+//               negative fd; EBADF == __WASI_ERRNO_BADF in wasix-libc so the
+//               WASI errno is the POSIX errno with no translation.
+//   EACCES    : the mapping's access does not match the fd's open mode
+//               (mmap/6-4, mmap/6-6). POSIX: the fd "shall have been opened
+//               with read permission, regardless of the protection options";
+//               and "if PROT_WRITE is specified, ... opened ... with write
+//               permission unless MAP_PRIVATE". So: missing FD_READ => EACCES
+//               (6-6, O_WRONLY); PROT_WRITE && MAP_SHARED && missing FD_WRITE
+//               => EACCES (6-4, O_RDONLY shared write). PROT_WRITE+MAP_PRIVATE
+//               on a read-only fd is copy-on-write and must SUCCEED (mmap/6-5)
+//               — it is deliberately NOT an EACCES path.
+//   EOVERFLOW : the file is a regular file and off + len overflows the offset
+//               maximum (mmap/31-1). Faithful to the Linux do_mmap() check
+//               `(pgoff + (len >> PAGE_SHIFT)) < pgoff` in unsigned-long (here
+//               size_t) page-count arithmetic: a wrap means off+len cannot be
+//               represented and POSIX mandates EOVERFLOW. Width-correct for
+//               both wasm32 (size_t=32-bit, where the test triggers it) and
+//               wasm64 (size_t=64-bit, where it is unreachable — as on 64-bit
+//               Linux, where mmap/31-1 self-reports UNSUPPORTED).
+static int wasix_mmap_check_file_preconditions(int prot, int flags, int fd,
+                                               off_t offset, size_t length) {
+    __wasi_fdstat_t fds;
+    __wasi_errno_t error = __wasi_fd_fdstat_get((__wasi_fd_t)fd, &fds);
+    if (error != 0) {
+        // Bad/closed fd surfaces as __WASI_ERRNO_BADF, which is EBADF.
+        errno = (int)error;
+        return -1;
+    }
+
+    // POSIX: the fd must have been opened for reading regardless of prot.
+    if ((fds.fs_rights_base & __WASI_RIGHTS_FD_READ) == 0) {
+        errno = EACCES;
+        return -1;
+    }
+
+    // POSIX: a writable SHARED mapping requires the fd to be writable. A
+    // MAP_PRIVATE mapping is copy-on-write and does NOT (mmap/6-5).
+    if ((prot & PROT_WRITE) != 0 && (flags & MAP_PRIVATE) == 0 &&
+        (fds.fs_rights_base & __WASI_RIGHTS_FD_WRITE) == 0) {
+        errno = EACCES;
+        return -1;
+    }
+
+    // POSIX EOVERFLOW: only for regular files, when off + len exceeds the
+    // file's offset maximum. Mirror the Linux kernel page-count wrap check.
+    if (fds.fs_filetype == __WASI_FILETYPE_REGULAR_FILE) {
+        // offset is page-aligned by the time mmap reaches a file read; the
+        // emulated path requires no alignment, but the overflow test is on the
+        // page-count sum exactly as the kernel computes it.
+        size_t pgoff = (size_t)((uint64_t)offset >> 12);
+        size_t len_pages = length >> 12;
+        if (pgoff + len_pages < pgoff) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset) {
     // firebox#796: a fixed-address request (blink's wasm64 linear mapping) is
@@ -209,6 +289,18 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         return MAP_FAILED;
     }
 
+    // firebox#TTB: for a file-backed mapping, validate the POSIX preconditions
+    // (EBADF / EACCES / EOVERFLOW) BEFORE allocating, matching musl/Linux. An
+    // ANON mapping has no fd and skips these. The length==0 EINVAL above still
+    // takes precedence (mmap/32-1 keeps returning EINVAL for a len=0 request on
+    // a valid fd, not EBADF/EACCES).
+    if ((flags & MAP_ANON) == 0) {
+        if (wasix_mmap_check_file_preconditions(prot, flags, fd, offset,
+                                                length) != 0) {
+            return MAP_FAILED;
+        }
+    }
+
     // Compute allocation size: user length plus one full prefix page for
     // the header. Overflow-check before passing to aligned_alloc.
     size_t buf_len = 0;
@@ -243,10 +335,12 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         int new_fd = dup(fd);
 
         if (new_fd < 0) {
-            errno = EINVAL;
+            // firebox#TTB: POSIX mmap returns MAP_FAILED on error, never NULL,
+            // and must preserve dup()'s errno (e.g. EMFILE) rather than
+            // overwriting it with EINVAL. (The fd-validity precondition above
+            // already caught EBADF; this guards the remaining dup failures.)
             free(base);
-
-            return NULL;
+            return MAP_FAILED;
         }
 
         map->fd = new_fd;
@@ -257,6 +351,11 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             if (nread < 0) {
                 if (errno == EINTR)
                     continue;
+                // firebox#TTB: a pread failure must not leak the backing
+                // allocation or the dup'd fd. Release both, preserve errno,
+                // and return MAP_FAILED per POSIX.
+                close(new_fd);
+                free(base);
                 return MAP_FAILED;
             }
             if (nread == 0)
@@ -280,6 +379,25 @@ int munmap(void *addr, size_t length) {
     if (wasix_fixed_unregister((uintptr_t)addr)) {
         return 0;
     }
+
+    // firebox#TTB: POSIX munmap EINVAL preconditions, validated BEFORE we
+    // recover and dereference the header one page below addr — otherwise an
+    // invalid addr (e.g. (void *)-1 in munmap/8-1) computes a wild `base` and
+    // the `map->length` read traps with an out-of-bounds memory access instead
+    // of returning EINVAL. POSIX: addr must be a multiple of the page size, len
+    // must be non-zero, and [addr, addr+len) must lie within the process
+    // address space.
+    uintptr_t a = (uintptr_t)addr;
+    size_t mem_bytes = (size_t)__builtin_wasm_memory_size(0) * (size_t)65536;
+    if (length == 0 ||                                  // empty range
+        (a & (WASIX_MMAN_PAGE_SIZE - 1)) != 0 ||        // addr not page-aligned
+        a < WASIX_MMAN_PAGE_SIZE ||                     // no room for the header
+        a >= mem_bytes ||                               // addr past linear memory
+        length > mem_bytes - a) {                       // range escapes memory
+        errno = EINVAL;
+        return -1;
+    }
+
     // Recover the header that lives one page below the user address.
     // Symmetric to the mmap return: addr == base + WASIX_MMAN_PAGE_SIZE.
     void *base = (char *)addr - WASIX_MMAN_PAGE_SIZE;
