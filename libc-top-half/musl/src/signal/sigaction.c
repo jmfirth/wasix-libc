@@ -326,7 +326,49 @@ void __wasm_signal(int sig) {
 	 * for the smallest possible C canary. See #468 RCA + class lesson
 	 * class_lesson_wasm_fnptr_is_table_index_not_address. */
 	if (ksa.handler != 0) {
-		ksa.handler(sig);
+		/* SA_SIGINFO 3-arg calling convention (#WJJ).
+		 *
+		 * POSIX: when SA_SIGINFO is set in sa_flags, the handler was
+		 * registered via the union's sa_sigaction member and MUST be
+		 * called as `void (*)(int, siginfo_t *, void *)`, not the
+		 * 1-arg sa_handler form. On wasm this is not merely an ABI
+		 * nicety: function pointers are __indirect_function_table
+		 * indices and `call_indirect` validates the STATIC signature
+		 * at the call site against the callee's real type. Calling a
+		 * 3-arg sa_sigaction handler through the 1-arg `void(*)(int)`
+		 * ksa.handler type traps with "indirect call type mismatch"
+		 * BEFORE the handler body runs — which is exactly why the
+		 * Open POSIX sigaction/19-* and sigaction/6-* SA_SIGINFO
+		 * tests reported "The sa_handler was not called" (the trap
+		 * unwinds the runtime callback; the test's `called` flag is
+		 * never set). See #WJJ + #17H (W1 fixed the host-side
+		 * delivery enqueue; this fixes the libc-side convention).
+		 *
+		 * siginfo_t is built on this dispatch frame; it stays live
+		 * for the entire (synchronous) handler call. Only si_signo is
+		 * authoritative from the libc layer — the __wasm_signal export
+		 * receives only the signal number, so si_code/si_pid/si_uid/
+		 * si_value have no faithful source here and are zeroed (musl's
+		 * own minimal-siginfo behavior for signals lacking queued
+		 * info). si_code == 0 == SI_USER, the correct code for a
+		 * kill()/raise()/tkill()-delivered signal with no si_value.
+		 * The ucontext argument is passed as NULL: every Open POSIX
+		 * sigaction test marks it unused and never dereferences it,
+		 * and wasm has no machine context to materialize.
+		 *
+		 * The handler is stored as void(*)(int); cast to the 3-arg
+		 * type so the emitted call_indirect carries the matching
+		 * (i32, i32, i32) signature the SA_SIGINFO callee expects. */
+		if (ksa.flags & SA_SIGINFO) {
+			siginfo_t si;
+			memset(&si, 0, sizeof si);
+			si.si_signo = sig;
+			si.si_code = SI_USER;
+			((void (*)(int, siginfo_t *, void *))(void *)ksa.handler)(
+				sig, &si, NULL);
+		} else {
+			ksa.handler(sig);
+		}
 	} else if (default_handler != 0) {
 		default_handler(sig);
 	}

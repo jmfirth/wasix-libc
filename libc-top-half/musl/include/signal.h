@@ -199,13 +199,21 @@ struct sigevent {
 #define SIGEV_THREAD 2
 #define SIGEV_THREAD_ID 4
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no realtime signals */
+/* Realtime-signal range (#WJJ). Firebox ships the SIGRTMIN..SIGRTMAX
+ * surface: __libc_current_sigrtmin/max are real, exported functions
+ * (src/signal/sigrtmin.c / sigrtmax.c, present in defined-symbols.txt)
+ * and _POSIX_REALTIME_SIGNALS / _SC_REALTIME_SIGNALS are advertised, so
+ * sysconf(_SC_REALTIME_SIGNALS) > 0 and POSIX programs reasonably expect
+ * the macros to exist. Upstream wasi-libc gated these out under
+ * __wasilibc_unmodified_upstream because stock WASI has no signals at
+ * all; that premise no longer holds for Firebox (W1 delivers signals).
+ * Leaving the macros gated out is what BUILDFAILs the Open POSIX RT tests
+ * (e.g. sigaction/29-1: "use of undeclared identifier 'SIGRTMAX'"). */
 int __libc_current_sigrtmin(void);
 int __libc_current_sigrtmax(void);
 
 #define SIGRTMIN  (__libc_current_sigrtmin())
 #define SIGRTMAX  (__libc_current_sigrtmax())
-#endif
 
 int kill(pid_t, int);
 
