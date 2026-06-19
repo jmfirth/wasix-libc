@@ -16,7 +16,28 @@
 #endif
 
 static int unmask_done;
-static unsigned long handler_set[_NSIG/(8*sizeof(long))];
+
+/* Per-signal "a REAL handler is installed" bitmask: bit (sig-1) set ⇔ the
+ * guest called sigaction() with a handler that is neither SIG_DFL nor SIG_IGN.
+ * Read by __wasm_signal's decision tree and copied out by __get_handler_set.
+ *
+ * firebox#8B5term: this was `static`. It is now a non-static, export-friendly
+ * symbol so the FIREBOX RUNTIME can read the per-signal disposition WITHOUT a
+ * guest call. The runtime's only prior handler flag (`signal_set`) is
+ * universally true for any wasix-libc program — wasix-libc registers the
+ * generic `__wasm_signal` dispatcher at libc init (callback_signal), before
+ * main — so it cannot distinguish "SIG_DFL, no handler" (default-terminate)
+ * from "user handler installed". The faithful disposition lives HERE, in this
+ * bitmask. The threaded link `--export`s this symbol, which makes wasm-ld emit
+ * an immutable wasm global holding its linear-memory address; the runtime reads
+ * that global once at instance setup and reads the bitmask bytes straight from
+ * the live MemoryView. No guest call is involved — critical, because the case
+ * that needs the disposition is a thread SPINNING in JIT'd wasm that can never
+ * be re-entered cooperatively. With the disposition visible, the runtime can
+ * faithfully terminate (rc=128+signo) an undeliverable SIG_DFL default-terminate
+ * signal (Linux behavior) instead of hanging forever, while LEAVING the
+ * with-handler case alone (the bit is set → the deferred resume-half). */
+unsigned long __fbx_handler_set[_NSIG/(8*sizeof(long))];
 #ifdef __wasilibc_unmodified_upstream
 #else
 static volatile int __eintr_callback_registered = 0;
@@ -49,7 +70,7 @@ static int __wasm_in_handler[_NSIG];
 
 void __get_handler_set(sigset_t *set)
 {
-	memcpy(set, handler_set, sizeof handler_set);
+	memcpy(set, __fbx_handler_set, sizeof __fbx_handler_set);
 }
 
 _Noreturn
@@ -428,7 +449,7 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		 * class_lesson_wasm_fnptr_is_table_index_not_address. */
 		if (sa->sa_handler != SIG_DFL && sa->sa_handler != SIG_IGN) {
 #endif
-			a_or_l(handler_set+(sig-1)/(8*sizeof(long)),
+			a_or_l(__fbx_handler_set+(sig-1)/(8*sizeof(long)),
 				1UL<<(sig-1)%(8*sizeof(long)));
 
 			/* If pthread_create has not yet been called,
