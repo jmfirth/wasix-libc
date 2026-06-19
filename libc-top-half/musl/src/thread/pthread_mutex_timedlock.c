@@ -67,11 +67,16 @@ int __pthread_mutex_timedlock(pthread_mutex_t *restrict m, const struct timespec
 {
 	if ((m->_m_type&15) == PTHREAD_MUTEX_NORMAL
 	    && !a_cas(&m->_m_lock, 0, EBUSY)) {
-#ifndef __wasilibc_unmodified_upstream
+#if !defined(__wasilibc_unmodified_upstream) && defined(FIREBOX_HOST_HELD_LIST)
 		/* firebox#811 Phase 2 — register on the NORMAL uncontended
 		 * fast-path acquire (same as __pthread_mutex_lock). The contended
 		 * path below delegates to __pthread_mutex_trylock, which registers
-		 * there — do NOT double-register in the retry loop. */
+		 * there — do NOT double-register in the retry loop.
+		 *
+		 * firebox#ZFF/#811 — GATED OFF by default (see __pthread_mutex_lock
+		 * for the rationale: #5RE cured the real root, this host syscall is
+		 * now dead weight). Compiled OUT for both widths unless
+		 * FIREBOX_HOST_HELD_LIST is defined. */
 		__firebox_host_register_held(&m->_m_lock);
 #endif
 		return 0;

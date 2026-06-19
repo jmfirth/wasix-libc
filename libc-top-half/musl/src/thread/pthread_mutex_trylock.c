@@ -77,7 +77,7 @@ int __pthread_mutex_trylock_owner(pthread_mutex_t *m)
 	}
 
 success:
-#ifndef __wasilibc_unmodified_upstream
+#if !defined(__wasilibc_unmodified_upstream) && defined(FIREBOX_HOST_HELD_LIST)
 	/* firebox#811 Phase 2 — register the lock word with the host
 	 * held-list on a successful FIRST acquisition (the word-transition
 	 * paths: the a_cas at :73, or the goto from the robust
@@ -87,7 +87,11 @@ success:
 	 * a_swap-reaching unlock path. The host dedups (addr,tid), so the
 	 * rare double via the :16 goto is a benign no-op. Covers libuv #808
 	 * and the contended __pthread_mutex_lock/timedlock slow paths, which
-	 * delegate here. */
+	 * delegate here.
+	 *
+	 * firebox#ZFF/#811 — GATED OFF by default (see __pthread_mutex_lock
+	 * for the rationale: #5RE cured the real root). Compiled OUT for both
+	 * widths unless FIREBOX_HOST_HELD_LIST is defined. */
 	__firebox_host_register_held(&m->_m_lock);
 #endif
 	if ((type&8) && m->_m_waiters) {
@@ -118,12 +122,16 @@ success:
 int __pthread_mutex_trylock(pthread_mutex_t *m)
 {
 	if ((m->_m_type&15) == PTHREAD_MUTEX_NORMAL) {
-#ifndef __wasilibc_unmodified_upstream
+#if !defined(__wasilibc_unmodified_upstream) && defined(FIREBOX_HOST_HELD_LIST)
 		/* firebox#811 Phase 2 — NORMAL trylock: a_cas returns the OLD
 		 * word; 0 means we just acquired (the lock was free). Register
 		 * with the host held-list only on that acquired transition. This
 		 * also covers the contended __pthread_mutex_timedlock retry loop,
-		 * which calls back here on each spin until it wins. */
+		 * which calls back here on each spin until it wins.
+		 *
+		 * firebox#ZFF/#811 — GATED OFF by default (see __pthread_mutex_lock
+		 * for the rationale: #5RE cured the real root). When OFF, this
+		 * reverts to the plain upstream a_cas form below for both widths. */
 		int prev = a_cas(&m->_m_lock, 0, EBUSY);
 		if (!prev) __firebox_host_register_held(&m->_m_lock);
 		return prev & EBUSY;

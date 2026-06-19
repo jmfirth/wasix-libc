@@ -73,8 +73,19 @@ hidden void __firebox_register_held_lock(volatile int *l)
 	 * Register on the cap-overflow path too: the host list is a HashMap
 	 * with no 16-entry cap, so it still covers what the guest array
 	 * dropped. The host dedups (addr,tid) — a double-register is a
-	 * benign no-op (futex_register_held.rs duplicate handling). */
+	 * benign no-op (futex_register_held.rs duplicate handling).
+	 *
+	 * firebox#ZFF/#811 — GATED OFF by default. The lost-wake orphan class
+	 * this host registration targeted was actually rooted in the #435
+	 * cross-thread-signal-enqueue regression, fixed by #5RE. With that
+	 * root cured the per-acquire host syscall buys nothing for the musl
+	 * lock family (the rust-std #496 path registers independently and
+	 * still feeds the host thread-exit sweep). It is compiled OUT for both
+	 * wasm32 and wasm64 so the lock fast paths revert to the guest array
+	 * (#456/#473) only. Define FIREBOX_HOST_HELD_LIST to re-enable. */
+#ifdef FIREBOX_HOST_HELD_LIST
 	__firebox_host_register_held(l);
+#endif
 }
 
 hidden void __firebox_deregister_held_lock(volatile int *l)
@@ -88,8 +99,14 @@ hidden void __firebox_deregister_held_lock(volatile int *l)
 	 * announces the lock to other threads, so a concurrent host sweep
 	 * never wakes an address we no longer hold. Always fire it (even on
 	 * the not-found guest-array path below) — the host treats a
-	 * deregister-without-register as a benign no-op. */
+	 * deregister-without-register as a benign no-op.
+	 *
+	 * firebox#ZFF/#811 — GATED OFF by default (pairs with the register
+	 * gate above; see that comment). Compiled OUT for both widths unless
+	 * FIREBOX_HOST_HELD_LIST is defined. */
+#ifdef FIREBOX_HOST_HELD_LIST
 	__firebox_host_deregister_held(l);
+#endif
 	for (unsigned i = n; i-- > 0; ) {
 		if (self->firebox_held_locks[i] == l) {
 			self->firebox_held_locks[i] = self->firebox_held_locks[n - 1];

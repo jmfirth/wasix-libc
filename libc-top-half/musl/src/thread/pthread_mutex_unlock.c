@@ -55,8 +55,14 @@ int __pthread_mutex_unlock(pthread_mutex_t *m)
 		 * RECURSIVE m_count-- (:20) early returns above never get here, so
 		 * a recursively-held mutex is not deregistered until its final
 		 * release. Balanced against the single register in trylock's
-		 * success path. */
+		 * success path.
+		 *
+		 * firebox#ZFF/#811 — GATED OFF by default (pairs with the trylock
+		 * register gate; #5RE cured the real root). Compiled OUT for both
+		 * widths unless FIREBOX_HOST_HELD_LIST is defined. */
+#ifdef FIREBOX_HOST_HELD_LIST
 		__firebox_host_deregister_held(&m->_m_lock);
+#endif
 		cont = a_swap(&m->_m_lock, new);
 #endif
 	if (type != PTHREAD_MUTEX_NORMAL && !priv) {
