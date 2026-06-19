@@ -59,6 +59,26 @@ char *strptime(const char *restrict s, const char *restrict f, struct tm *restri
 			s = strptime(s, "%m/%d/%y", tm);
 			if (!s) return 0;
 			break;
+		case 'F':
+			/* firebox#RNS: ISO 8601 date (%Y-%m-%d), faithful port of
+			 * upstream musl. Use a temp buffer to implement the odd
+			 * requirement that the entire field be width-limited but the
+			 * year subfield not itself be limited. */
+			{
+				char tmp[20];
+				char *p;
+				if (w < 0) w = 10;
+				i = 0;
+				if (*s == '-' || *s == '+') tmp[i++] = *s++;
+				while (*s == '0' && isdigit(s[1])) s++;
+				for (; *s && i < w && i + 1 < (int)sizeof tmp; i++)
+					tmp[i] = *s++;
+				tmp[i] = 0;
+				p = strptime(tmp, "%12Y-%m-%d", tm);
+				if (!p) return 0;
+				s -= tmp + i - p;
+			}
+			break;
 		case 'H':
 			dest = &tm->tm_hour;
 			min = 0;
@@ -114,6 +134,14 @@ char *strptime(const char *restrict s, const char *restrict f, struct tm *restri
 			s = strptime(s, "%H:%M", tm);
 			if (!s) return 0;
 			break;
+		case 's':
+			/* firebox#RNS: seconds since epoch. Faithful port of upstream
+			 * musl: parse only — effect on tm is unspecified and (as
+			 * upstream) no effect is implemented. */
+			if (*s == '-') s++;
+			if (!isdigit(*s)) return 0;
+			while (isdigit(*s)) s++;
+			break;
 		case 'S':
 			dest = &tm->tm_sec;
 			min = 0;
@@ -130,11 +158,34 @@ char *strptime(const char *restrict s, const char *restrict f, struct tm *restri
 			min = 0;
 			range = 54;
 			goto numeric_range;
+		case 'V':
+			/* firebox#RNS: ISO 8601 week number, discarded (upstream musl). */
+			dest = &dummy;
+			min = 1;
+			range = 53;
+			goto numeric_range;
+		case 'u':
+			/* firebox#RNS: ISO weekday, Monday=1 (upstream musl). */
+			dest = &tm->tm_wday;
+			min = 1;
+			range = 7;
+			goto numeric_range;
 		case 'w':
 			dest = &tm->tm_wday;
 			min = 0;
 			range = 7;
 			goto numeric_range;
+		case 'z':
+			/* firebox#RNS: UTC offset +/-HHMM (upstream musl). */
+			if (*s == '+') neg = 0;
+			else if (*s == '-') neg = 1;
+			else return 0;
+			for (i=0; i<4; i++) if (!isdigit(s[1+i])) return 0;
+			tm->__tm_gmtoff = (s[1]-'0')*36000 + (s[2]-'0')*3600
+				+ (s[3]-'0')*600 + (s[4]-'0')*60;
+			if (neg) tm->__tm_gmtoff = -tm->__tm_gmtoff;
+			s += 5;
+			break;
 		case 'x':
 			s = strptime(s, nl_langinfo(D_FMT), tm);
 			if (!s) return 0;
@@ -143,6 +194,16 @@ char *strptime(const char *restrict s, const char *restrict f, struct tm *restri
 			s = strptime(s, nl_langinfo(T_FMT), tm);
 			if (!s) return 0;
 			break;
+		case 'g':
+			/* firebox#RNS: 2-digit ISO year, discarded (upstream musl). */
+			dest = &dummy;
+			w = 2;
+			goto numeric_digits;
+		case 'G':
+			/* firebox#RNS: 4-digit ISO year, discarded (upstream musl). */
+			dest = &dummy;
+			if (w<0) w=4;
+			goto numeric_digits;
 		case 'y':
 			dest = &relyear;
 			w = 2;
