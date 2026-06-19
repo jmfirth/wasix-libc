@@ -350,9 +350,11 @@ LIBC_TOP_HALF_MUSL_SOURCES += \
         thread/sem_destroy.c \
         thread/sem_getvalue.c \
         thread/sem_init.c \
+        thread/sem_open.c \
         thread/sem_post.c \
         thread/sem_timedwait.c \
         thread/sem_trywait.c \
+        thread/sem_unlink.c \
         thread/sem_wait.c \
         thread/$(TARGET_ARCH)/wasi_thread_start.s \
     )
