@@ -65,3 +65,31 @@ int32_t __imported_wasix_fbx_futex_register_held(intptr_t) __attribute__((__impo
 int32_t __imported_wasix_fbx_futex_deregister_held(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("futex_deregister_held")));
 void __firebox_host_register_held(volatile int *l){(void)__imported_wasix_fbx_futex_register_held((intptr_t)l);}
 void __firebox_host_deregister_held(volatile int *l){(void)__imported_wasix_fbx_futex_deregister_held((intptr_t)l);}
+
+/* firebox#8B5 HYBRID — the cooperative signal-poll import.
+ *
+ * The runtime (jmfirth/wasmer#firebox-patches) registers a host function under
+ * the WASIX namespace's `__fbx_signal_poll` field. Its host body drives the
+ * existing signal-drain (`do_pending_operations` → `process_signals_and_exit`):
+ * a pending/due signal with a handler is dispatched to `__wasm_signal` and the
+ * caller RESUMES; a no-handler default-terminate signal terminates the process
+ * (rc=128+signo). It returns an i32 errno (always Success today; reserved).
+ *
+ * The wasmer `SignalPoll` compiler middleware injects a *throttled* `Call` to
+ * THIS import's function-index at every wasm loop header, so a thread spinning
+ * in JIT'd wasm periodically reaches the host drain — the faithful fix for
+ * "a signal cannot reach a thread spinning in pure JIT'd wasm" (#8B5). The
+ * middleware CANNOT add the import itself (adding an import shifts every
+ * FunctionIndex and invalidates the parsed module), so wasix-libc declares it
+ * here and the middleware injects a call to the already-present index.
+ *
+ * IMPORT-NAME = exactly "__fbx_signal_poll" (the middleware scans the module's
+ * imports for this field). The C wrapper `__fbx_signal_poll` is force-linked
+ * from sigaction.c's `__firebox_force_link_signals[]` so the import survives
+ * wasm-ld's GC in every program (crt1 → __wasi_init_signals always pulls
+ * sigaction.o). If a program is built against an OLD runtime that lacks the
+ * host registration, the import is unresolved at instantiate time — but the
+ * middleware is the only caller and it is only injected by the matching
+ * runtime, so the pair always ships together. */
+int32_t __imported_wasix_fbx_signal_poll(void) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("__fbx_signal_poll")));
+int32_t __fbx_signal_poll(void){return __imported_wasix_fbx_signal_poll();}

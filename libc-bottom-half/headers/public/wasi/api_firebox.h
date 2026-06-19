@@ -41,6 +41,12 @@ __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd, const char *path, size_t path_
 __wasi_errno_t __wasi_fd_ioctl(__wasi_fd_t fd, uint32_t request, void *argp, int32_t *retptr0);
 #endif
 
+/* firebox#8B5 HYBRID — cooperative signal-poll. The wasmer `SignalPoll`
+ * middleware injects throttled calls to the `__fbx_signal_poll` host import so a
+ * thread spinning in JIT'd wasm reaches the host signal-drain. See
+ * __wasixlibc_firebox.c for the full rationale. */
+int32_t __fbx_signal_poll(void);
+
 #ifdef __cplusplus
 }
 #endif

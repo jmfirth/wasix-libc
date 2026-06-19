@@ -608,11 +608,22 @@ int __wasm_sigaction(int sig, int action) {
  * linker resolves these at link time. See issue #24.
  *
  * The symbols: sigsetjmp, siglongjmp (patch E); sigpending, sigsuspend
- * (patch F); mknodat (patch I). Declared with minimal prototypes here
- * because src/signal/ doesn't have setjmp.h / sys/stat.h in scope. */
+ * (patch F); mknodat (patch I); __fbx_signal_poll (firebox#8B5 HYBRID).
+ * Declared with minimal prototypes here because src/signal/ doesn't have
+ * setjmp.h / sys/stat.h in scope.
+ *
+ * firebox#8B5 HYBRID — __fbx_signal_poll is the cooperative signal-poll host
+ * import (declared in libc-bottom-half/sources/__wasixlibc_firebox.c). The
+ * wasmer `SignalPoll` middleware injects throttled `Call`s to it at loop
+ * headers, but the import has no source-level caller (the middleware is the
+ * caller, injected at compile time), so wasm-ld would GC it. Force-linking it
+ * here — alongside the other always-present signal symbols — guarantees the
+ * import is present in EVERY program's module so the middleware always has a
+ * function-index to call. */
 extern int sigsetjmp();
 extern void siglongjmp();
 extern int mknodat();
+extern int __fbx_signal_poll(void);
 __attribute__((used))
 static void *__firebox_force_link_signals[] = {
 	(void *)&sigsetjmp,
@@ -620,6 +631,7 @@ static void *__firebox_force_link_signals[] = {
 	(void *)&sigpending,
 	(void *)&sigsuspend,
 	(void *)&mknodat,
+	(void *)&__fbx_signal_poll,
 };
 
 void __wasi_init_signals() {
@@ -669,5 +681,19 @@ void __wasi_init_signals() {
 	if (a_cas(&__eintr_callback_registered, 0, 1) == 0) {
 		__wasi_callback_signal("__wasm_signal");
 	}
+
+	/* firebox#8B5 HYBRID — make the __fbx_signal_poll import a LIVE reference.
+	 *
+	 * The wasmer `SignalPoll` compiler middleware injects throttled `Call`s to
+	 * the __fbx_signal_poll import at loop headers, but those injected calls do
+	 * NOT exist in the source the linker sees — so without a real source-level
+	 * caller, wasm-ld's --gc-sections DROPS the import entirely (the
+	 * `__attribute__((used))` force-link array keeps the C symbol but not an
+	 * import that nothing reachable CALLS). Then the middleware would have no
+	 * function-index to call. Calling it ONCE here — from __wasi_init_signals,
+	 * which crt1 always invokes before main — makes the import genuinely
+	 * reachable so it survives GC. At init there are no pending signals, so the
+	 * host drain is a no-op (one cheap host round-trip at process start). */
+	(void)__fbx_signal_poll();
 }
 #endif
