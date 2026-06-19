@@ -25,9 +25,12 @@
 #define TIME_UTC 1
 
 /*
- * Note that XSI specifies CLOCKS_PER_SEC to be 1000000, rather than
- * 1000000000; the clock API is providing more precision than XSI specifies.
+ * firebox#TDX — POSIX/XSI mandate CLOCKS_PER_SEC == 1000000 (clock/2-1).
+ * The historical wasix-libc value of 1000000000 made clock() report in
+ * nanoseconds and broke the standardized unit contract; clock() now returns
+ * microseconds to match (see libc-bottom-half/clocks/clock.c and
+ * libc-top-half/musl/src/time/clock.c, which already used 1e6).
  */
-#define CLOCKS_PER_SEC ((clock_t)1000000000)
+#define CLOCKS_PER_SEC ((clock_t)1000000)
 
 #endif
