@@ -141,6 +141,16 @@ struct pthread {
 	volatile int *firebox_held_locks[__FIREBOX_HELD_LOCKS_CAP];
 	unsigned firebox_held_locks_count;
 	unsigned firebox_held_locks_overflow;
+
+	/* firebox#GMC — host thread id (the value __wasi_thread_spawn returned),
+	 * preserved for the joiner. __pthread_exit zeroes `tid` mid-teardown
+	 * (so the cleared kernel tid is not reused for syscalls), but the joiner
+	 * still needs the ORIGINAL host tid to call __wasi_thread_join() and
+	 * block until the host has truly terminated this thread before freeing
+	 * its map_base (which contains this thread's live stack). Set once at
+	 * create; never cleared. See pthread_join.c and the #GMC fix comment in
+	 * pthread_create.c. */
+	int firebox_join_tid;
 #endif
 
 	/* Part 3 -- the positions of these fields relative to

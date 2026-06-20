@@ -681,6 +681,11 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 		ret = -EAGAIN;
 	} else {
 		atomic_store((atomic_int *) &(new->tid), ret);
+		/* firebox#GMC — preserve the host tid for the joiner. Unlike `tid`,
+		 * which __pthread_exit zeroes mid-teardown, this is never cleared, so
+		 * pthread_join can __wasi_thread_join() this exact host thread and
+		 * block until it has truly terminated before freeing its stack. */
+		new->firebox_join_tid = ret;
 	}
 #endif
 
