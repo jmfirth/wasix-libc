@@ -13,6 +13,7 @@
 #include "ksigaction.h"
 #ifndef __wasilibc_unmodified_upstream
 #include "atomic.h"
+#include "firebox_altstack.h"  /* firebox#9PX — per-thread alt-stack TLS state */
 #endif
 
 static int unmask_done;
@@ -283,6 +284,114 @@ void __wasm_drain_pending_sigs(void) {
 	}
 }
 
+/* firebox#9PX — SA_ONSTACK alternate-stack delivery.
+ *
+ * POSIX: a handler installed with SA_ONSTACK, when a valid alternate stack
+ * has been registered via sigaltstack(2), executes ON that alternate stack
+ * (the canonical use is a SIGSEGV/SIGABRT crash handler that must run when
+ * the primary stack is exhausted/corrupt — Go, the Rust backtrace printer,
+ * ASan, JVM-likes all rely on it). Linux delivers the handler with the
+ * machine stack pointer pointed into the alt region; firebox must match.
+ *
+ * On wasm there is no machine stack — the C "stack" is the linear-memory
+ * shadow stack addressed by the `__stack_pointer` global. To run a handler
+ * on the alt stack we point `__stack_pointer` at the top of the registered
+ * region for the duration of the handler call, then restore it. The
+ * handler's own prologue then carves its frame (and every address-taken
+ * local / alloca / __builtin_frame_address) out of the alt region.
+ *
+ * Mechanism notes / why this is sound:
+ *  - The shadow stack grows DOWN, so the live top-of-stack is the HIGHEST
+ *    usable address: base ss_sp + ss_size, rounded DOWN to 16 (the wasm C
+ *    ABI stack alignment). The callee subtracts from there.
+ *  - The swap/restore and the saved-SP value are held in plain locals that
+ *    are never address-taken, so the compiler keeps them in wasm locals and
+ *    this trampoline needs no shadow-stack frame of its own. The ONLY writes
+ *    to `__stack_pointer` here are the two explicit asm stores; nothing else
+ *    in the function body touches it. (Verified by wasm-objdump: the only
+ *    `global.set __stack_pointer` in callback_on_altstack* are the two asm
+ *    statements.)
+ *  - noinline is load-bearing: inlining back into __wasm_signal would
+ *    interleave the swap with __wasm_signal's own frame management (siginfo
+ *    is on __wasm_signal's frame) and corrupt it.
+ *  - The siginfo_t the SA_SIGINFO handler reads lives on __wasm_signal's
+ *    (primary-stack) frame and is passed by pointer; only the handler's OWN
+ *    locals move to the alt stack — exactly the Linux contract (siginfo is
+ *    in the kernel-built frame; handler locals are on the altstack).
+ *  - altstack_onstack is bumped across the call so a reentrant
+ *    sigaltstack(2) reports SS_ONSTACK and refuses to swap the stack
+ *    out from under a running handler (EPERM), and a nested SA_ONSTACK
+ *    delivery does NOT re-switch (POSIX: don't recurse onto the same alt
+ *    stack — keep running on it).
+ */
+#if defined(__wasm64__)
+#define __FBX_SP_GLOBALTYPE ".globaltype __stack_pointer, i64\n"
+#else
+#define __FBX_SP_GLOBALTYPE ".globaltype __stack_pointer, i32\n"
+#endif
+
+/* Compute the alt-stack top (highest usable addr, 16-aligned down). */
+static inline uintptr_t __fbx_altstack_top(void) {
+	uintptr_t base = (uintptr_t)__fbx_altstack_sp;
+	uintptr_t top = base + __fbx_altstack_size;
+	return top & ~(uintptr_t)15;
+}
+
+__attribute__((noinline))
+static void __fbx_call_on_altstack_1(void (*handler)(int), int sig,
+                                     uintptr_t alt_top) {
+	uintptr_t saved_sp;
+	/* saved_sp = __stack_pointer */
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"global.get __stack_pointer\n"
+		"local.set %0\n"
+		: "=r"(saved_sp));
+	/* __stack_pointer = alt_top */
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"local.get %0\n"
+		"global.set __stack_pointer\n"
+		:
+		: "r"(alt_top));
+	handler(sig);
+	/* __stack_pointer = saved_sp */
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"local.get %0\n"
+		"global.set __stack_pointer\n"
+		:
+		: "r"(saved_sp));
+}
+
+__attribute__((noinline))
+static void __fbx_call_on_altstack_3(
+	void (*handler)(int, siginfo_t *, void *), int sig,
+	siginfo_t *si, void *uc, uintptr_t alt_top) {
+	uintptr_t saved_sp;
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"global.get __stack_pointer\n"
+		"local.set %0\n"
+		: "=r"(saved_sp));
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"local.get %0\n"
+		"global.set __stack_pointer\n"
+		:
+		: "r"(alt_top));
+	handler(sig, si, uc);
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"local.get %0\n"
+		"global.set __stack_pointer\n"
+		:
+		: "r"(saved_sp));
+}
+
+/* True iff the active disposition wants on-altstack delivery AND a usable
+ * alt stack is registered AND we are not already executing on it. */
+static inline int __fbx_should_use_altstack(const struct k_sigaction *ksa) {
+	return (ksa->flags & SA_ONSTACK)
+		&& __fbx_altstack_sp != 0
+		&& __fbx_altstack_size >= MINSIGSTKSZ
+		&& __fbx_altstack_depth == 0;
+}
+
 __attribute__((export_name("__wasm_signal")))
 void __wasm_signal(int sig) {
 	if (sig-32U < 3 || sig-1U >= _NSIG-1) {
@@ -380,16 +489,34 @@ void __wasm_signal(int sig) {
 		 * The handler is stored as void(*)(int); cast to the 3-arg
 		 * type so the emitted call_indirect carries the matching
 		 * (i32, i32, i32) signature the SA_SIGINFO callee expects. */
+		/* firebox#9PX — when SA_ONSTACK is set and a valid alt stack is
+		 * registered (and we're not already on it), run the handler on
+		 * the alternate stack. The altstack_onstack depth guard makes
+		 * sigaltstack(2) report SS_ONSTACK / refuse a mid-handler swap,
+		 * and prevents a nested SA_ONSTACK delivery from re-switching. */
+		int on_alt = __fbx_should_use_altstack(&ksa);
+		uintptr_t alt_top = on_alt ? __fbx_altstack_top() : 0;
+		if (on_alt) __fbx_altstack_depth++;
 		if (ksa.flags & SA_SIGINFO) {
 			siginfo_t si;
 			memset(&si, 0, sizeof si);
 			si.si_signo = sig;
 			si.si_code = SI_USER;
-			((void (*)(int, siginfo_t *, void *))(void *)ksa.handler)(
-				sig, &si, NULL);
+			void (*h3)(int, siginfo_t *, void *) =
+				(void (*)(int, siginfo_t *, void *))(void *)ksa.handler;
+			if (on_alt) {
+				__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
+			} else {
+				h3(sig, &si, NULL);
+			}
 		} else {
-			ksa.handler(sig);
+			if (on_alt) {
+				__fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
+			} else {
+				ksa.handler(sig);
+			}
 		}
+		if (on_alt) __fbx_altstack_depth--;
 	} else if (default_handler != 0) {
 		default_handler(sig);
 	}
