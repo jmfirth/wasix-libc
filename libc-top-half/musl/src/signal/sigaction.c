@@ -309,8 +309,8 @@ void __wasm_drain_pending_sigs(void) {
  *    this trampoline needs no shadow-stack frame of its own. The ONLY writes
  *    to `__stack_pointer` here are the two explicit asm stores; nothing else
  *    in the function body touches it. (Verified by wasm-objdump: the only
- *    `global.set __stack_pointer` in callback_on_altstack* are the two asm
- *    statements.)
+ *    `global.set __stack_pointer` in __fbx_call_on_altstack_{1,3} are the two
+ *    explicit asm stores plus the one that restores the saved value.)
  *  - noinline is load-bearing: inlining back into __wasm_signal would
  *    interleave the swap with __wasm_signal's own frame management (siginfo
  *    is on __wasm_signal's frame) and corrupt it.
@@ -318,11 +318,11 @@ void __wasm_drain_pending_sigs(void) {
  *    (primary-stack) frame and is passed by pointer; only the handler's OWN
  *    locals move to the alt stack — exactly the Linux contract (siginfo is
  *    in the kernel-built frame; handler locals are on the altstack).
- *  - altstack_onstack is bumped across the call so a reentrant
- *    sigaltstack(2) reports SS_ONSTACK and refuses to swap the stack
- *    out from under a running handler (EPERM), and a nested SA_ONSTACK
- *    delivery does NOT re-switch (POSIX: don't recurse onto the same alt
- *    stack — keep running on it).
+ *  - __fbx_altstack_depth (the per-thread TLS depth, see firebox_altstack.h)
+ *    is bumped across the call by the caller so a reentrant sigaltstack(2)
+ *    reports SS_ONSTACK and refuses to swap the stack out from under a running
+ *    handler (EPERM), and a nested SA_ONSTACK delivery does NOT re-switch
+ *    (POSIX: don't recurse onto the same alt stack — keep running on it).
  */
 #if defined(__wasm64__)
 #define __FBX_SP_GLOBALTYPE ".globaltype __stack_pointer, i64\n"
