@@ -1,3 +1,35 @@
+#pragma once
+
+#include <bits/alltypes.h>
+
+struct sigaltstack {
+	void *ss_sp;
+	int ss_flags;
+	size_t ss_size;
+};
+
+typedef struct sigaltstack stack_t;
+
+int sigaltstack(const stack_t *__restrict ss, stack_t *__restrict old);
+
+/* firebox#9PX — sigaltstack ss_flags constants. Upstream musl gates these
+ * behind __wasilibc_unmodified_upstream in <signal.h> (WASI historically had
+ * no signals), so they were absent for the wasix build. They are ABI-level
+ * sigaltstack flag bits (peers of the SA_* constants below) and are needed by
+ * both the faithful sigaltstack(2)/SA_ONSTACK delivery path AND user code, so
+ * they live here in the unconditional arch header. Values match Linux.
+ * firebox#ZFF — ported to the wasm64 arch header (was wasm32-only); the
+ * prologue is width-independent (ss_size is size_t, ss_flags is int, the
+ * SS_ and MINSIGSTKSZ values are Linux ABI constants), so the LP64 model
+ * widens ss_sp/ss_size correctly with no width-specific change. */
+#define SS_ONSTACK    1
+#define SS_DISABLE    2
+#define SS_AUTODISARM (1U << 31)
+#define SS_FLAG_BITS  SS_AUTODISARM
+
+#define MINSIGSTKSZ 2048
+#define SIGSTKSZ 8192
+
 #define SIGHUP    1
 #define SIGINT    2
 #define SIGQUIT   3
