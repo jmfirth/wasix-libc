@@ -19,29 +19,6 @@ static int __pthread_timedjoin_np(pthread_t t, void **res, const struct timespec
 	__pthread_testcancel();
 	__pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
 	if (cs == PTHREAD_CANCEL_ENABLE) __pthread_setcancelstate(cs, 0);
-#ifndef __wasilibc_unmodified_upstream
-	/*
-	 * firebox#GMC — block on the host until the joined thread has actually
-	 * terminated, BEFORE the detach_state futex loop. __wasi_thread_join is
-	 * a host-driven completion wait (await_termination), not a guest futex,
-	 * so it is immune to the __pthread_exit __wake(&detach_state) lost-wake
-	 * class (firebox#444/#804/#807) that the guest detach_state wait can hit
-	 * under heavy create/join churn — there the joiner parks in
-	 * __timedwait_cp just after the worker's one-shot wake, then waits
-	 * forever (the host watchdog kills it with EDEADLK). Doing the host join
-	 * first means that by the time the detach_state loop below runs, the
-	 * thread is gone and detach_state is already DT_EXITED, so the loop
-	 * returns without ever parking. It ALSO closes the map_base
-	 * use-after-free: the host has fully reaped the thread (it is off its
-	 * stack) before we free t->map_base below. A timed join (at != NULL)
-	 * keeps using the guest path so the caller's deadline is honored; only
-	 * the unbounded join takes the host-completion fast path. A spawn that
-	 * never started or a thread already reaped makes thread_join a fast
-	 * no-op. See pthread_create.c's #GMC comment + firebox_join_tid.
-	 */
-	if (!at && t->firebox_join_tid)
-		(void)__wasi_thread_join((__wasi_tid_t)t->firebox_join_tid);
-#endif
 	while ((state = t->detach_state) && r != ETIMEDOUT && r != EINVAL) {
 		if (state >= DT_DETACHED) a_crash();
 		r = __timedwait_cp(&t->detach_state, state, CLOCK_REALTIME, at, 1);
@@ -59,12 +36,13 @@ static int __pthread_timedjoin_np(pthread_t t, void **res, const struct timespec
 	 * thread is still executing guest code (its __pthread_exit tail:
 	 * __tl_unlock, the #456 orphan-lock sweep, and the __wasi_thread_exit
 	 * loop itself) on that stack AFTER it published detach_state==DT_EXITED
-	 * to release us above. Freeing now would hand the still-running stack to
-	 * the next pthread_create's malloc, which links a *new* thread onto the
-	 * same struct while the old one keeps mutating it — corrupting the musl
-	 * thread list. A non-last worker then reads self->next==self and takes
-	 * __pthread_exit's single-thread exit(0) fast-path, terminating the whole
-	 * process mid-work (premature rc=0; the #WY3/#GMC codex-tui init wall).
+	 * to release us (the detach_state loop above). Freeing now would hand the
+	 * still-running stack to the next pthread_create's malloc, which links a
+	 * *new* thread onto the same struct while the old one keeps mutating it —
+	 * corrupting the musl thread list. A non-last worker then reads
+	 * self->next==self and takes __pthread_exit's single-thread exit(0)
+	 * fast-path, terminating the whole process mid-work (premature rc=0; the
+	 * #WY3/#GMC codex-tui init wall).
 	 *
 	 * Upstream musl is immune because the joined thread's exit is SYS_exit
 	 * (the kernel frees its stack only once the thread is truly gone) and the
@@ -77,7 +55,40 @@ static int __pthread_timedjoin_np(pthread_t t, void **res, const struct timespec
 	 * because __pthread_exit zeroes it mid-teardown. A spawn that never
 	 * started, or a thread already reaped, makes thread_join a fast no-op
 	 * (the host returns immediately when the tid is unknown).
+	 *
+	 * firebox#VTS — this host-completion wait was originally (the #GMC commit)
+	 * placed at the FRONT of pthread_join, before the detach_state loop. That
+	 * was a deadlock: __wasi_thread_join is a HARD host-completion block, so
+	 * the joiner could not make any further guest progress until the joinee's
+	 * host thread had fully terminated — even when the joinee had not yet
+	 * committed to exiting at all (it was still in its work loop / blocked in
+	 * sem_wait). A legal teardown pattern where the joinee can only terminate
+	 * via work the joiner's OWN continued progress enables (e.g. Open POSIX
+	 * pthread_kill/8-1 + pthread_mutex_lock/3-1: main joins a sem_wait-blocked
+	 * sender whose release depends on a sibling that main must still post to,
+	 * or on main reaching a later sem_post) then wedges forever — passes on
+	 * real Linux/glibc and on the pre-#GMC guest-futex path, TIMEOUT under the
+	 * front-positioned host join.
+	 *
+	 * The UAF #GMC fixes only exists in the window AFTER the joinee publishes
+	 * DT_EXITED (line 233 of pthread_create.c) and BEFORE its __wasi_thread_exit
+	 * tail leaves the stack — i.e. exactly the gap this free() must not race.
+	 * So the host-completion wait belongs HERE, right before the free, AFTER
+	 * the detach_state loop has confirmed the joinee committed to exit. The
+	 * detach_state loop is a cooperative guest-futex park (other threads run
+	 * while the joiner waits), so the system can drain to the point where the
+	 * joinee reaches __pthread_exit and publishes DT_EXITED — no deadlock.
+	 *
+	 * The #GMC comment's other claimed benefit (host-join-first sidesteps the
+	 * detach_state __wake lost-wake class #444/#804/#807) is now redundant: the
+	 * host futex_wait re-reads the guest futex word before parking (firebox#M3T
+	 * value-recheck), so a __wake(&detach_state) landing in the park gap is no
+	 * longer lost — the next loop iteration re-reads DT_EXITED and returns.
+	 * A timed join (at != NULL) still keeps the pure guest path so the caller's
+	 * deadline is honored; only the unbounded join takes the host wait here.
 	 */
+	if (!at && t->firebox_join_tid)
+		(void)__wasi_thread_join((__wasi_tid_t)t->firebox_join_tid);
 	if (t->map_base) free(t->map_base);
 #endif
 	return 0;
