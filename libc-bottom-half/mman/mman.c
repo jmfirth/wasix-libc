@@ -16,6 +16,11 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+// firebox#7C5: PAGESIZE (the 64 KiB WebAssembly page = the POSIX page size
+// sysconf(_SC_PAGE_SIZE) reports) for the offset-alignment / MAP_FIXED-addr /
+// partial-page-zero-fill semantics. <limits.h> exposes PAGESIZE on wasm via
+// arch/wasm{32,64}/bits/limits.h → <__macro_PAGESIZE.h>.
+#include <limits.h>
 // firebox#TTB: the POSIX mmap(2) precondition errnos (EBADF/EACCES/EOVERFLOW)
 // are derived from the file descriptor's WASI rights and the offset/length
 // arithmetic. <wasi/api.h> provides __wasi_fd_fdstat_get + the
@@ -66,11 +71,33 @@
 
 #define WASIX_MMAN_PAGE_SIZE ((size_t)4096)
 
+// firebox#7C5: the POSIX *page size* — the granularity POSIX mmap(2) defines
+// `off`/`addr` alignment against and that `sysconf(_SC_PAGE_SIZE)` /
+// `getpagesize()` report — is the WebAssembly linear-memory page, 64 KiB
+// (`<__macro_PAGESIZE.h>`: `#define PAGESIZE 0x10000`). This is DISTINCT from
+// WASIX_MMAN_PAGE_SIZE (4096), which is purely the allocator-side alignment of
+// the header-prefix page (an implementation detail of the malloc-backed
+// emulation, chosen for Blink's x86 page-table packing — see the header note
+// above). The two must not be conflated:
+//   - WASIX_MMAN_SYS_PAGE_SIZE governs POSIX *semantics* — the offset-multiple
+//     EINVAL (mmap/11-1), the MAP_FIXED addr-alignment EINVAL (mmap/9-1), and
+//     the partial-page zero-fill extent past EOF (mmap/11-4/5/6). These are the
+//     values the conformance tests query via sysconf(_SC_PAGE_SIZE) and that a
+//     Linux program sees.
+//   - WASIX_MMAN_PAGE_SIZE governs the *backing allocation* layout only.
+// Blink's wasm64 linear mapping is itself 64 KiB-granular (map.c:
+// FLAG_pagesize = sysconf(_SC_PAGESIZE) = 0x10000, and ReserveVirtual rejects a
+// non-FLAG_pagesize-aligned `virt`), so every MAP_FIXED address Blink hands us
+// is already 64 KiB-aligned — the #796 path passes the new alignment gate by
+// construction and is not regressed.
+#define WASIX_MMAN_SYS_PAGE_SIZE ((size_t)PAGESIZE)
+
 struct map {
     int prot;
     int flags;
     off_t offset;
-    size_t length;
+    size_t length;     // user-requested mapping length (what munmap() must match)
+    size_t body_len;   // allocated user-visible body = round_up(length, sys page)
     int fd;
 };
 
@@ -247,6 +274,18 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     fixed_req = fixed_req || (flags & MAP_FIXED_NOREPLACE) != 0;
 #endif
     if (fixed_req && addr != NULL && length != 0) {
+        // firebox#7C5: POSIX mmap(2) — "If MAP_FIXED is set ... and addr is not
+        // a multiple of the page size ... mmap() shall fail [EINVAL]"
+        // (mmap/9-1). The page size is the system page (64 KiB), not the 4096
+        // allocator-prefix granularity. Blink's wasm64 linear mapping always
+        // passes 64 KiB-aligned addresses (FLAG_pagesize == 0x10000), so the
+        // #796 path is unaffected — this rejects only the genuinely-illegal
+        // unaligned fixed request a portable program would also be denied on
+        // Linux.
+        if (((uintptr_t)addr & (WASIX_MMAN_SYS_PAGE_SIZE - 1)) != 0) {
+            errno = EINVAL;
+            return MAP_FAILED;
+        }
         return wasix_mmap_fixed(addr, length, flags, fd, offset);
     }
     // Check for unsupported flags.
@@ -272,19 +311,35 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         return MAP_FAILED;
     }
 
-    // Check for unsupported protection requests.
-    if (prot == PROT_NONE ||
-#ifdef PROT_EXEC
-        (prot & PROT_EXEC) != 0 ||
-#endif
-        0)
-    {
+    // firebox#7C5: accept every PROTECTION combination POSIX/Linux accepts
+    // (mmap/5-1 maps PROT_NONE, PROT_EXEC, and every RWX permutation and
+    // requires each to either SUCCEED or fail with ENOTSUP — never any other
+    // errno). The pre-#7C5 code rejected PROT_NONE and any PROT_EXEC with
+    // EINVAL, which is a wrong errno AND a wrong behavior: Linux maps all of
+    // these. The malloc-backed emulation has no MMU, so it cannot ENFORCE a
+    // protection weaker than read-write — the memory is always RW. That is the
+    // documented no-MMU known-gap (PROT_NONE/PROT_READ-only ranges do not fault
+    // on a disallowed access; see docs/reference/runtime-gotchas), NOT a reason
+    // to refuse the mapping. Refusing PROT_NONE/PROT_EXEC broke the two real
+    // Linux idioms that depend on them — reserve-with-PROT_NONE-then-mprotect,
+    // and JIT map-RX — so we accept the request and simply provide RW backing.
+    // No prot combo returns ENOTSUP today (all are honored as RW), so the test's
+    // ENOTSUP branch is permitted-but-unused.
+
+    //  To be consistent with POSIX.
+    if (length == 0) {
         errno = EINVAL;
         return MAP_FAILED;
     }
 
-    //  To be consistent with POSIX.
-    if (length == 0) {
+    // firebox#7C5: POSIX mmap(2) — `off` must be a multiple of the page size;
+    // otherwise EINVAL (mmap/11-1). Mirrors the musl top-half OFF_MASK check
+    // (the unused-on-wasm path) and the Linux do_mmap() `offset & ~PAGE_MASK`
+    // gate, against the *system* page size (64 KiB), which is what
+    // sysconf(_SC_PAGE_SIZE) reports and the test computes its illegal offset
+    // from. ANON mappings ignore offset, so this only gates file-backed maps.
+    if ((flags & MAP_ANON) == 0 &&
+        ((uint64_t)offset & (uint64_t)(WASIX_MMAN_SYS_PAGE_SIZE - 1)) != 0) {
         errno = EINVAL;
         return MAP_FAILED;
     }
@@ -301,10 +356,32 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
-    // Compute allocation size: user length plus one full prefix page for
-    // the header. Overflow-check before passing to aligned_alloc.
+    // firebox#7C5: POSIX mmap(2) maps WHOLE pages. "The system shall always
+    // zero-fill any partial page at the end of an object" (mmap/11-4/5/6): when
+    // `length` is not a multiple of the page size, the bytes from the file/object
+    // end up to the end of the last mapped page are accessible and read as zero.
+    // The malloc-backed body must therefore span round_up(length, sys page), not
+    // just `length`, or a conformant program reading those trailing bytes runs
+    // off the end of the allocation (a heap OOB). We record this rounded body
+    // length so munmap()/msync() also operate on the true mapped extent.
+    size_t body_len = length;
+    {
+        const size_t mask = WASIX_MMAN_SYS_PAGE_SIZE - 1;
+        if ((body_len & mask) != 0) {
+            size_t rounded;
+            if (__builtin_add_overflow(body_len, WASIX_MMAN_SYS_PAGE_SIZE - (body_len & mask),
+                                       &rounded)) {
+                errno = ENOMEM;
+                return MAP_FAILED;
+            }
+            body_len = rounded;
+        }
+    }
+
+    // Compute allocation size: rounded body plus one full prefix page for the
+    // header. Overflow-check before passing to aligned_alloc.
     size_t buf_len = 0;
-    if (__builtin_add_overflow(length, WASIX_MMAN_PAGE_SIZE, &buf_len)) {
+    if (__builtin_add_overflow(body_len, WASIX_MMAN_PAGE_SIZE, &buf_len)) {
         errno = ENOMEM;
         return MAP_FAILED;
     }
@@ -324,13 +401,22 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     map->flags = flags;
     map->offset = offset;
     map->length = length;
+    map->body_len = body_len;
 
     // User-visible mapping starts one page past the header. Page-aligned
     // by construction (base is page-aligned per aligned_alloc contract).
     addr = (char *)base + WASIX_MMAN_PAGE_SIZE;
 
-    // Initialize the main memory buffer, either with the contents of a file,
-    // or with zeros.
+    // firebox#7C5: zero the ENTIRE body up front (aligned_alloc does not zero).
+    // This guarantees the partial-page tail [filelen, body_len) reads as zero
+    // for a file-backed mapping (11-4/5/6) and that an ANON mapping is fully
+    // zero — the subsequent pread overwrites only the bytes actually present in
+    // the file, leaving the tail zero-filled.
+    memset(addr, 0, body_len);
+
+    // Initialize the main memory buffer with the contents of a file (the tail
+    // past EOF stays zero from the memset above). ANON mappings are already
+    // fully zeroed.
     if ((flags & MAP_ANON) == 0) {
         int new_fd = dup(fd);
 
@@ -345,9 +431,14 @@ void *mmap(void *addr, size_t length, int prot, int flags,
 
         map->fd = new_fd;
 
+        // Read at most `length` bytes (the user-requested extent); anything past
+        // the file end remains zero from the memset. A short file (pread returns
+        // 0 before `length` is exhausted) leaves the remainder zero too.
         char *body = (char *)addr;
-        while (length > 0) {
-            const ssize_t nread = pread(fd, body, length, offset);
+        size_t to_read = length;
+        off_t roff = offset;
+        while (to_read > 0) {
+            const ssize_t nread = pread(fd, body, to_read, roff);
             if (nread < 0) {
                 if (errno == EINTR)
                     continue;
@@ -360,13 +451,12 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             }
             if (nread == 0)
                 break;
-            length -= (size_t)nread;
-            offset += (size_t)nread;
+            to_read -= (size_t)nread;
+            roff += nread;
             body += (size_t)nread;
         }
     } else {
         map->fd = -1;
-        memset(addr, 0, length);
     }
 
     return addr;
@@ -409,10 +499,18 @@ int munmap(void *addr, size_t length) {
         return -1;
     }
 
-    // Write the data back to the backing file and close
-    // the file handle
+    // Write the data back to the backing file and close the file handle.
+    //
+    // firebox#7C5: a MAP_PRIVATE mapping is COPY-ON-WRITE — POSIX mandates that
+    // modifications through a MAP_PRIVATE mapping are NEVER carried through to
+    // the underlying file (mmap/7-2, munmap/4-1). The pre-#7C5 code flushed any
+    // PROT_WRITE file-backed mapping on unmap, leaking private edits into the
+    // file. Gate the writeback on MAP_SHARED (i.e. NOT MAP_PRIVATE): only a
+    // shared, writable mapping syncs back. msync() carries the same guard, so
+    // even though this calls msync() the gate is enforced in both places.
     if (map->fd > 0) {
-        if ((map->prot & PROT_WRITE) != 0) {
+        if ((map->prot & PROT_WRITE) != 0 &&
+            (map->flags & MAP_PRIVATE) == 0) {
             msync(addr, length, MS_SYNC);
         }
 
@@ -458,6 +556,17 @@ int msync (void *addr, size_t length, int flags) {
     // package manager uses. See work/tasks/467-* and
     // crates/firebox-diff differential corpus `file-mmap-write-read`.
     if ((map->prot & PROT_WRITE) == 0) {
+        return 0;
+    }
+
+    // firebox#7C5: a MAP_PRIVATE mapping is copy-on-write — msync() must NOT
+    // flush a private mapping's modifications to the backing file (mmap/7-2,
+    // which calls msync(MS_SYNC) explicitly on a MAP_PRIVATE map and then
+    // re-reads the file to confirm it was not mutated). POSIX: "If the mapping
+    // was made with MAP_PRIVATE, msync() has no effect on the underlying file."
+    // The previous code flushed any PROT_WRITE mapping, leaking private writes.
+    // A read-only or private mapping is a successful no-op flush.
+    if ((map_flags & MAP_PRIVATE) != 0) {
         return 0;
     }
 
