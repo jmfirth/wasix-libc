@@ -101,6 +101,17 @@ struct pthread {
 	 * once a handler has run. volatile int so __futexwait / __wake see
 	 * a consistent address. */
 	volatile int sigsuspend_tick;
+	/* firebox signal-mask machinery — per-thread "how many signal
+	 * handlers are currently executing on this thread" depth. Bumped
+	 * around every user-handler call in __wasm_signal. Read by
+	 * __wasm_raise_self (raise/pthread_kill) to scope the in-guest
+	 * synchronous self-raise handling (blocked → pend; SA_NODEFER
+	 * unblocked → synchronous re-entry) to the in-handler window, so a
+	 * raise from outside any handler keeps the normal host delivery
+	 * path. Per-thread (not file scope) because a handler can run on any
+	 * thread and the self-raise decision must be local to THIS thread's
+	 * dispatch state. */
+	volatile int in_handler_depth;
 	/* firebox#456 Phase 9 — per-thread held-lock array for the
 	 * sweep-wake fix to the wasi-libc __pthread_exit asyncify-escape
 	 * orphan-futex class.

@@ -67,6 +67,39 @@ volatile int __wasm_pending_sigs[__WASM_PENDING_WORDS];
  * WASM runtime delivers signals serially to a single thread and we
  * guard re-entrant dispatch via __wasm_signals_blocked. */
 static int __wasm_in_handler[_NSIG];
+
+/* firebox signal-mask machinery — per-signal "a handler is currently
+ * executing on SOME thread for this signal, and it was installed with
+ * SA_NODEFER" flag. Distinct from __wasm_in_handler[] (which is only
+ * maintained for the NON-NODEFER case, as its sole job is the
+ * defer-recursion guard). __wasm_nodefer_active[] is maintained for
+ * the SA_NODEFER case and read by raise()/pthread_kill() (via
+ * __wasm_raise_self) to decide whether a self-raise of `sig` must be
+ * dispatched SYNCHRONOUSLY in-guest.
+ *
+ * WHY a synchronous in-guest dispatch is required: POSIX SA_NODEFER
+ * means the handled signal is NOT blocked while its handler runs, so a
+ * raise() of that same signal from inside the handler must re-enter the
+ * handler IMMEDIATELY (before raise() returns) — Linux delivers the
+ * tkill on the syscall return path, nesting the handler synchronously.
+ * Firebox's normal delivery path routes raise() → host
+ * __wasi_thread_signal → host __wasm_signal, but the host refuses a
+ * NESTED dispatch on a thread already in signal-dispatch (firebox#912's
+ * `in_signal_dispatch` guard, which prevents the dispatcher's
+ * __eintr_handler_lock-acquire syscalls from self-deadlocking) and
+ * DEFERS the re-raise to the next syscall boundary. That defers — and
+ * for a program that exits straight after the outer handler returns,
+ * effectively drops — the synchronous re-entry SA_NODEFER mandates
+ * (Open POSIX sigaction/22-*: handler must reenter while inside_handler
+ * is still set). The faithful fix is to dispatch the re-raise in-guest,
+ * synchronously, here: __wasm_signal releases __eintr_handler_lock
+ * BEFORE calling the handler, so a nested __wasm_signal from the handler
+ * body re-acquires it uncontended — it does NOT hit the #912 deadlock
+ * window (which is specifically the futex_register_held syscall issued
+ * from INSIDE the lock's own acquire). Serial single-thread delivery
+ * makes file scope safe; a per-signal counter handles legitimate
+ * SA_NODEFER recursion depth. */
+static volatile int __wasm_nodefer_active[_NSIG];
 #endif
 
 void __get_handler_set(sigset_t *set)
@@ -253,6 +286,69 @@ static inline void __wasm_pend_signal(int sig) {
 	 * surface. Consumers of sigpending treat the process-wide bitmask
 	 * as the authoritative "what's queued" view. */
 	a_or(&__wasm_pending_sigs[word], 1 << bit);
+}
+
+/* firebox signal-mask machinery — apply a handler's sa_mask (plus the
+ * handled signal itself unless SA_NODEFER) to the calling thread's
+ * blocked_sigmask for the duration of the handler call, then restore.
+ *
+ * POSIX: while a signal-catching function runs, the signals in the
+ * action's sa_mask, AND (unless SA_NODEFER) the signal being handled,
+ * are added to the thread's signal mask; on return the mask is restored
+ * to its value at handler entry. Without this, a signal raised inside
+ * the handler that the handler explicitly blocked via sa_mask is
+ * delivered/handled immediately instead of being held pending — which
+ * is exactly what made sigpending() report an empty set inside a
+ * handler (Open POSIX sigpending/1-2, 1-3): the raised-and-supposed-to-
+ * be-blocked signals never reached __wasm_pending_sigs because
+ * __wasm_thread_sig_blocked() saw them unblocked.
+ *
+ * `saved` receives the thread's blocked_sigmask snapshot so the caller
+ * can restore it after the handler returns. Width-agnostic: operates on
+ * the unsigned-long words of blocked_sigmask (same layout as sigset_t /
+ * k_sigaction.mask). */
+static inline void __wasm_apply_handler_mask(const struct k_sigaction *ksa,
+                                             int sig, int nodefer,
+                                             unsigned long *saved) {
+	struct pthread *self = __pthread_self();
+	if (!self) return;
+	const size_t nwords = _NSIG / (8 * sizeof(long));
+	/* ksa->mask is k_sigaction's mask field — a byte array of _NSIG/8
+	 * bytes mirroring sigset_t's bit (sig-1) layout. Read it as
+	 * unsigned-long words to OR into blocked_sigmask. */
+	const unsigned long *add = (const unsigned long *)(const void *)&ksa->mask;
+	for (size_t i = 0; i < nwords; i++) {
+		saved[i] = self->blocked_sigmask[i];
+		self->blocked_sigmask[i] |= add[i];
+	}
+	/* Unless SA_NODEFER, the handled signal is also blocked for the
+	 * handler's duration (the default: a second instance of the same
+	 * signal is held pending, not re-entered). */
+	if (!nodefer && sig >= 1 && sig < _NSIG) {
+		size_t w = (size_t)(sig - 1) / (8 * sizeof(long));
+		unsigned long b = 1UL << ((sig - 1) % (8 * sizeof(long)));
+		self->blocked_sigmask[w] |= b;
+	}
+}
+
+/* Restore the thread's blocked_sigmask to the snapshot taken at handler
+ * entry. Mirrors __wasm_apply_handler_mask. */
+static inline void __wasm_restore_handler_mask(const unsigned long *saved) {
+	struct pthread *self = __pthread_self();
+	if (!self) return;
+	const size_t nwords = _NSIG / (8 * sizeof(long));
+	for (size_t i = 0; i < nwords; i++) {
+		self->blocked_sigmask[i] = saved[i];
+	}
+}
+
+/* How many signal handlers are currently executing on the calling
+ * thread (per-thread in_handler_depth). Read by __wasm_raise_self to
+ * scope in-guest synchronous self-raise handling to the in-handler
+ * window. */
+static inline int __wasm_in_any_handler(void) {
+	struct pthread *self = __pthread_self();
+	return self ? self->in_handler_depth : 0;
 }
 
 /* Drain the calling thread's pending bitmask and re-raise each bit via
@@ -497,6 +593,26 @@ void __wasm_signal(int sig) {
 		int on_alt = __fbx_should_use_altstack(&ksa);
 		uintptr_t alt_top = on_alt ? __fbx_altstack_top() : 0;
 		if (on_alt) __fbx_altstack_depth++;
+		/* firebox signal-mask machinery — apply the handler's sa_mask
+		 * (plus the handled signal unless SA_NODEFER) to this thread's
+		 * blocked_sigmask for the handler's duration, restoring on
+		 * return. This is what makes a signal raised-and-blocked inside
+		 * the handler land in __wasm_pending_sigs so sigpending() reports
+		 * it (sigpending/1-2, 1-3), and what gives the default (non-
+		 * NODEFER) "same signal held pending during handler" behavior at
+		 * the MASK layer (complementing the __wasm_in_handler recursion
+		 * guard above). */
+		int nodefer = (ksa.flags & SA_NODEFER) ? 1 : 0;
+		unsigned long saved_mask[_NSIG/(8*sizeof(long))];
+		__wasm_apply_handler_mask(&ksa, sig, nodefer, saved_mask);
+		/* firebox signal-mask machinery — mark "a handler is executing on
+		 * this thread" (per-thread depth) so __wasm_raise_self handles an
+		 * in-handler self-raise in-guest (see its comment). And mark this
+		 * signal's SA_NODEFER disposition active so the synchronous
+		 * re-entry path fires for it. */
+		struct pthread *__self_dispatch = __pthread_self();
+		if (__self_dispatch) __self_dispatch->in_handler_depth++;
+		if (nodefer) __wasm_nodefer_active[sig]++;
 		if (ksa.flags & SA_SIGINFO) {
 			siginfo_t si;
 			memset(&si, 0, sizeof si);
@@ -516,7 +632,34 @@ void __wasm_signal(int sig) {
 				ksa.handler(sig);
 			}
 		}
+		if (nodefer) __wasm_nodefer_active[sig]--;
+		if (__self_dispatch) __self_dispatch->in_handler_depth--;
+		__wasm_restore_handler_mask(saved_mask);
 		if (on_alt) __fbx_altstack_depth--;
+		/* firebox signal-mask machinery — POSIX: on handler return the
+		 * thread's signal mask is restored, and any signals that became
+		 * pending while blocked by sa_mask (or by the handled signal's
+		 * own default block) are delivered now. Drain this thread's
+		 * pending bitmask: __wasm_drain_pending_sigs re-raises each bit,
+		 * and the resulting __wasm_signal re-checks the (restored) mask —
+		 * a still-blocked signal re-pends, an unblocked one dispatches.
+		 * Only walk the drain when something is actually pending on this
+		 * thread (the common no-pending case is a single cheap read), so
+		 * a handler that neither blocked nor re-raised anything pays no
+		 * host round-trip. Skipped entirely when a handler exit()s (the
+		 * sigpending/1-2,1-3 and sigaction/22-* cases never reach here),
+		 * so this only fires for handlers that block-then-raise-then-
+		 * return — the held-pending-delivered-on-return path. */
+		{
+			struct pthread *self = __pthread_self();
+			int has_pending = 0;
+			if (self) {
+				for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
+					if (self->pending_sigs[w]) { has_pending = 1; break; }
+				}
+			}
+			if (has_pending) __wasm_drain_pending_sigs();
+		}
 	} else if (default_handler != 0) {
 		default_handler(sig);
 	}
@@ -538,6 +681,70 @@ void __wasm_signal(int sig) {
 			__wake(&self->sigsuspend_tick, 1, 1);
 		}
 	}
+}
+
+/* firebox in-handler self-raise — the raise()/pthread_kill() fast path
+ * for a thread raising a signal to ITSELF while a signal handler is
+ * currently executing on this thread. Returns 1 if the raise was handled
+ * here (caller returns success WITHOUT the host __wasi_thread_signal
+ * round-trip); 0 to fall through to the normal host delivery path.
+ *
+ * WHY this exists: while a handler runs on this thread, the host has set
+ * its firebox#912 `in_signal_dispatch` guard, so a nested
+ * __wasi_thread_signal is DEFERRED to the next syscall boundary instead
+ * of being evaluated now. That breaks two POSIX behaviors that the
+ * conformance suite exercises from inside a handler:
+ *
+ *   (1) BLOCKED self-raise (sigpending/1-2, 1-3): a signal in the
+ *       handler's applied mask (sa_mask, or the handled signal itself
+ *       absent SA_NODEFER) that is raised inside the handler must be held
+ *       PENDING and be visible to sigpending() immediately. With the host
+ *       deferring the raise, __wasm_signal never ran to record the pend,
+ *       so sigpending() saw an empty set. We record the pend in-guest
+ *       here, synchronously.
+ *
+ *   (2) SA_NODEFER UNBLOCKED self-raise (sigaction/22-*): a signal whose
+ *       SA_NODEFER handler is currently running is NOT blocked, so a
+ *       re-raise must RE-ENTER the handler immediately (Linux delivers it
+ *       on the raise() syscall return path, nesting the handler before
+ *       raise() returns). We dispatch __wasm_signal(sig) synchronously
+ *       in-guest.
+ *
+ * `__wasm_in_any_handler` (a per-thread depth, bumped around every
+ * handler call in __wasm_signal) scopes BOTH cases to the in-handler
+ * window — the FIRST raise from main (no handler on the stack) always
+ * takes the host path, so non-handler raise() semantics are unchanged.
+ *
+ * Re-entrancy safety of case (2): by the time the handler body runs,
+ * __wasm_signal has already released __eintr_handler_lock (acquired and
+ * released around the disposition snapshot, before the handler call), so
+ * the nested __wasm_signal re-acquires it uncontended and does NOT
+ * reproduce the firebox#912 deadlock window (the futex_register_held
+ * syscall issued from INSIDE the lock's own contended acquire — a window
+ * that does not overlap the handler body). */
+int __wasm_raise_self(int sig) {
+	if (sig < 1 || sig >= _NSIG) return 0;
+	/* Only intercept when a handler is actually executing on this
+	 * thread; otherwise the host path is correct and unchanged. */
+	if (__wasm_in_any_handler() <= 0) return 0;
+	/* Blocked (process-wide or by this thread's mask, which now carries
+	 * the active handler's applied sa_mask): hold pending in-guest so
+	 * sigpending() reports it. */
+	if (__wasm_signals_blocked || __wasm_thread_sig_blocked(sig)) {
+		__wasm_pend_signal(sig);
+		return 1;
+	}
+	/* Unblocked AND this signal's SA_NODEFER handler is active: dispatch
+	 * synchronously (immediate re-entry). */
+	if (__wasm_nodefer_active[sig] > 0) {
+		__wasm_signal(sig);
+		return 1;
+	}
+	/* Unblocked, no active SA_NODEFER for this signal: fall through to
+	 * the host. The host's #912 guard will defer it to the next syscall
+	 * boundary after the outer dispatch returns — the faithful "deliver
+	 * after the handler returns" behavior for the non-NODEFER case. */
+	return 0;
 }
 
 /* Stub export for the runtime's callback_signal("__wasm_signal_blocked").
