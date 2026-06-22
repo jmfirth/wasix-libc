@@ -244,16 +244,33 @@ void psignal(int, const char *);
 
 #if defined(_XOPEN_SOURCE) || defined(_BSD_SOURCE) || defined(_GNU_SOURCE)
 int killpg(pid_t, int);
-#endif
-#ifdef __wasilibc_unmodified_upstream /* WASI has no signals */
-#if defined(_XOPEN_SOURCE) || defined(_BSD_SOURCE) || defined(_GNU_SOURCE)
-int sigaltstack(const stack_t *__restrict, stack_t *__restrict);
+
+/* XSI/System-V signal API (#43B / S5). Firebox ships REAL implementations
+ * of these (sighold/sigrelse/sigignore/sigpause/sigset/siginterrupt in
+ * src/signal/, each layered on the already-faithful sigprocmask/sigaction/
+ * sigsuspend primitives, and present in defined-symbols.txt). Upstream
+ * wasi-libc buried them inside the __wasilibc_unmodified_upstream "WASI has
+ * no signals" block — the SAME stale premise the #WJJ SIGRTMIN ungate
+ * (above) already overturned: Firebox delivers signals (W1 + the whole
+ * S1-S4 signal-conformance wave). Leaving them gated out is what BUILDFAILs
+ * the Open POSIX SysV-signal tests (sigpause, sigtimedwait 4-1, sigwaitinfo,
+ * sigqueue 4-1..9-1: "call to undeclared function 'sighold' / 'sigpause'")
+ * even though the functions link fine. sigaltstack is intentionally NOT
+ * re-declared here — it already has an arch-level prototype in bits/signal.h
+ * (the #9PX/#ZFF path) and the SS_ macros live in arch/wasm32/bits/signal.h;
+ * re-adding them here would duplicate. The TRAP_ and POLL_ si_code constants
+ * stay with the upstream block below (siginfo codes, not part of this
+ * signal-API surface). */
 int sighold(int);
 int sigignore(int);
 int siginterrupt(int, int);
 int sigpause(int);
 int sigrelse(int);
 void (*sigset(int, void (*)(int)))(int);
+#endif
+#ifdef __wasilibc_unmodified_upstream /* WASI has no signals */
+#if defined(_XOPEN_SOURCE) || defined(_BSD_SOURCE) || defined(_GNU_SOURCE)
+int sigaltstack(const stack_t *__restrict, stack_t *__restrict);
 #define TRAP_BRKPT 1
 #define TRAP_TRACE 2
 #define TRAP_BRANCH 3

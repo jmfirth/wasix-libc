@@ -112,6 +112,19 @@ struct pthread {
 	 * thread and the self-raise decision must be local to THIS thread's
 	 * dispatch state. */
 	volatile int in_handler_depth;
+	/* firebox#43B / S5 — per-thread "synchronous sigwait acceptance set".
+	 * When this thread is blocked in sigtimedwait/sigwait/sigwaitinfo, the
+	 * bits of the awaited signal `set` are recorded here (bit (sig-1)).
+	 * __wasm_signal consults it on entry: a signal in this set is PENDED
+	 * (not dispatched to its handler), so sigtimedwait can claim it
+	 * synchronously — the POSIX rule that a signal selected by sigwait is
+	 * accepted by the waiter even when it is not otherwise blocked and has
+	 * a handler installed (Open POSIX sigwaitinfo/3-1: child installs a
+	 * SIGUSR1 handler, does NOT block it, then sigwaitinfo()s — the parent's
+	 * kill must be accepted by sigwaitinfo, not run the handler). Word-array
+	 * sized like pending_sigs[]; written only by the owning thread around
+	 * its own wait, read by __wasm_signal which runs on this same thread. */
+	volatile int sigwait_set[((_NSIG + 31) / 32)];
 	/* firebox#456 Phase 9 — per-thread held-lock array for the
 	 * sweep-wake fix to the wasi-libc __pthread_exit asyncify-escape
 	 * orphan-futex class.

@@ -286,6 +286,18 @@ static inline void __wasm_pend_signal(int sig) {
 	 * surface. Consumers of sigpending treat the process-wide bitmask
 	 * as the authoritative "what's queued" view. */
 	a_or(&__wasm_pending_sigs[word], 1 << bit);
+	/* firebox#43B / S5 — a signal just became PENDING on this thread.
+	 * Wake any sigtimedwait/sigwait/sigsuspend waiter parked on this
+	 * thread's wake counter so it can claim the newly-pending signal.
+	 * sigtimedwait parks on sigsuspend_tick with __timedwait; without this
+	 * bump a thread that pends a signal and then waits for it (or a
+	 * cross-thread pthread_kill that pends on the TARGET thread, which
+	 * runs __wasm_signal on its own stack — sigwait/6-2) would block until
+	 * the timeout. The dispatch path (handler ran) bumps this counter at
+	 * the bottom of __wasm_signal; the ENQUEUE path (blocked → pended)
+	 * returns early before that bump, so it must wake here. */
+	a_inc(&self->sigsuspend_tick);
+	__wake(&self->sigsuspend_tick, 1, 1);
 }
 
 /* firebox signal-mask machinery — apply a handler's sa_mask (plus the
@@ -492,6 +504,27 @@ __attribute__((export_name("__wasm_signal")))
 void __wasm_signal(int sig) {
 	if (sig-32U < 3 || sig-1U >= _NSIG-1) {
 		return;
+	}
+
+	/* firebox#43B / S5 — synchronous sigwait acceptance. If this thread is
+	 * parked in sigtimedwait/sigwait/sigwaitinfo with `sig` in its awaited
+	 * set, PEND it (do not dispatch the handler) so the waiter claims it
+	 * synchronously. POSIX: a signal selected by sigwait is accepted by the
+	 * waiting thread, NOT delivered to its handler, even if the signal is
+	 * unblocked and has a handler installed (sigwaitinfo/3-1). Checked
+	 * BEFORE the block tests because the awaited signal is typically also
+	 * blocked (the usual pattern) but need not be (sigwaitinfo/3-1 installs
+	 * a handler and does not block). __wasm_pend_signal wakes the waiter. */
+	{
+		struct pthread *self = __pthread_self();
+		if (self) {
+			int word = (sig - 1) / 32;
+			int bit = 1 << ((sig - 1) % 32);
+			if (self->sigwait_set[word] & bit) {
+				__wasm_pend_signal(sig);
+				return;
+			}
+		}
 	}
 
 	/* Process-wide block (from __block_all_sigs). Enqueue and return.
