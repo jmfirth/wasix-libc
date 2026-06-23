@@ -95,12 +95,41 @@ struct pthread {
 	 * avoids a cross-thread coalescing bug when the process-wide
 	 * bitmask was drained by whichever thread ran UNBLOCK first. */
 	volatile int pending_sigs[((_NSIG + 31) / 32)];
-	/* Signal delivery counter — incremented by __wasm_signal after it
-	 * calls a handler. sigsuspend(2) samples this before entering the
-	 * wait loop and polls for a change, so it can return -1/EINTR
-	 * once a handler has run. volatile int so __futexwait / __wake see
-	 * a consistent address. */
+	/* Signal-event counter — bumped on BOTH the dispatch path (a handler
+	 * ran, __wasm_signal bottom) AND the enqueue path (a signal pended,
+	 * __wasm_pend_signal). The sigtimedwait/sigwait/sigwaitinfo family
+	 * parks on THIS counter (sigtimedwait.c) because it must wake on either
+	 * event: an awaited signal pended into its acceptance set (the common
+	 * case), or some other handler ran (re-scan and re-park). Those waiters
+	 * re-check a claimable condition after every wake, so the extra
+	 * pend-path bumps are harmless spurious wakes to them.
+	 *
+	 * NOTE the name is historical (firebox#43B / S5 widened its meaning from
+	 * "a handler ran" to "a signal event happened"); sigsuspend(2) must NOT
+	 * park here — see sigdispatch_tick below for why. volatile int so
+	 * __futexwait / __wake see a consistent address. */
 	volatile int sigsuspend_tick;
+	/* Handler-dispatch counter (firebox#XT7) — bumped ONLY on the dispatch
+	 * path (a handler actually RAN, __wasm_signal bottom), NEVER on the
+	 * enqueue/pend path. sigsuspend(2) parks on THIS counter, not on
+	 * sigsuspend_tick.
+	 *
+	 * WHY a separate counter: POSIX sigsuspend installs a temporary mask and
+	 * "suspends the thread until delivery of a signal whose action is either
+	 * to execute a signal-catching function or to terminate the process" —
+	 * i.e. it returns only after a signal was actually DELIVERED/handled, not
+	 * when a signal merely became pending behind the temporary mask. When S5
+	 * added the pend-path bump to __wasm_pend_signal (so the sigwait family
+	 * could wake on an awaited-signal pend), it also made sigsuspend wake on
+	 * the pend of a signal the sigsuspend temporary mask BLOCKS — sigsuspend
+	 * then restored its mask, which drained and delivered that just-pended
+	 * blocked signal out of order, BEFORE the signal that was supposed to
+	 * wake it (Open POSIX sigsuspend/1-1: SIGUSR2 is blocked by the temp mask
+	 * and must stay pending; only the unblocked SIGUSR1's handler wakes the
+	 * suspend, and SIGUSR2 is delivered after sigsuspend returns). Parking on
+	 * a dispatch-only counter restores the POSIX ordering: a blocked signal's
+	 * pend does not wake the suspend. */
+	volatile int sigdispatch_tick;
 	/* firebox signal-mask machinery — per-thread "how many signal
 	 * handlers are currently executing on this thread" depth. Bumped
 	 * around every user-handler call in __wasm_signal. Read by

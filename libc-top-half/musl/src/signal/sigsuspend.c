@@ -32,21 +32,39 @@ int sigsuspend(const sigset_t *mask)
 		return -1;
 	}
 
-	/* Install the temporary mask. Any previously-pending signal whose
-	 * bit is NOT set in `mask` will now be deliverable; pthread_sigmask
-	 * drains the pending bitmask when the mask loosens, so the wake
-	 * below can catch that wave. */
-	int tick_before = self->sigsuspend_tick;
+	/* Sample the DISPATCH counter (firebox#XT7), NOT sigsuspend_tick.
+	 *
+	 * sigsuspend must return only after a signal was actually DELIVERED to a
+	 * handler (or terminated the process) — never when a signal merely became
+	 * pending behind the temporary mask. sigsuspend_tick is bumped on BOTH the
+	 * dispatch path and the enqueue/pend path (S5 added the pend-path bump so
+	 * the sigtimedwait/sigwait family wakes on an awaited-signal pend). Parking
+	 * sigsuspend on it makes it wake spuriously when a signal BLOCKED by the
+	 * temporary `mask` pends; sigsuspend would then restore the saved mask,
+	 * whose SIG_SETMASK drain delivers that just-pended blocked signal OUT OF
+	 * ORDER — before the unblocked signal that was supposed to wake the suspend
+	 * (the Open POSIX sigsuspend/1-1 regression: SIGUSR2 is blocked by the temp
+	 * mask, must stay pending, and must be delivered only after sigsuspend
+	 * returns; the unblocked SIGUSR1 handler is what wakes the suspend).
+	 * sigdispatch_tick advances ONLY when a handler ran — exactly the POSIX
+	 * wake condition.
+	 *
+	 * Sample BEFORE installing the temporary mask so a handler that runs
+	 * between the install and the park is observed (sample-then-recheck). A
+	 * previously-pending signal that the temporary mask now UNBLOCKS is drained
+	 * by the pthread_sigmask(SIG_SETMASK, mask) below and dispatched, which
+	 * advances sigdispatch_tick — so the wake still catches that wave. */
+	int tick_before = self->sigdispatch_tick;
 	if (pthread_sigmask(SIG_SETMASK, mask, NULL) != 0) {
 		errno = EINVAL;
 		return -1;
 	}
 
-	/* Wait until the wake counter advances — i.e. a signal handler
+	/* Wait until the dispatch counter advances — i.e. a signal handler
 	 * ran on this thread. Re-check around __futexwait because spurious
 	 * wakeups are possible and harmless. */
-	while (self->sigsuspend_tick == tick_before) {
-		__futexwait(&self->sigsuspend_tick, tick_before, 1);
+	while (self->sigdispatch_tick == tick_before) {
+		__futexwait(&self->sigdispatch_tick, tick_before, 1);
 	}
 
 	/* Restore the caller's mask. This also drains any signals that

@@ -702,16 +702,29 @@ void __wasm_signal(int sig) {
 		__wasm_in_handler[sig] = 0;
 	}
 
-	/* Bump the sigsuspend wake counter and wake any waiters on it.
-	 * This lets sigsuspend(2) observe that a signal was delivered and
-	 * return -1/EINTR. Touching the counter from the dispatch path
-	 * (rather than from the handler itself) avoids forcing handlers
-	 * to be sigsuspend-aware. */
+	/* A handler actually RAN on this thread. Bump both wake counters:
+	 *
+	 *  - sigsuspend_tick: the sigtimedwait/sigwait family parks here and
+	 *    must re-scan when any handler runs (a non-awaited signal's handler
+	 *    advances the counter; the waiter re-checks for a claimable signal
+	 *    and re-parks).
+	 *  - sigdispatch_tick (firebox#XT7): sigsuspend(2) parks HERE, and only
+	 *    a real handler dispatch (this point) bumps it — never the
+	 *    enqueue/pend path. This lets sigsuspend observe that a signal was
+	 *    actually DELIVERED (not merely pended behind its temporary mask)
+	 *    and return -1/EINTR, preserving the POSIX rule that a signal
+	 *    blocked by the sigsuspend mask stays pending until sigsuspend
+	 *    returns and unblocks it.
+	 *
+	 * Touching the counters from the dispatch path (rather than from the
+	 * handler itself) avoids forcing handlers to be sigsuspend-aware. */
 	{
 		struct pthread *self = __pthread_self();
 		if (self) {
 			a_inc(&self->sigsuspend_tick);
 			__wake(&self->sigsuspend_tick, 1, 1);
+			a_inc(&self->sigdispatch_tick);
+			__wake(&self->sigdispatch_tick, 1, 1);
 		}
 	}
 }
