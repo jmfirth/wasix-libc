@@ -78,7 +78,17 @@ int pthread_condattr_getpshared(const pthread_condattr_t *restrict a, int *restr
 
 int pthread_mutexattr_getprotocol(const pthread_mutexattr_t *restrict a, int *restrict protocol)
 {
+#ifdef __wasilibc_unmodified_upstream
 	*protocol = a->__attr / 8U % 2;
+#else
+	/* firebox#CDZ — decode the 2-bit protocol field (bits 4-5) that
+	 * wasix-libc's pthread_mutexattr_setprotocol stores. Upstream encodes the
+	 * protocol in bit 3, but on WASI that bit is reserved for the lock path's
+	 * PI machinery and must stay clear; setprotocol therefore uses bits 4-5 so
+	 * all three valid protocols (NONE/INHERIT/PROTECT) round-trip without
+	 * touching the live PI bit. See pthread_mutexattr_setprotocol.c. */
+	*protocol = (a->__attr >> 4) & 3;
+#endif
 	return 0;
 }
 int pthread_mutexattr_getpshared(const pthread_mutexattr_t *restrict a, int *restrict pshared)

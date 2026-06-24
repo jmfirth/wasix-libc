@@ -34,7 +34,44 @@ int pthread_mutexattr_setprotocol(pthread_mutexattr_t *a, int protocol)
 	}
 }
 #else
+/* firebox#CDZ — faithful attr round-trip for the mutex protocol attribute.
+ *
+ * The prior wasi-libc stub `return 0;` (a) accepted *any* value including
+ * invalid ones, and (b) stored nothing, so pthread_mutexattr_getprotocol
+ * always read back PTHREAD_PRIO_NONE. Open POSIX
+ * pthread_mutexattr_setprotocol/1-1 (set→get must round-trip all three valid
+ * protocols) and /3-1 (an invalid protocol must fail ENOTSUP/EINVAL) both
+ * failed against that stub.
+ *
+ * WASI has no priority scheduler, so PRIO_INHERIT/PRIO_PROTECT have no
+ * behavioral effect (the protocol is a no-op at lock time) — but the attribute
+ * object must still report faithfully what was set, per POSIX. So we store the
+ * value and let getprotocol read it back; the only observable consequence is
+ * the honest round-trip, not any scheduling change.
+ *
+ * Storage bits — IMPORTANT: NOT bit 3. Bit 3 (value 8) is musl's live
+ * PRIO_INHERIT flag, consumed by the lock machinery
+ * (pthread_mutex_{trylock,timedlock,unlock}.c test `type & 8` to route through
+ * the FUTEX_*_PI priority-inheritance paths). wasix-libc has no PI-futex
+ * support — those syscalls are compiled out — so setting bit 3 would activate
+ * the half-wired PI branches in trylock (e.g. `(type&8) && m->_m_waiters`
+ * returning a spurious EBUSY on a contended acquire) and corrupt ordinary
+ * locking. Instead the protocol is recorded in a dedicated 2-bit field at bits
+ * 4-5 (mask 0x30, otherwise unused in the mutexattr/_m_type bitmap), so it
+ * round-trips through getprotocol without ever reaching the lock path's PI
+ * logic. getprotocol decodes the same field (see pthread_attr_get.c). */
+#define __MUTEXATTR_PROTOCOL_SHIFT 4
+#define __MUTEXATTR_PROTOCOL_MASK  (3U << __MUTEXATTR_PROTOCOL_SHIFT)
 int pthread_mutexattr_setprotocol(pthread_mutexattr_t *a, int protocol) {
-	return 0;
+	switch (protocol) {
+	case PTHREAD_PRIO_NONE:
+	case PTHREAD_PRIO_INHERIT:
+	case PTHREAD_PRIO_PROTECT:
+		a->__attr = (a->__attr & ~__MUTEXATTR_PROTOCOL_MASK)
+			| ((unsigned)protocol << __MUTEXATTR_PROTOCOL_SHIFT);
+		return 0;
+	default:
+		return EINVAL;
+	}
 }
 #endif
