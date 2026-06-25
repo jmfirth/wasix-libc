@@ -329,9 +329,22 @@ static inline void __wasm_apply_handler_mask(const struct k_sigaction *ksa,
 	 * bytes mirroring sigset_t's bit (sig-1) layout. Read it as
 	 * unsigned-long words to OR into blocked_sigmask. */
 	const unsigned long *add = (const unsigned long *)(const void *)&ksa->mask;
+	/* firebox#H2F — SIGKILL and SIGSTOP can never be blocked, including via a
+	 * handler's sa_mask (POSIX sigaction: "If sa_mask names SIGKILL or
+	 * SIGSTOP, those signals shall not be blocked"). Strip those two bits
+	 * from the mask we apply to blocked_sigmask, so an in-handler
+	 * raise(SIGKILL)/raise(SIGSTOP) is NOT pended in-guest but routed to the
+	 * host, which terminates/stops the process (Open POSIX sigaction/4-*). */
+	const size_t kw = (size_t)(SIGKILL - 1) / (8 * sizeof(long));
+	const unsigned long kb = 1UL << ((SIGKILL - 1) % (8 * sizeof(long)));
+	const size_t sw = (size_t)(SIGSTOP - 1) / (8 * sizeof(long));
+	const unsigned long sb = 1UL << ((SIGSTOP - 1) % (8 * sizeof(long)));
 	for (size_t i = 0; i < nwords; i++) {
+		unsigned long a = add[i];
+		if (i == kw) a &= ~kb;
+		if (i == sw) a &= ~sb;
 		saved[i] = self->blocked_sigmask[i];
-		self->blocked_sigmask[i] |= add[i];
+		self->blocked_sigmask[i] |= a;
 	}
 	/* Unless SA_NODEFER, the handled signal is also blocked for the
 	 * handler's duration (the default: a second instance of the same

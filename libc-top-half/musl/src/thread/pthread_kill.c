@@ -1,5 +1,6 @@
 #include "pthread_impl.h"
 #include "lock.h"
+#include <errno.h>
 #ifdef __wasilibc_unmodified_upstream
 #else
 #include <wasi/api.h>
@@ -25,6 +26,17 @@ int pthread_kill(pthread_t t, int sig)
 #else
 int pthread_kill(pthread_t t, int sig)
 {
+	/* firebox#SE3 — POSIX/musl argument validation: an out-of-range signal
+	 * number must fail with EINVAL, NOT be passed to the host. `sig+0U >=
+	 * _NSIG` is musl's own idiom: it folds the negative case (a negative int
+	 * wraps to a huge unsigned, so e.g. sig=-1 → EINVAL) and the too-large
+	 * case into one unsigned comparison, while letting sig==0 through as the
+	 * POSIX null-signal probe (error-checks the thread, delivers nothing).
+	 * Without this guard the firebox path handed an invalid signo straight to
+	 * __wasi_thread_signal, which returned success — Open POSIX
+	 * pthread_kill/7-1 ("did not fail on EINVAL"). The upstream branch above
+	 * already performs this check; this restores it on the firebox branch. */
+	if (sig+0U >= (unsigned)_NSIG) return EINVAL;
 	sigset_t set;
 	__block_all_sigs(&set);
 	int r = __wasi_thread_signal(t->tid, (__wasi_signal_t)sig);
