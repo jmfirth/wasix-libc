@@ -29,6 +29,15 @@ int kill(pid_t pid, int sig)
 	 * sig == 0 (the null signal) is the existence/permission error-check probe:
 	 * it sends nothing but still validates `pid`, so its errno (ESRCH/EPERM) flows
 	 * through the same mapping. */
+	/* firebox#90Y — class sweep: an out-of-range signo must fail with EINVAL,
+	 * NOT truncate to u8 (`__wasi_signal_t`) and cross-deliver a bogus in-range
+	 * signal (the kill.c sibling of the raise.c truncation bug). Mirrors
+	 * raise.c / pthread_kill.c (#SE3); `sig+0U >= (unsigned)_NSIG` lets sig==0
+	 * through as the null-signal existence probe handled above. */
+	if (sig+0U >= (unsigned)_NSIG) {
+		errno = EINVAL;
+		return -1;
+	}
 	__wasi_errno_t e = __wasi_proc_signal(pid, (__wasi_signal_t)sig);
 	if (e != __WASI_ERRNO_SUCCESS) {
 		errno = (int)e;
