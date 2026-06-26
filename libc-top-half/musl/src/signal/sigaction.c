@@ -877,7 +877,13 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		__wasi_callback_signal("__wasm_signal");
 	}
 	int r = 0;
-	if (sig-32U < 3 || sig-1U >= _NSIG-1) {
+	/* firebox#XCJ — reject out-of-range signos AND an attempt to change the
+	 * disposition of the uncatchable SIGKILL/SIGSTOP (sa != NULL). This mirrors
+	 * the user-facing check in __sigaction_inner; keeping it here too means a
+	 * direct __libc_sigaction caller (bypassing __sigaction_inner) is also
+	 * EINVAL-guarded. POSIX: SIGKILL/SIGSTOP dispositions cannot be set. */
+	if (sig-32U < 3 || sig-1U >= _NSIG-1 ||
+	    (sa && (sig == SIGKILL || sig == SIGSTOP))) {
 		r = EINVAL;
 	} else {
 		LOCK(__eintr_handler_lock);
@@ -927,6 +933,19 @@ static int __sigaction_inner(int sig, const struct sigaction *restrict sa, struc
 	unsigned long set[_NSIG/(8*sizeof(long))];
 
 	if (sig-32U < 3 || sig-1U >= _NSIG-1) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	/* firebox#XCJ — SIGKILL and SIGSTOP are uncatchable: their disposition
+	 * cannot be changed (POSIX sigaction: "SIGKILL or SIGSTOP ... it is
+	 * impossible to ... set the action for [them] to SIG_IGN ... or to a
+	 * signal-catching function"). An attempt to install OR ignore a handler
+	 * for either must fail with -1/EINVAL (Open POSIX sigaction/30-1, and the
+	 * SIG_ERR path of signal/7-1 which routes through here). Only reject when
+	 * actually changing the disposition (sa != NULL); a pure old-disposition
+	 * query (sa == NULL) is harmless and left to fall through. */
+	if (sa && (sig == SIGKILL || sig == SIGSTOP)) {
 		errno = EINVAL;
 		return -1;
 	}
