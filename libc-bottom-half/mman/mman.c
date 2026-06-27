@@ -26,6 +26,32 @@
 // arithmetic. <wasi/api.h> provides __wasi_fd_fdstat_get + the
 // __WASI_RIGHTS_FD_{READ,WRITE} / __WASI_FILETYPE_REGULAR_FILE constants.
 #include <wasi/api.h>
+// firebox#61X (Stage-1 1b-libc): struct stat / fstat / st_ino to recognise a
+// /dev/shm fd at mmap time and key the host shared-window mapping.
+#include <sys/stat.h>
+
+// firebox#61X: the host shared-memory-window import (defined in
+// libc-bottom-half/sources/__wasixlibc_firebox.c) and the process-local
+// /dev/shm inode set (defined in libc-top-half/musl/src/mman/shm_open.c). A
+// MAP_SHARED mapping of a /dev/shm object routes through these to the host
+// window instead of the private aligned_alloc+pread emulation, making raw
+// cross-process MAP_SHARED store/load coherent (fork/16-1) and sharing the
+// named-semaphore byte region. Both fall back gracefully (never mis-share).
+extern int32_t __wasilibc_shm_map(uint64_t inode, uint64_t len, uint64_t *ret_offset);
+extern int __wasix_is_shm_inode(ino_t ino);
+
+// firebox#61X: the base of the cross-process shared window in the wasm32 guest
+// address space. A pointer at or above this was returned by mmap() routing a
+// /dev/shm MAP_SHARED to the host window — it lives ABOVE the grow-capped heap,
+// has NO malloc header, and the host owns its segment lifetime (the inode
+// registry). munmap()/msync() must therefore treat it as a successful no-op
+// (NOT recover a header / free() it). MUST MATCH wasmer shm_registry::SHM_BASE
+// (= WASM32_MAX_BYTES - SHM_WINDOW_BYTES = 4 GiB - 256 MiB). wasm32 ONLY: on
+// wasm64 no window is installed (shm_map returns Inval), so a high wasm64
+// address is an ordinary mapping that must keep the normal munmap/msync path.
+#if !defined(__wasm64__)
+#define WASIX_SHM_WINDOW_BASE ((uintptr_t)0xF0000000u)
+#endif
 
 // POSIX mmap(2) requires returned addresses to be aligned to
 // sysconf(_SC_PAGESIZE). On WebAssembly the architectural page is 65536
@@ -356,6 +382,37 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
+    // firebox#61X (Stage-1 1b-libc): a MAP_SHARED mapping of a /dev/shm object
+    // is a cross-process shared-memory region. Route it to the host shared
+    // window — raw stores/loads are then coherent across processes (fork/16-1)
+    // and musl's named semaphores share their byte region — instead of the
+    // private aligned_alloc+pread emulation below. Gated tightly so the legacy
+    // path keeps every case the window must NOT take over:
+    //   * MAP_SHARED only — a /dev/shm object mmap'd MAP_PRIVATE (e.g.
+    //     fork/16-1's second object) must stay a private copy.
+    //   * /dev/shm objects only (__wasix_is_shm_inode, keyed on the stable
+    //     st_ino) — a regular file's MAP_SHARED needs write-back to its backing
+    //     file, which the anonymous host window does NOT provide; regular files
+    //     keep the legacy path (the separate, still-open #7C5 writeback gap).
+    //   * offset 0 only — the host maps the object from its start; a non-zero
+    //     offset into a windowed object is the §7.4 segment-sizing follow-up, so
+    //     it falls through to the legacy path rather than mis-map.
+    // Any host failure (no window reserved: wasm64 / non-Static heap / the
+    // browser js/v8 backends, the §4-B3 known-gap; or an OS map error) falls
+    // through to the legacy emulation below — never silently wrong.
+    if ((flags & MAP_SHARED) != 0 && (flags & MAP_ANON) == 0 && fd >= 0 &&
+        offset == 0) {
+        struct stat shm_st;
+        if (fstat(fd, &shm_st) == 0 && __wasix_is_shm_inode(shm_st.st_ino)) {
+            uint64_t shm_off = 0;
+            if (__wasilibc_shm_map((uint64_t)shm_st.st_ino, (uint64_t)length,
+                                   &shm_off) == 0) {
+                return (void *)(uintptr_t)shm_off;
+            }
+            // else: fall through to the private emulation below.
+        }
+    }
+
     // firebox#7C5: POSIX mmap(2) maps WHOLE pages. "The system shall always
     // zero-fill any partial page at the end of an object" (mmap/11-4/5/6): when
     // `length` is not a multiple of the page size, the bytes from the file/object
@@ -470,6 +527,17 @@ int munmap(void *addr, size_t length) {
         return 0;
     }
 
+#if !defined(__wasm64__)
+    // firebox#61X: a window mapping (addr >= SHM_BASE, above the grow-capped
+    // heap) has no malloc header — the host owns the segment via the inode
+    // registry — so guest munmap is a successful no-op, like a fixed mapping.
+    // MUST precede the EINVAL precondition below, which rejects
+    // addr >= memory_size (the window lives above the grow-capped memory size).
+    if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE) {
+        return 0;
+    }
+#endif
+
     // firebox#TTB: POSIX munmap EINVAL preconditions, validated BEFORE we
     // recover and dereference the header one page below addr — otherwise an
     // invalid addr (e.g. (void *)-1 in munmap/8-1) computes a wild `base` and
@@ -532,6 +600,15 @@ int msync (void *addr, size_t length, int flags) {
     if (wasix_fixed_is_registered((uintptr_t)addr)) {
         return 0;
     }
+#if !defined(__wasm64__)
+    // firebox#61X: a window mapping IS the live host-backed shared memory — the
+    // bytes already are the shared object, there is nothing to flush — so msync
+    // is a no-op success (like a fixed mapping). Precedes the header recovery
+    // below (a window addr has no malloc header one page beneath it).
+    if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE) {
+        return 0;
+    }
+#endif
     // Header recovery: see munmap() for layout. addr is page-aligned by
     // construction; the header sits exactly one page below it.
     struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);

@@ -45,6 +45,29 @@ int32_t __imported_wasix_fbx_fd_ioctl(int32_t,int32_t,intptr_t,intptr_t) __attri
 __wasi_errno_t __wasi_fd_ioctl(__wasi_fd_t fd,uint32_t request,void *argp,int32_t *retptr0){return (uint16_t)__imported_wasix_fbx_fd_ioctl((int32_t)fd,(int32_t)request,(intptr_t)argp,(intptr_t)retptr0);}
 #endif
 
+/* firebox#61X (Stage-1 1b) — the cross-process shared-memory window import.
+ *
+ * Maps the POSIX shm object identified by `inode` (the #ADZ/#TPH link-identity
+ * inode the guest's /dev/shm fd resolves to) into this process's shared window
+ * — the fixed top region of the wasm32 linear memory 1a/1b reserve. On success
+ * (return 0) *ret_offset receives the guest linear-memory BYTE OFFSET where a
+ * raw store/load now aliases the object's physical bytes, coherent with every
+ * other mapping of the same inode (a sibling process's independent sem_open, or
+ * a proc_fork child's re-aliased window). A nonzero return means the memory has
+ * no window (wasm64 / non-Static heap / the browser js/v8 backends — the §4-B3
+ * reasoned known-gap) or the OS object could not be mapped; mman.c then falls
+ * back to the private aligned_alloc+pread emulation (never silently wrong).
+ *
+ * `ret_offset` is a guest pointer passed as intptr_t (i32 on wasm32, i64 on
+ * wasm64 — host sig WasmPtr<u64, M>), so the import resolves under both
+ * wasix_32v1 and wasix_64v1, exactly like the wrappers above. The host
+ * registers it as "shm_map" (wasmer firebox-patches, lib/wasix/src/lib.rs).
+ * Pulled by any mmap()-using program (mman.o references the wrapper), so it
+ * pairs with the firebox runtime that provides it — same ship-together
+ * contract as the firebox imports above. */
+int32_t __imported_wasix_fbx_shm_map(int64_t,int64_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_map")));
+int32_t __wasilibc_shm_map(uint64_t inode,uint64_t len,uint64_t *ret_offset){return __imported_wasix_fbx_shm_map((int64_t)inode,(int64_t)len,(intptr_t)ret_offset);}
+
 /* firebox#811 Phase 2 — HOST held-list registration syscalls.
  *
  * The host (jmfirth/wasmer#firebox-patches) records (lock-word-addr, tid)

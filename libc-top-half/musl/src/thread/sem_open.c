@@ -27,6 +27,13 @@ static struct {
 static volatile int lock[1];
 volatile int *const __sem_open_lockptr = lock;
 
+// firebox#61X (Stage-1 1b-libc): defined in shm_open.c. Marks a /dev/shm
+// object's inode so the mmap(MAP_SHARED, fd) below routes to the host
+// shared-memory window. sem_open reaches /dev/shm via open() directly (NOT
+// shm_open), so it must mark the inode itself for the sem's byte region to be
+// cross-process shared.
+extern void __wasix_register_shm_inode(ino_t ino);
+
 #define FLAGS (O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK)
 
 sem_t *sem_open(const char *name, int flags, ...)
@@ -87,8 +94,11 @@ sem_t *sem_open(const char *name, int flags, ...)
 		if (flags != (O_CREAT|O_EXCL)) {
 			fd = open(name, FLAGS);
 			if (fd >= 0) {
+				/* firebox#61X: once fstat succeeds, mark the inode (comma op,
+				 * void) BEFORE the mmap so MAP_SHARED routes to the shm window. */
 				if (fstat(fd, &st) < 0 ||
-				    (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+				    (__wasix_register_shm_inode(st.st_ino),
+				     (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED)) {
 					close(fd);
 					goto fail;
 				}
@@ -121,8 +131,11 @@ sem_t *sem_open(const char *name, int flags, ...)
 			if (errno == EEXIST) continue;
 			goto fail;
 		}
+		/* firebox#61X: mark the inode (comma op, void) after fstat succeeds and
+		 * before the mmap so the new sem's MAP_SHARED routes to the shm window. */
 		if (write(fd, &newsem, sizeof newsem) != sizeof newsem || fstat(fd, &st) < 0 ||
-		    (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
+		    (__wasix_register_shm_inode(st.st_ino),
+		     (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED)) {
 			close(fd);
 			unlink(tmp);
 			goto fail;
