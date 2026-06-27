@@ -86,6 +86,14 @@ void __wasi_init_tp()
 	memset(tp, 0, sizeof(struct pthread));
 	__set_tp((uintptr_t)tp);
 	__init_tp(tp);
+	/* firebox#KKR — publish the MAIN thread's struct pthread base so the host
+	 * can read its live blocked_sigmask (to SKIP a BLOCKED no-handler
+	 * default-terminate signal — it must PEND, not terminate). Spawned threads
+	 * pass their base to the host via start_args.pthread_self_ptr; the main
+	 * thread has no spawn args, so it publishes here. See __fbx_main_pthread /
+	 * __fbx_blocked_off in signal/sigaction.c. */
+	extern volatile uintptr_t __fbx_main_pthread;
+	__fbx_main_pthread = (uintptr_t)tp;
 }
 #endif
 

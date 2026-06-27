@@ -1,6 +1,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stddef.h>  /* firebox#KKR — offsetof() for __fbx_blocked_off */
 #include <string.h>
 #include <sysexits.h>
 #ifndef __wasilibc_unmodified_upstream
@@ -39,6 +40,28 @@ static int unmask_done;
  * signal (Linux behavior) instead of hanging forever, while LEAVING the
  * with-handler case alone (the bit is set → the deferred resume-half). */
 unsigned long __fbx_handler_set[_NSIG/(8*sizeof(long))];
+
+/* firebox#KKR — the host reads these two to SKIP a BLOCKED signal in its
+ * no-handler default-terminate/stop routing (env.rs
+ * first_no_handler_default_terminate): a blocked signal must PEND, not
+ * terminate, but the host's __fbx_handler_set check alone cannot tell a blocked
+ * no-handler signal from a deliverable one. The block mask is PER-THREAD —
+ * blocked_sigmask lives in the heap-allocated struct pthread (NOT at tls_base),
+ * so the host needs the draining thread's struct base + the field offset:
+ *   __fbx_main_pthread — the MAIN thread's struct pthread base, published by
+ *     __wasi_init_tp. A SPAWNED thread instead passes its base to the host via
+ *     the thread-spawn args (start_args.pthread_self_ptr); only the main thread
+ *     has no spawn args, hence this export.
+ *   __fbx_blocked_off  — offsetof(struct pthread, blocked_sigmask), so the host
+ *     carries no struct-layout knowledge (robust to field reordering).
+ * Same posture as __fbx_handler_set: the threaded/edge link --export[-if-defined]s
+ * them; the host reads the immutable global = the symbol's linear address, then
+ * the bytes from the live MemoryView. Backward-compatible — a host predating the
+ * read just ignores them; the guest imports NOTHING new, so wasm built with this
+ * libc still instantiates on an older runtime (the fix is simply dormant). */
+volatile uintptr_t __fbx_main_pthread;
+const uint32_t __fbx_blocked_off = offsetof(struct pthread, blocked_sigmask);
+
 #ifdef __wasilibc_unmodified_upstream
 #else
 static volatile int __eintr_callback_registered = 0;
