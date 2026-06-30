@@ -82,6 +82,19 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *rqtp,
   if (sub.u.u.clock.timeout == 0)
     sub.u.u.clock.timeout = 1;
 
+  // firebox#NSL — capture a CLOCK_MONOTONIC baseline so an EINTR-interrupted
+  // RELATIVE sleep can report the time remaining in rmtp (POSIX: "if the
+  // TIMER_ABSTIME flag is not set ... the timespec referenced by rmtp is updated
+  // to contain the amount of time remaining"). We measure elapsed on the
+  // monotonic clock — NOT `id` — so a concurrent clock_settime(CLOCK_REALTIME)
+  // can never skew a relative sleep's remainder. rmtp is left untouched for
+  // TIMER_ABSTIME and when rmtp is NULL.
+  __wasi_timestamp_t mono_start = 0;
+  bool want_remaining = rmtp != NULL && (flags & TIMER_ABSTIME) == 0;
+  if (want_remaining &&
+      __wasi_clock_time_get(__WASI_CLOCKID_MONOTONIC, 1, &mono_start) != 0)
+    want_remaining = false;
+
   // Block until polling event is triggered.
   __wasi_size_t nevents;
   __wasi_event_t ev;
@@ -93,6 +106,28 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *rqtp,
   // Weak: absent in the single-threaded build, where it resolves to NULL.
   if (&__testcancel != 0)
     __testcancel();
+
+  // firebox#NSL — a delivered signal whose handler RAN interrupts the host
+  // poll_oneoff with __WASI_ERRNO_INTR (the never-restart blocking-wait arm,
+  // host firebox#G13). POSIX requires (clock_)nanosleep to fail with EINTR in
+  // that case — not the ENOTSUP that the catch-all below used to fold every
+  // non-success into — and, for a relative sleep with rmtp != NULL, to store the
+  // unslept remainder in rmtp. nanosleep() (our caller) turns this EINTR into
+  // errno=EINTR + a -1 return; clock_nanosleep() returns it directly. Without
+  // this, every signal-interrupted sleep reported ENOTSUP and left rmtp
+  // untouched (Open POSIX nanosleep/7-1,7-2 + clock_nanosleep/9-1,10-1).
+  if (error == __WASI_ERRNO_INTR) {
+    if (want_remaining) {
+      __wasi_timestamp_t mono_now = mono_start;
+      (void)__wasi_clock_time_get(__WASI_CLOCKID_MONOTONIC, 1, &mono_now);
+      __wasi_timestamp_t elapsed =
+          mono_now > mono_start ? mono_now - mono_start : 0;
+      __wasi_timestamp_t remaining = elapsed < timeout ? timeout - elapsed : 0;
+      rmtp->tv_sec = (time_t)(remaining / 1000000000ULL);
+      rmtp->tv_nsec = (long)(remaining % 1000000000ULL);
+    }
+    return EINTR;
+  }
 
   return error == 0 && ev.error == 0 ? 0 : ENOTSUP;
 }
