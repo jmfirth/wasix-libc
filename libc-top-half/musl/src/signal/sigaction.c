@@ -123,6 +123,152 @@ static int __wasm_in_handler[_NSIG];
  * makes file scope safe; a per-signal counter handles legitimate
  * SA_NODEFER recursion depth. */
 static volatile int __wasm_nodefer_active[_NSIG];
+
+/* firebox#C2Q / #HPT — POSIX realtime-signal queuing (depth + FIFO si_value).
+ *
+ * POSIX requires that a signal in the SIGRTMIN..SIGRTMAX range queued with
+ * sigqueue(2) DELIVERS ONCE PER QUEUED INSTANCE, in FIFO order, each carrying
+ * the application's `union sigval` (si_value), si_code == SI_QUEUE, and the
+ * sender's si_pid/si_uid. (Standard signals 1..31 instead COALESCE — at most
+ * one instance pends — which the existing one-bit-per-signal pending mask
+ * already models faithfully; only RT signals need a real queue.)
+ *
+ * Two facts force this queue to live HERE, in the guest libc, rather than in
+ * the existing pending bitmask or in the host:
+ *   1. The pending store (self->pending_sigs[] / __wasm_pending_sigs[]) is a
+ *      BITMASK — one bit per signal. It records presence, not depth, and has
+ *      no slot for si_value. Queuing SIGRTMAX ten times sets one bit once, so
+ *      both the count (10) and every value (1..10) are lost. That is the
+ *      "Got signal 0, expected 1" failure (sigaction/29-1, #HPT) and the
+ *      "queued 1x instead of N" depth loss (sigqueue/4-1, /8-1).
+ *   2. The WASI signal seam carries NO payload in either direction:
+ *      __wasi_thread_signal / __wasi_proc_signal take (tid/pid, signal) only,
+ *      and the host->guest dispatch is __wasm_signal(int sig) — the number
+ *      alone. So for a SELF-directed sigqueue (every queuing witness:
+ *      sigqueue(getpid(),...)), the value never needs to cross the seam — it
+ *      is already in the sender's (== receiver's) guest memory. We keep the
+ *      full siginfo record locally in this ring; sigqueue ENQUEUES it before
+ *      nudging the host, and the delivery consumers (the SA_SIGINFO async
+ *      dispatch in __wasm_signal, and the synchronous sigtimedwait/sigwaitinfo
+ *      accept) DEQUEUE it. (CROSS-PROCESS sigqueue si_value still needs a host
+ *      signal-queue assist — that is #27M, a deliberate WASI-ABI extension,
+ *      out of scope for this guest-only fix; sigqueue/1-1, sigwaitinfo/8-1.)
+ *
+ * The host coalesces the N self-nudges into a SINGLE __wasm_signal dispatch
+ * (WasiThread::signal dedups its pending Vec — wasmer os/task/thread.rs), so
+ * the guest, which owns the depth, redelivers the full ring on that one
+ * dispatch (the drain loop in __wasm_signal below). One ring per RT signal
+ * gives intra-signal FIFO; the existing low-to-high signal scan gives
+ * inter-signal ordering (POSIX: lowest-numbered RT signal first).
+ *
+ * Inv 8 (upstream-ABI compat): this is a pure guest-libc data structure — the
+ * WASI imports are untouched, so prebuilt wasmer.io artifacts still run. */
+#define __FBX_RTSIG_MIN   35              /* == __libc_current_sigrtmin() */
+#define __FBX_RTSIG_MAX   (_NSIG - 1)     /* 64 == __libc_current_sigrtmax() */
+#define __FBX_RTSIG_N     (__FBX_RTSIG_MAX - __FBX_RTSIG_MIN + 1)   /* 30 */
+#define __FBX_SIGQ_DEPTH  32              /* >= _POSIX_SIGQUEUE_MAX (32) */
+
+/* Field names deliberately avoid si_pid/si_uid/si_value: those are <signal.h>
+ * accessor MACROS for siginfo_t (e.g. si_pid ->
+ * __si_fields.__si_common.__first.__piduid.si_pid), so a struct member named
+ * `si_pid` would macro-expand to garbage. We store under plain names and copy
+ * into the siginfo_t via the macros on the consumer side. */
+struct __fbx_sigq_ent {
+	union sigval value;
+	int   code;
+	pid_t pid;
+	uid_t uid;
+};
+struct __fbx_sigq {
+	volatile int lock[1];   /* futex lock, same discipline as __eintr_handler_lock */
+	int head;               /* index of the FIFO head */
+	int count;              /* live entries (0..__FBX_SIGQ_DEPTH) */
+	struct __fbx_sigq_ent ent[__FBX_SIGQ_DEPTH];
+};
+static struct __fbx_sigq __fbx_rtsigq[__FBX_RTSIG_N];
+
+static inline int __fbx_sig_is_rt(int sig) {
+	return sig >= __FBX_RTSIG_MIN && sig <= __FBX_RTSIG_MAX;
+}
+
+/* Enqueue one queued siginfo record for RT signal `sig` (FIFO tail). A non-RT
+ * signal has no queue: return 0 (success, no-op) so the caller proceeds with
+ * the existing coalescing delivery. Returns 0 on success, -1 if this signal's
+ * queue is full (caller maps to EAGAIN, the POSIX sigqueue over-limit error).
+ * The lock is held only across the tiny record copy — never across a handler
+ * call — so it cannot deadlock the cooperative dispatcher. */
+int __fbx_rtsigq_push(int sig, union sigval value, int code,
+                      pid_t pid, uid_t uid) {
+	if (!__fbx_sig_is_rt(sig)) return 0;
+	struct __fbx_sigq *q = &__fbx_rtsigq[sig - __FBX_RTSIG_MIN];
+	int rc = 0;
+	LOCK(q->lock);
+	if (q->count >= __FBX_SIGQ_DEPTH) {
+		rc = -1;
+	} else {
+		int tail = (q->head + q->count) % __FBX_SIGQ_DEPTH;
+		q->ent[tail].value = value;
+		q->ent[tail].code  = code;
+		q->ent[tail].pid   = pid;
+		q->ent[tail].uid   = uid;
+		q->count++;
+	}
+	UNLOCK(q->lock);
+	return rc;
+}
+
+/* Dequeue the FIFO-head queued record for RT signal `sig` into *si (clearing
+ * *si first, then setting si_signo/si_code/si_value/si_pid/si_uid). Returns 1
+ * if a record was dequeued, 0 if the queue was empty (caller builds the
+ * minimal SI_USER siginfo for a raise()/kill()-delivered RT signal that
+ * carries no queued value). The lock is dropped before *si is populated. */
+int __fbx_rtsigq_pop_si(int sig, siginfo_t *si) {
+	if (!si || !__fbx_sig_is_rt(sig)) return 0;
+	struct __fbx_sigq *q = &__fbx_rtsigq[sig - __FBX_RTSIG_MIN];
+	struct __fbx_sigq_ent e;
+	int got = 0;
+	LOCK(q->lock);
+	if (q->count > 0) {
+		e = q->ent[q->head];
+		q->head = (q->head + 1) % __FBX_SIGQ_DEPTH;
+		q->count--;
+		got = 1;
+	}
+	UNLOCK(q->lock);
+	if (!got) return 0;
+	memset(si, 0, sizeof *si);
+	si->si_signo = sig;
+	si->si_code  = e.code;
+	si->si_value = e.value;
+	si->si_pid   = e.pid;
+	si->si_uid   = e.uid;
+	return 1;
+}
+
+/* Live queued-record count for RT signal `sig` (0 for a non-RT signal). */
+int __fbx_rtsigq_count(int sig) {
+	if (!__fbx_sig_is_rt(sig)) return 0;
+	struct __fbx_sigq *q = &__fbx_rtsigq[sig - __FBX_RTSIG_MIN];
+	int c;
+	LOCK(q->lock);
+	c = q->count;
+	UNLOCK(q->lock);
+	return c;
+}
+
+/* Re-mark RT signal `sig` pending after a synchronous accept (sigtimedwait/
+ * sigwaitinfo) popped one queued record but MORE remain, so the pending bit
+ * stays ≡ "this RT signal's queue is non-empty" and the next accept finds the
+ * remaining FIFO instances (sigwaitinfo/7-1). Mirrors __wasm_pend_signal's bit
+ * writes (per-thread + process-wide masks) minus the wake — the caller is
+ * returning from the accept, not parking. */
+void __fbx_rtsig_repend(int sig) {
+	struct pthread *self = __pthread_self();
+	int word = (sig - 1) / 32;
+	int bit  = 1 << ((sig - 1) % 32);
+	if (self) a_or((volatile int *)&self->pending_sigs[word], bit);
+	a_or(&__wasm_pending_sigs[word], bit);
+}
 #endif
 
 void __get_handler_set(sigset_t *set)
@@ -683,16 +829,41 @@ void __wasm_signal(int sig) {
 		if (__self_dispatch) __self_dispatch->in_handler_depth++;
 		if (nodefer) __wasm_nodefer_active[sig]++;
 		if (ksa.flags & SA_SIGINFO) {
-			siginfo_t si;
-			memset(&si, 0, sizeof si);
-			si.si_signo = sig;
-			si.si_code = SI_USER;
 			void (*h3)(int, siginfo_t *, void *) =
 				(void (*)(int, siginfo_t *, void *))(void *)ksa.handler;
-			if (on_alt) {
-				__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
+			siginfo_t si;
+			/* firebox#C2Q/#HPT — RT-signal queued delivery. If sigqueue
+			 * enqueued one or more siginfo records for this RT signal,
+			 * deliver ONE handler invocation per queued record, in FIFO
+			 * order, each carrying the real si_value/si_code/si_pid/si_uid.
+			 * Linux delivers every queued instance of a now-unblocked RT
+			 * signal back-to-back; the host coalesces the N self-nudges into
+			 * ONE dispatch (WasiThread::signal dedups its pending Vec), so
+			 * the guest — which owns the depth — drains the whole ring on
+			 * this single dispatch. For a non-RT signal, or an RT signal with
+			 * no queued record (a raise()/kill()-delivered RT), fall back to
+			 * the minimal SI_USER siginfo (musl's behavior for a signal that
+			 * carries no queued value). The handler's sa_mask (applied above)
+			 * holds for the whole drain — `sig` stays blocked for its
+			 * duration, identical to the per-delivery mask Linux re-applies,
+			 * since every drained instance is the same signal number. */
+			if (__fbx_rtsigq_pop_si(sig, &si)) {
+				do {
+					if (on_alt) {
+						__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
+					} else {
+						h3(sig, &si, NULL);
+					}
+				} while (__fbx_rtsigq_pop_si(sig, &si));
 			} else {
-				h3(sig, &si, NULL);
+				memset(&si, 0, sizeof si);
+				si.si_signo = sig;
+				si.si_code = SI_USER;
+				if (on_alt) {
+					__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
+				} else {
+					h3(sig, &si, NULL);
+				}
 			}
 		} else {
 			if (on_alt) {

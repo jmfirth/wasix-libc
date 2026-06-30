@@ -8,6 +8,13 @@
 #include "pthread_impl.h"
 #ifndef __wasilibc_unmodified_upstream
 #include <wasi/api.h>
+/* firebox#C2Q/#HPT — guest-side RT-signal siginfo FIFO (defined in
+ * sigaction.c). For a SELF-directed RT sigqueue, the queued si_value is
+ * stashed here before the host nudge so the SA_SIGINFO / sigwaitinfo
+ * consumers can hand it back in FIFO order. No-op (returns 0) for a
+ * standard signal. */
+extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
+                             pid_t pid, uid_t uid);
 #endif
 
 int sigqueue(pid_t pid, int sig, const union sigval value)
@@ -60,13 +67,20 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 	 *     proves thread_signal-to-self respects the block (sigwait/1-1).
 	 *   - CROSS-PROCESS: __wasi_proc_signal(pid, sig) — the kill(2) path.
 	 *
-	 * KNOWN GAP (tracked, NOT a stub): the queued `si_value` payload is
-	 * NOT carried across either delivery — the WASI signal primitives take
-	 * only (pid/tid, signal), so an SA_SIGINFO handler reads a zero
-	 * si_value (sigqueue/1-1 checks si_value.sival_int across fork; the
-	 * self-delivery siginfo built by __wasm_signal is likewise minimal).
-	 * Faithfully passing the value needs a host signal-queue assist (a
-	 * wasmer change) — out of scope for this libc fix; see RESULT.md. */
+	 * si_value PAYLOAD (firebox#C2Q/#HPT):
+	 *   - SELF-directed (pid == getpid()): the queued value lives in the
+	 *     sender's (== receiver's) guest memory, so we enqueue the full
+	 *     {value, SI_QUEUE, pid, uid} siginfo record into the guest-side
+	 *     RT-signal FIFO (__fbx_rtsigq_push, sigaction.c) BEFORE nudging the
+	 *     host. The SA_SIGINFO handler dispatch and the synchronous
+	 *     sigtimedwait/sigwaitinfo accept dequeue it in FIFO order — closing
+	 *     sigaction/29-1 + the sigqueue/sigwaitinfo RT-FIFO witnesses.
+	 *   - CROSS-PROCESS: the queued value CANNOT be carried in guest memory
+	 *     across the fork boundary, and the WASI proc_signal seam takes
+	 *     (pid, signal) only. Faithful cross-process si_value needs a host
+	 *     signal-queue assist (a deliberate WASI-ABI extension) — tracked as
+	 *     #27M (sigqueue/1-1, sigwaitinfo/8-1), out of scope for this libc
+	 *     fix. Such a delivery still arrives with a zero si_value until then. */
 	(void)set;
 	if (sig < 0 || sig >= _NSIG) {
 		errno = EINVAL;
@@ -85,11 +99,21 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 		struct pthread *self = __pthread_self();
 		__wasi_errno_t e;
 		if (self && (pid == (pid_t)getpid())) {
+			/* firebox#C2Q/#HPT — stash the queued si_value record (RT signals
+			 * only; a no-op for standard signals) BEFORE the host nudge, so
+			 * the delivery consumer hands back the real value in FIFO order.
+			 * A full per-signal queue is the POSIX over-limit error EAGAIN. */
+			if (__fbx_rtsigq_push(sig, value, SI_QUEUE,
+			                      getpid(), getuid()) != 0) {
+				errno = EAGAIN;
+				return -1;
+			}
 			/* Self-delivery: respect the per-thread block mask via the
 			 * thread-signal → __wasm_signal path (mirrors raise()). */
 			e = __wasi_thread_signal((__wasi_tid_t)self->tid,
 			                         (__wasi_signal_t)sig);
 		} else {
+			/* Cross-process: si_value not carried (needs host assist, #27M). */
 			e = __wasi_proc_signal((__wasi_pid_t)pid,
 			                       (__wasi_signal_t)sig);
 		}

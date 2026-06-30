@@ -68,6 +68,15 @@ int sigtimedwait(const sigset_t *restrict mask, siginfo_t *restrict si, const st
 /* Process-wide pending bitmask (per-thread copy is self->pending_sigs[]). */
 extern volatile int __wasm_pending_sigs[];
 
+/* firebox#C2Q/#HPT — guest-side RT-signal siginfo FIFO (defined in
+ * sigaction.c). The synchronous accept here is a CONSUMER of the same queue
+ * the SA_SIGINFO async dispatch drains, so a sigqueue'd RT si_value is handed
+ * back here too (sigwaitinfo/7-1: lowest-numbered RT signal first via the
+ * low-to-high scan in __sigtw_claim, FIFO within a signal via the ring). */
+extern int __fbx_rtsigq_pop_si(int sig, siginfo_t *si);
+extern int __fbx_rtsigq_count(int sig);
+extern void __fbx_rtsig_repend(int sig);
+
 /* Try to atomically claim a pending signal that is a member of `set`,
  * preferring the LOWEST-numbered signal (POSIX leaves selection unspecified
  * for non-RT signals but REQUIRES the lowest-numbered for queued RT signals —
@@ -137,9 +146,14 @@ static void __sigtw_set_acceptance(const sigset_t *set, int on)
 static void __sigtw_fill_si(siginfo_t *si, int sig)
 {
 	if (!si) return;
-	/* Minimal siginfo: only si_signo is authoritative from the libc
-	 * pending bitmask (it carries no queued value — carrying a queued
-	 * si_value would need a host signal-queue assist, tracked separately).
+	/* firebox#C2Q/#HPT — if sigqueue enqueued a real siginfo record for this
+	 * RT signal, hand back its si_value/si_code/si_pid/si_uid (POSIX: a
+	 * synchronous accept returns the QUEUED value, FIFO within a signal; the
+	 * caller's low-to-high scan in __sigtw_claim already picks the lowest RT
+	 * signal first, so this just pops that signal's FIFO head). */
+	if (__fbx_rtsigq_pop_si(sig, si)) return;
+	/* Minimal siginfo: only si_signo is authoritative from the libc pending
+	 * bitmask (a raise()/kill()-delivered signal carries no queued value).
 	 * si_code SI_USER matches a kill()/raise()-delivered signal. */
 	memset(si, 0, sizeof *si);
 	si->si_signo = sig;
@@ -192,6 +206,13 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 		if (sig) {
 			__sigtw_set_acceptance(set, 0);
 			__sigtw_fill_si(si, sig);
+			/* firebox#C2Q — RT depth coherence: __sigtw_claim cleared the
+			 * pending bit, but if more queued records remain for this RT
+			 * signal, re-mark it pending so the next accept finds them (FIFO
+			 * depth). A no-op for a non-RT signal or a now-empty queue (the
+			 * common single-instance case), so the standard-signal path is
+			 * behaviorally unchanged. */
+			if (__fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
 			return sig;
 		}
 
@@ -214,6 +235,8 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 			__sigtw_set_acceptance(set, 0);
 			if (sig) {
 				__sigtw_fill_si(si, sig);
+				/* firebox#C2Q — RT depth coherence (see the main-loop claim). */
+				if (__fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
 				return sig;
 			}
 			errno = EAGAIN;
