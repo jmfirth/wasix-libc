@@ -512,6 +512,31 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             roff += nread;
             body += (size_t)nread;
         }
+
+        // firebox#TV9: POSIX mmap(2) — "The st_atime field of the mapped file
+        // ... shall be marked for update by the first read or write reference
+        // to the mapped region" (mmap/13-1). On this no-MMU target a reference
+        // through the mapping touches malloc-backed memory and cannot trap, so
+        // there is no page fault to hang the atime mark on. The faithful
+        // approximation is the eager pread just performed: it IS a genuine read
+        // of the backing file's bytes that backs every later in-memory read
+        // reference, so we mark st_atime here — at map time — which POSIX
+        // explicitly permits ("[st_atime] may be marked for update at any time
+        // between the mmap() call and the corresponding munmap() call"). Mark
+        // atime ONLY (UTIME_OMIT on mtime): a read reference must never bump
+        // st_mtime, and a MAP_PRIVATE mapping still reads the underlying file so
+        // its atime is marked too (no conformance test asserts atime-unchanged;
+        // only 13-1/14-1 touch timestamps in the whole mmap/munmap/msync
+        // corpus). Best-effort — a mapping whose fd lacks FD_FILESTAT_SET_TIMES
+        // still maps successfully (POSIX requires the field be "marked", not
+        // that mmap fail), so the result is deliberately discarded.
+        {
+            const struct timespec atime_now[2] = {
+                { .tv_sec = 0, .tv_nsec = UTIME_NOW },   // st_atime -> now
+                { .tv_sec = 0, .tv_nsec = UTIME_OMIT },  // st_mtime untouched
+            };
+            (void)futimens(fd, atime_now);
+        }
     } else {
         map->fd = -1;
     }
