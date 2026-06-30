@@ -27,12 +27,40 @@ static struct {
 static volatile int lock[1];
 volatile int *const __sem_open_lockptr = lock;
 
-// firebox#61X (Stage-1 1b-libc): defined in shm_open.c. Marks a /dev/shm
-// object's inode so the mmap(MAP_SHARED, fd) below routes to the host
-// shared-memory window. sem_open reaches /dev/shm via open() directly (NOT
-// shm_open), so it must mark the inode itself for the sem's byte region to be
-// cross-process shared.
-extern void __wasix_register_shm_inode(ino_t ino);
+// firebox#61X-regfix (conformance wave-1): named semaphores are SCOPED OUT of
+// the #61X host shared-memory-window routing. #61X marked the sem object's
+// inode here so its mmap(MAP_SHARED, fd) routed to the window for cross-process
+// byte coherence — but the window cannot yet faithfully back a named semaphore,
+// for THREE substrate reasons the guest libc cannot fix:
+//   1. The window is a fresh anonymous segment, NOT initialized from the fd's
+//      bytes, so the sem_init'd `value` musl write()s to the file is lost — the
+//      window reads back zero. (Broke every nonzero-initialized named sem:
+//      sem_wait/sem_post/sem_getvalue/sem_open single-process tests.)
+//   2. A BLOCKING sem_wait/sem_timedwait does futex_wait on a window ADDRESS
+//      (above the grow-capped heap, in the Cranelift Static-heap elided-bounds
+//      region). Raw store/load alias there, but futex_wait TRAPS
+//      ("RuntimeError: unreachable") — so any sem that actually blocks crashes
+//      the process (sem_unlink/9-1, fork/21-1, the cross-process fork/1-1).
+//      This is the Milestone-1c cross-process futex work; it is deeper than the
+//      "no wake" the #61X message anticipated — the WAIT itself faults.
+//   3. The window slot is keyed on st_ino; the firebox VFS reuses inode numbers
+//      across unlink+recreate, so an unlinked-then-recreated name collides on
+//      the prior slot (sem_unlink/6-1: a value-1 sem reads back its successor's
+//      value 3). Distinct objects must get distinct backing — host-side slot
+//      invalidation on shm_unlink (§7.4), absent today.
+// Until the window is COMPLETED host-side (fd-content init + 1c window-address
+// futex + unlink slot-invalidation), named sems stay on the legacy
+// aligned_alloc+pread path, which faithfully preads `value`, blocks on a normal
+// heap futex, and gives distinct objects distinct backing — restoring all 15
+// single-process sem regressions + fork/21-1 with NO traps. The raw
+// cross-process MAP_SHARED win (fork/16-1) is UNAFFECTED: it routes via
+// shm_open.c (still marks its inodes) and only does raw store/load, never a
+// blocking wait or a value-init or an unlink-recreate. The cost of this
+// scope-down is the two cross-process named-sem cases the window happened to
+// carry at b34541b — fork/14-1 (non-blocking trywait, passed only because its
+// value-0 sem matched the zero-filled window) and the flaky fork/1-1 — which
+// revert to their pre-#61X legacy FAIL; they (and 6-1/9-1/21-1) all return
+// together once the window's futex/init/unlink semantics are completed.
 
 #define FLAGS (O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK)
 
@@ -94,11 +122,8 @@ sem_t *sem_open(const char *name, int flags, ...)
 		if (flags != (O_CREAT|O_EXCL)) {
 			fd = open(name, FLAGS);
 			if (fd >= 0) {
-				/* firebox#61X: once fstat succeeds, mark the inode (comma op,
-				 * void) BEFORE the mmap so MAP_SHARED routes to the shm window. */
 				if (fstat(fd, &st) < 0 ||
-				    (__wasix_register_shm_inode(st.st_ino),
-				     (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED)) {
+				    (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
 					close(fd);
 					goto fail;
 				}
@@ -131,11 +156,8 @@ sem_t *sem_open(const char *name, int flags, ...)
 			if (errno == EEXIST) continue;
 			goto fail;
 		}
-		/* firebox#61X: mark the inode (comma op, void) after fstat succeeds and
-		 * before the mmap so the new sem's MAP_SHARED routes to the shm window. */
 		if (write(fd, &newsem, sizeof newsem) != sizeof newsem || fstat(fd, &st) < 0 ||
-		    (__wasix_register_shm_inode(st.st_ino),
-		     (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED)) {
+		    (map = mmap(0, sizeof(sem_t), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)) == MAP_FAILED) {
 			close(fd);
 			unlink(tmp);
 			goto fail;

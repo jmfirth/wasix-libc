@@ -531,9 +531,32 @@ int munmap(void *addr, size_t length) {
     // firebox#61X: a window mapping (addr >= SHM_BASE, above the grow-capped
     // heap) has no malloc header — the host owns the segment via the inode
     // registry — so guest munmap is a successful no-op, like a fixed mapping.
-    // MUST precede the EINVAL precondition below, which rejects
-    // addr >= memory_size (the window lives above the grow-capped memory size).
+    // MUST precede the standard EINVAL precondition below, which rejects
+    // addr >= memory_size (the window lives above the grow-capped memory size)
+    // and would otherwise mis-reject a genuine window unmap.
+    //
+    // firebox#61X-regfix (conformance wave-1): the no-op MUST still enforce the
+    // geometry-INDEPENDENT POSIX munmap EINVAL preconditions. The window's
+    // numeric range [SHM_BASE, 4 GiB) overlaps wild addresses a conformant
+    // program must be told are invalid — munmap/8-1 calls munmap((void *)-1, 1),
+    // and (void *)-1 == 0xFFFFFFFF falls inside the window range yet is not a
+    // valid mapping. Before #61X that request reached the precondition block
+    // below and returned EINVAL (addr >= memory_size); the unconditional no-op
+    // regressed it to Success. A genuine window pointer is host-page-aligned
+    // (the host slot allocator rounds slot_offset to the host page, >= 4096, and
+    // SHM_BASE is 64 KiB-aligned) and the unmap length is non-zero, so the
+    // alignment + length checks pass a real unmap through to the no-op while
+    // rejecting the malformed request. We deliberately do NOT apply the
+    // memory_size / malloc-header geometry checks here — the whole reason this
+    // guard exists is that the window legitimately lives above memory_size, and
+    // the host (not the guest free-list) owns the segment lifetime.
     if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE) {
+        uintptr_t wa = (uintptr_t)addr;
+        if (length == 0 ||                              // empty range
+            (wa & (WASIX_MMAN_PAGE_SIZE - 1)) != 0) {   // addr not page-aligned
+            errno = EINVAL;
+            return -1;
+        }
         return 0;
     }
 #endif
@@ -605,7 +628,17 @@ int msync (void *addr, size_t length, int flags) {
     // bytes already are the shared object, there is nothing to flush — so msync
     // is a no-op success (like a fixed mapping). Precedes the header recovery
     // below (a window addr has no malloc header one page beneath it).
+    //
+    // firebox#61X-regfix (conformance wave-1): same bug class as munmap() above
+    // — the no-op must not swallow the geometry-independent POSIX EINVAL. A
+    // non-page-aligned addr in the window's numeric range is still a malformed
+    // request; a genuine window pointer is host-page-aligned, so this only
+    // rejects an invalid call (and never a real shared-window flush).
     if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE) {
+        if (((uintptr_t)addr & (WASIX_MMAN_PAGE_SIZE - 1)) != 0) {
+            errno = EINVAL;
+            return -1;
+        }
         return 0;
     }
 #endif
