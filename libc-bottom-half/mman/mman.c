@@ -44,18 +44,34 @@ extern int32_t __wasilibc_shm_map(uint64_t inode, uint64_t len, uint64_t *ret_of
                                   uint32_t *ret_created);
 extern int __wasix_is_shm_inode(ino_t ino);
 
-// firebox#61X: the base of the cross-process shared window in the wasm32 guest
-// address space. A pointer at or above this was returned by mmap() routing a
-// /dev/shm MAP_SHARED to the host window — it lives ABOVE the grow-capped heap,
-// has NO malloc header, and the host owns its segment lifetime (the inode
-// registry). munmap()/msync() must therefore treat it as a successful no-op
-// (NOT recover a header / free() it). MUST MATCH wasmer shm_registry::SHM_BASE
-// (= WASM32_MAX_BYTES - SHM_WINDOW_BYTES = 4 GiB - 256 MiB). wasm32 ONLY: on
-// wasm64 no window is installed (shm_map returns Inval), so a high wasm64
-// address is an ordinary mapping that must keep the normal munmap/msync path.
-#if !defined(__wasm64__)
+// firebox#61X: the base of the cross-process shared window in the guest address
+// space. A pointer at or above this was returned by mmap() routing a /dev/shm
+// MAP_SHARED to the host window — it lives ABOVE the grow-capped heap, has NO
+// malloc header, and the host owns its segment lifetime (the inode registry).
+// munmap()/msync() must therefore treat it as a successful no-op (NOT recover a
+// header / free() it). MUST MATCH wasmer shm_registry::SHM_BASE
+// (= WASM32_MAX_BYTES - SHM_WINDOW_BYTES = 4 GiB - 256 MiB).
+//
+// firebox#V12 gap #3 (wasm64 width-generalization): this window handling is
+// WIDTH-AGNOSTIC — NOT wasm32-only. The #F4A window core installs the window for
+// a wasm64 shared memory too, and in the ≤4 GiB conformance posture
+// (run-conformance.sh links BOTH widths --max-memory=4GiB) a wasm64 shared memory
+// lands on the 4 GiB Static reservation and the host places the window at
+// `wasm64_window_base(4 GiB) == SHM_BASE == 0xF0000000` — the SAME base as wasm32
+// (wasmer shm_registry.rs `wasm64_window_base`). `memory.grow` is capped there
+// (window_grow_ceiling), so no ordinary wasm64 mapping can sit at or above this
+// base. The threshold therefore uniquely identifies window addresses on BOTH
+// widths in that posture. The wasm32 encoding of this constant + every guard that
+// reads it is byte-IDENTICAL (the value and code are unchanged; only the wasm64
+// #if-out is removed), so re-enabling it for wasm64 cannot regress wasm32.
+//
+// FOLLOW-UP (out of scope, un-shipped): a wasm64 shared memory with a max > 4 GiB
+// (the #F4A "case C" LLVM Dynamic band-admit) places the window at max − 256 MiB
+// — a >4 GiB base — where a >4 GiB non-window heap address could exceed this
+// constant. Closing that faithfully needs the guest to learn the real window base
+// from the host (a host import), a separate task once #F4A case C is validated
+// end-to-end; the conformance posture (this fix's scope) is unaffected.
 #define WASIX_SHM_WINDOW_BASE ((uintptr_t)0xF0000000u)
-#endif
 
 // POSIX mmap(2) requires returned addresses to be aligned to
 // sysconf(_SC_PAGESIZE). On WebAssembly the architectural page is 65536
@@ -151,7 +167,6 @@ struct map {
 static struct { uintptr_t addr; size_t len; } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
 static int g_fixed_count;
 
-#if !defined(__wasm64__)
 // firebox#V12 gap #3 (inode-lifetime pinning): a window-routed mmap of a
 // /dev/shm object must keep that object's INODE alive as long as the mapping
 // exists — exactly as a real mmap(MAP_SHARED, fd) does on Linux (the mapping
@@ -169,6 +184,11 @@ static int g_fixed_count;
 // until the window mapping is unmapped, so a still-mapped sem keeps its inode
 // reserved and a recreated name gets a DISTINCT inode (as on Linux). This small
 // registry tracks the held fd per window address so munmap() can release it.
+//
+// firebox#V12 gap #3 (wasm64 width-generalization): the window (and therefore
+// this registry) exists on wasm64 too under the #F4A window core — see
+// WASIX_SHM_WINDOW_BASE above. `uintptr_t addr` holds the full 64-bit window
+// address on wasm64 (no 32-bit truncation), so the registry is width-agnostic.
 #define WASIX_MMAN_WINDOW_MAX 4096
 static struct { uintptr_t addr; int fd; } g_window_maps[WASIX_MMAN_WINDOW_MAX];
 static int g_window_count;
@@ -197,7 +217,6 @@ static void wasix_window_release(uintptr_t addr) {
         }
     }
 }
-#endif
 
 static int wasix_fixed_is_registered(uintptr_t addr) {
     for (int i = 0; i < g_fixed_count; i++) {
@@ -511,15 +530,17 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                 // the st_ino on the next create, defeating musl sem_open's dedup
                 // (sem_unlink/6-1). Released in munmap() below. Best-effort: a dup
                 // failure just forgoes the pin (falls back to the recyclable state).
-                // wasm32 only — the window (and its registry) does not exist on
-                // wasm64, where shm_map returned Inval and we never reach here.
-#if !defined(__wasm64__)
+                // WIDTH-AGNOSTIC (firebox#V12 gap #3 wasm64): we are only here
+                // because __wasilibc_shm_map SUCCEEDED, which — under the #F4A
+                // window core — it now does on wasm64 too (the window is installed
+                // at wasm64_window_base; the stale pre-#F4A "shm_map returns Inval on
+                // wasm64" no longer holds). So the pin MUST fire on both widths, or
+                // wasm64 sem_unlink/6-1 recycles the inode and reads the stale value.
                 {
                     const int held = dup(fd);
                     if (held >= 0)
                         wasix_window_register((uintptr_t)shm_off, held);
                 }
-#endif
                 return (void *)(uintptr_t)shm_off;
             }
             // else: fall through to the private emulation below.
@@ -665,13 +686,21 @@ int munmap(void *addr, size_t length) {
         return 0;
     }
 
-#if !defined(__wasm64__)
     // firebox#61X: a window mapping (addr >= SHM_BASE, above the grow-capped
     // heap) has no malloc header — the host owns the segment via the inode
     // registry — so guest munmap is a successful no-op, like a fixed mapping.
     // MUST precede the standard EINVAL precondition below, which rejects
     // addr >= memory_size (the window lives above the grow-capped memory size)
     // and would otherwise mis-reject a genuine window unmap.
+    //
+    // firebox#V12 gap #3 (wasm64 width-generalization): reachable on wasm64 too.
+    // Before #F4A no window was installed on wasm64, so this guard was #if-out and
+    // a window munmap fell through to the standard EINVAL block below → "munmap():
+    // Invalid argument" (shm_open/28-1, 28-3 UNRESOLVED). Under the #F4A window
+    // core the wasm64 window lives at the SAME SHM_BASE in the conformance posture
+    // (see WASIX_SHM_WINDOW_BASE), so the guard is now correct — and REQUIRED — on
+    // both widths: it turns the window unmap into the no-op it is and releases the
+    // gap-#3 inode-lifetime pin (below).
     //
     // firebox#61X-regfix (conformance wave-1): the no-op MUST still enforce the
     // geometry-INDEPENDENT POSIX munmap EINVAL preconditions. The window's
@@ -700,7 +729,6 @@ int munmap(void *addr, size_t length) {
         wasix_window_release(wa);
         return 0;
     }
-#endif
 
     // firebox#TTB: POSIX munmap EINVAL preconditions, validated BEFORE we
     // recover and dereference the header one page below addr — otherwise an
@@ -764,7 +792,6 @@ int msync (void *addr, size_t length, int flags) {
     if (wasix_fixed_is_registered((uintptr_t)addr)) {
         return 0;
     }
-#if !defined(__wasm64__)
     // firebox#61X: a window mapping IS the live host-backed shared memory — the
     // bytes already are the shared object, there is nothing to flush — so msync
     // is a no-op success (like a fixed mapping). Precedes the header recovery
@@ -775,6 +802,11 @@ int msync (void *addr, size_t length, int flags) {
     // non-page-aligned addr in the window's numeric range is still a malformed
     // request; a genuine window pointer is host-page-aligned, so this only
     // rejects an invalid call (and never a real shared-window flush).
+    //
+    // firebox#V12 gap #3 (wasm64 width-generalization): width-agnostic like the
+    // munmap() guard above — the #F4A window core installs the window on wasm64
+    // at the same SHM_BASE in the conformance posture, so a wasm64 msync of a
+    // window pointer must take this no-op path, not the header recovery below.
     if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE) {
         if (((uintptr_t)addr & (WASIX_MMAN_PAGE_SIZE - 1)) != 0) {
             errno = EINVAL;
@@ -782,7 +814,6 @@ int msync (void *addr, size_t length, int flags) {
         }
         return 0;
     }
-#endif
     // Header recovery: see munmap() for layout. addr is page-aligned by
     // construction; the header sits exactly one page below it.
     struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
