@@ -151,6 +151,54 @@ struct map {
 static struct { uintptr_t addr; size_t len; } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
 static int g_fixed_count;
 
+#if !defined(__wasm64__)
+// firebox#V12 gap #3 (inode-lifetime pinning): a window-routed mmap of a
+// /dev/shm object must keep that object's INODE alive as long as the mapping
+// exists — exactly as a real mmap(MAP_SHARED, fd) does on Linux (the mapping
+// holds a reference to the underlying file even after the fd is closed). The
+// legacy aligned_alloc path already does this implicitly via dup(fd) (see the
+// `new_fd = dup(fd)` below); the host-window path does NOT (its backing is a
+// SEPARATE host shm object, decoupled from the /dev/shm VFS inode), so after
+// sem_open closes its fd the /dev/shm inode has zero references and the firebox
+// VFS recycles its st_ino on the next create. That recycling defeats musl
+// sem_open's own (dev,ino)-keyed dedup: an unlink+recreate that reuses the inode
+// makes musl treat the NEW sem as the OLD one and hand back the stale mapping
+// (sem_unlink/6-1 reads the predecessor's value). Host-side slot invalidation
+// (shm_unmap) cannot fix this — musl never consults the fresh host slot. The
+// faithful fix is to pin the inode: dup(fd) on the first window map and hold it
+// until the window mapping is unmapped, so a still-mapped sem keeps its inode
+// reserved and a recreated name gets a DISTINCT inode (as on Linux). This small
+// registry tracks the held fd per window address so munmap() can release it.
+#define WASIX_MMAN_WINDOW_MAX 4096
+static struct { uintptr_t addr; int fd; } g_window_maps[WASIX_MMAN_WINDOW_MAX];
+static int g_window_count;
+
+static void wasix_window_register(uintptr_t addr, int fd) {
+    if (g_window_count < WASIX_MMAN_WINDOW_MAX) {
+        g_window_maps[g_window_count].addr = addr;
+        g_window_maps[g_window_count].fd = fd;
+        g_window_count++;
+    } else {
+        // Registry full — cannot track the held fd for later close, so don't
+        // leak it. The inode-pin is best-effort; drop it rather than leak.
+        close(fd);
+    }
+}
+
+// Close + drop the held /dev/shm fd for a window mapping at `addr` (releasing the
+// inode-lifetime pin). No-op if `addr` was not a window mapping we pinned.
+static void wasix_window_release(uintptr_t addr) {
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_window_maps[i].addr == addr) {
+            const int fd = g_window_maps[i].fd;
+            g_window_maps[i] = g_window_maps[--g_window_count];
+            if (fd >= 0) close(fd);
+            return;
+        }
+    }
+}
+#endif
+
 static int wasix_fixed_is_registered(uintptr_t addr) {
     for (int i = 0; i < g_fixed_count; i++) {
         if (g_fixed_maps[i].addr == addr) return 1;
@@ -456,6 +504,22 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                         done += (size_t)nread;
                     }
                 }
+                // firebox#V12 gap #3 (inode-lifetime pinning): dup + HOLD the fd so
+                // the /dev/shm inode stays referenced as long as this window mapping
+                // lives — exactly as a real mmap(MAP_SHARED, fd) keeps the file's
+                // inode alive after the fd is closed. Without this the VFS recycles
+                // the st_ino on the next create, defeating musl sem_open's dedup
+                // (sem_unlink/6-1). Released in munmap() below. Best-effort: a dup
+                // failure just forgoes the pin (falls back to the recyclable state).
+                // wasm32 only — the window (and its registry) does not exist on
+                // wasm64, where shm_map returned Inval and we never reach here.
+#if !defined(__wasm64__)
+                {
+                    const int held = dup(fd);
+                    if (held >= 0)
+                        wasix_window_register((uintptr_t)shm_off, held);
+                }
+#endif
                 return (void *)(uintptr_t)shm_off;
             }
             // else: fall through to the private emulation below.
@@ -631,6 +695,9 @@ int munmap(void *addr, size_t length) {
             errno = EINVAL;
             return -1;
         }
+        // firebox#V12 gap #3: release the held /dev/shm inode-lifetime pin for
+        // this window mapping (see wasix_window_register). A no-op if none held.
+        wasix_window_release(wa);
         return 0;
     }
 #endif
