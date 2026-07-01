@@ -65,8 +65,22 @@ __wasi_errno_t __wasi_fd_ioctl(__wasi_fd_t fd,uint32_t request,void *argp,int32_
  * Pulled by any mmap()-using program (mman.o references the wrapper), so it
  * pairs with the firebox runtime that provides it — same ship-together
  * contract as the firebox imports above. */
-int32_t __imported_wasix_fbx_shm_map(int64_t,int64_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_map")));
-int32_t __wasilibc_shm_map(uint64_t inode,uint64_t len,uint64_t *ret_offset){return __imported_wasix_fbx_shm_map((int64_t)inode,(int64_t)len,(intptr_t)ret_offset);}
+int32_t __imported_wasix_fbx_shm_map(int64_t,int64_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_map")));
+int32_t __wasilibc_shm_map(uint64_t inode,uint64_t len,uint64_t *ret_offset,uint32_t *ret_created){return __imported_wasix_fbx_shm_map((int64_t)inode,(int64_t)len,(intptr_t)ret_offset,(intptr_t)ret_created);}
+
+/* firebox#V12 (Stage-1 1c gap #3) — the shared-window UNLINK import.
+ *
+ * Invalidates the host-global shared-window segment for `inode`: the host drops
+ * its registry entry and shm_unlink()s the backing OS object. The guest calls it
+ * from shm_unlink()/sem_unlink() (shm_open.c) after a successful unlink() of a
+ * /dev/shm object it had mapped, because the firebox VFS RECYCLES st_ino across
+ * an unlink+recreate — so without this a later sem_open of a NEW object that
+ * reuses the freed inode would resolve to the PRIOR object's window slot (and OS
+ * object), reading back the wrong value (sem_unlink/6-1, 9-1). Always returns 0;
+ * a name never mapped, or a build against a runtime with no window (browser),
+ * is a benign no-op. Ships together with the matching runtime, like shm_map. */
+int32_t __imported_wasix_fbx_shm_unmap(int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_unmap")));
+int32_t __wasilibc_shm_unmap(uint64_t inode){return __imported_wasix_fbx_shm_unmap((int64_t)inode);}
 
 /* firebox#811 Phase 2 — HOST held-list registration syscalls.
  *

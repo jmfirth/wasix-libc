@@ -37,7 +37,11 @@
 // window instead of the private aligned_alloc+pread emulation, making raw
 // cross-process MAP_SHARED store/load coherent (fork/16-1) and sharing the
 // named-semaphore byte region. Both fall back gracefully (never mis-share).
-extern int32_t __wasilibc_shm_map(uint64_t inode, uint64_t len, uint64_t *ret_offset);
+// firebox#V12 (Stage-1 1c gap #1): shm_map also reports whether THIS call first
+// created the segment (*ret_created), so the guest seeds the fresh window from
+// the fd's bytes exactly once — see the routing block below.
+extern int32_t __wasilibc_shm_map(uint64_t inode, uint64_t len, uint64_t *ret_offset,
+                                  uint32_t *ret_created);
 extern int __wasix_is_shm_inode(ino_t ino);
 
 // firebox#61X: the base of the cross-process shared window in the wasm32 guest
@@ -405,8 +409,53 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         struct stat shm_st;
         if (fstat(fd, &shm_st) == 0 && __wasix_is_shm_inode(shm_st.st_ino)) {
             uint64_t shm_off = 0;
+            uint32_t shm_created = 0;
             if (__wasilibc_shm_map((uint64_t)shm_st.st_ino, (uint64_t)length,
-                                   &shm_off) == 0) {
+                                   &shm_off, &shm_created) == 0) {
+                // firebox#V12 gap #1: the host window is a FRESH zero-filled OS
+                // object; the fd's current bytes (e.g. the `value` musl write()s
+                // into a named sem before mmap, or the byte mmap/1-2 write()s)
+                // are NOT in it. Seed the window from the fd — but ONLY on the
+                // first map of this inode (shm_created). A later mapper (a
+                // proc_fork child re-aliasing the window, or a sibling sem_open of
+                // the same name) inherits the LIVE shared value and must NOT
+                // re-seed, or it would clobber another process's mutation.
+                //
+                // CRITICAL — the seed MUST reach the window via RAW STORES, not a
+                // syscall write and not memcpy. The window lives ABOVE the
+                // grow-capped memory size (SHM_BASE), in the wasm32 Static-heap
+                // elided-bounds region: only Cranelift-elided raw loads/stores
+                // reach it (this is exactly why fork/16-1's raw MAP_SHARED store
+                // works). A pread() straight into the window is a HOST memory
+                // write bounds-checked against current_length (capped at SHM_BASE)
+                // -> HeapOutOfBounds -> the window stays zero. And memcpy() lowers
+                // to `memory.copy` (built -mbulk-memory), which bounds-TRAPS past
+                // memory.size. So: pread into a HEAP/stack bounce buffer (below
+                // SHM_BASE — bounds-OK), then copy into the window with a volatile
+                // byte-store loop (individual i32.store8, never coalesced into
+                // memory.copy — the one form guaranteed to be Cranelift-elided).
+                if (shm_created) {
+                    volatile unsigned char *win =
+                        (volatile unsigned char *)(uintptr_t)shm_off;
+                    unsigned char seedbuf[512];
+                    size_t done = 0;
+                    while (done < length) {
+                        size_t want = length - done;
+                        if (want > sizeof seedbuf) want = sizeof seedbuf;
+                        const ssize_t nread = pread(fd, seedbuf, want, (off_t)done);
+                        if (nread < 0) {
+                            if (errno == EINTR) continue;
+                            // Best-effort seed: the window is already mapped; a
+                            // seed failure leaves the remainder zero (the OS object
+                            // is zero-filled) rather than failing the map.
+                            break;
+                        }
+                        if (nread == 0) break;   // short file — remainder stays zero
+                        for (ssize_t i = 0; i < nread; i++)
+                            win[done + (size_t)i] = seedbuf[i];   // raw i32.store8 -> window
+                        done += (size_t)nread;
+                    }
+                }
                 return (void *)(uintptr_t)shm_off;
             }
             // else: fall through to the private emulation below.

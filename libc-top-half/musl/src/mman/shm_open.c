@@ -6,7 +6,15 @@
 #include <string.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stdint.h>
 #include "lock.h"
+
+// firebox#V12 (Stage-1 1c gap #3): the shared-window UNLINK import (defined in
+// libc-bottom-half/sources/__wasixlibc_firebox.c). shm_unlink()/sem_unlink() call
+// it to drop the host's window slot + OS object for an inode after unlink(), so a
+// recreated name that reuses the freed st_ino (the firebox VFS recycles inode
+// numbers) gets fresh backing instead of colliding on the stale slot.
+extern int32_t __wasilibc_shm_unmap(uint64_t ino);
 
 // firebox#61X (Stage-1 1b-libc): a process-local set of the st_ino values of the
 // /dev/shm objects this process has opened (shm_open / sem_open). The mman.c
@@ -95,5 +103,18 @@ int shm_unlink(const char *name)
 {
 	char buf[NAME_MAX+10];
 	if (!(name = __shm_mapname(name, buf))) return -1;
-	return unlink(name);
+	// firebox#V12 gap #3: capture the inode BEFORE unlink so the host can
+	// invalidate the window slot keyed on it. The firebox VFS recycles st_ino
+	// across unlink+recreate, so a stale host registry entry would make a
+	// recreated name collide on the prior object's slot (sem_unlink/6-1, 9-1).
+	// Only invalidate an object we actually window-routed (__wasix_is_shm_inode);
+	// the host call is a benign no-op otherwise, but the gate avoids a needless
+	// syscall for a legacy-path /dev/shm file. sem_unlink() reaches here too (it
+	// is defined as shm_unlink), so named-semaphore unlink is covered as well.
+	struct stat st;
+	int have_ino = (stat(name, &st) == 0);
+	int rc = unlink(name);
+	if (rc == 0 && have_ino && __wasix_is_shm_inode(st.st_ino))
+		__wasilibc_shm_unmap((uint64_t)st.st_ino);
+	return rc;
 }
