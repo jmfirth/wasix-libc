@@ -99,7 +99,26 @@ static inline void to_public_stat(const __wasi_filestat_t *in,
   }
 }
 
-static inline bool utimens_get_timestamps(const struct timespec *times,
+// firebox(#QQZ/#NGG): `noinline` is load-bearing, NOT a style choice.
+//
+// WHY: when this helper is inlined into an out-of-line caller (futimens.c's
+// `futimens`, utimensat.c's `__wasilibc_nocwd_utimensat`), LLVM 22
+// miscompiles the two-consecutive-signed-`switch (times[i].tv_nsec)` pattern:
+// it emits only the `times[0]`/atim `br_table`, DROPS the entire
+// `times[1]`/mtim switch, pre-seeds `flags` with `__WASI_FSTFLAGS_MTIM (4)`,
+// and validates `times[1].tv_nsec` unconditionally against NSEC_PER_SEC-1
+// (999999999). Since `UTIME_NOW (-1)` / `UTIME_OMIT (-2)` are `> 999999999`
+// when read unsigned, ANY special value in the mtim slot returns EINVAL(28)
+// — breaking `cp -p`, `tar -x`, `install`, GNU `touch`'s fd path, and `make`.
+// Verified at the object level: pre-fix futimens.o and utimensat.o each carry
+// exactly ONE `br_table` and no `MTIM_NOW(8)` path. Forcing the helper
+// out-of-line compiles it in a neutral context, restoring both switches.
+// `inline` is kept so unused includers (fstat.c/fstatat.c) don't trip
+// `-Wunused-function`; `noinline` forces the emitted out-of-line copy where
+// it IS called. Retire when upstream LLVM fixes the two-consecutive-signed-
+// `switch` inlining miscompile (docs/reference/forks.md §5).
+static inline __attribute__((noinline)) bool utimens_get_timestamps(
+                                          const struct timespec *times,
                                           __wasi_timestamp_t *st_atim,
                                           __wasi_timestamp_t *st_mtim,
                                           __wasi_fstflags_t *flags) {
