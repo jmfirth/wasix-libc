@@ -31,6 +31,13 @@ int32_t __imported_wasix_fbx_fd_lock(int32_t,int32_t) __attribute__((__import_mo
 __wasi_errno_t __wasix_fd_lock(__wasi_fd_t fd,uint32_t op){return (uint16_t)__imported_wasix_fbx_fd_lock((int32_t)fd,(int32_t)op);}
 int32_t __imported_wasix_fbx_fd_lock_range(int32_t,int32_t,int32_t,int32_t,int64_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_lock_range")));
 __wasi_errno_t __wasix_fd_lock_range(__wasi_fd_t fd,uint32_t op,uint32_t l_type,uint32_t whence,int64_t start,int64_t len){return (uint16_t)__imported_wasix_fbx_fd_lock_range((int32_t)fd,(int32_t)op,(int32_t)l_type,(int32_t)whence,start,len);}
+/* firebox#KZ0 — F_GETLK conflict readback (out = uint64_t[4]). intptr_t out ptr is
+ * width-agnostic (i32 wasm32 / i64 wasm64), matching the host WasmPtr<u64,M>. */
+int32_t __imported_wasix_fbx_fd_getlk(int32_t,int32_t,int32_t,int64_t,int64_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_getlk")));
+__wasi_errno_t __wasix_fd_getlk(__wasi_fd_t fd,uint32_t l_type,uint32_t whence,int64_t start,int64_t len,uint64_t *out){return (uint16_t)__imported_wasix_fbx_fd_getlk((int32_t)fd,(int32_t)l_type,(int32_t)whence,start,len,(intptr_t)out);}
+/* firebox#KZ0 — interval-timer remaining-time readback (out = uint64_t[4]). */
+int32_t __imported_wasix_fbx_itimer_get(int32_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("itimer_get")));
+__wasi_errno_t __wasix_itimer_get(uint32_t sig,uint64_t *out){return (uint16_t)__imported_wasix_fbx_itimer_get((int32_t)sig,(intptr_t)out);}
 int32_t __imported_wasix_fbx_fd_chmod(int32_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_chmod")));
 __wasi_errno_t __wasix_fd_chmod(__wasi_fd_t fd,uint32_t mode){return (uint16_t)__imported_wasix_fbx_fd_chmod((int32_t)fd,(int32_t)mode);}
 int32_t __imported_wasix_fbx_path_chmod(int32_t,intptr_t,intptr_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_chmod")));

@@ -29,6 +29,23 @@ extern "C" {
 /* POSIX permission + advisory-lock extensions (jmfirth/wasmer#firebox-patches). */
 __wasi_errno_t __wasix_fd_lock(__wasi_fd_t fd, uint32_t op);
 __wasi_errno_t __wasix_fd_lock_range(__wasi_fd_t fd, uint32_t op, uint32_t l_type, uint32_t whence, int64_t start, int64_t len);
+
+/* firebox#KZ0 — F_GETLK conflict readback. `out` is a caller-provided
+ * uint64_t out[4] = {l_type, l_pid, l_start, l_len}; l_type is WASIX_F_UNLCK (2)
+ * when the range is lockable (no conflict). Closes fork/11-1 (the child must see
+ * the parent's F_WRLCK, not F_UNLCK). Additive companion to __wasix_fd_lock_range
+ * — the existing fd_lock_range ABI is untouched (Inv-8). */
+__wasi_errno_t __wasix_fd_getlk(__wasi_fd_t fd, uint32_t l_type, uint32_t whence, int64_t start, int64_t len, uint64_t *out);
+
+/* firebox#KZ0 — interval-timer (alarm/setitimer) remaining-time readback. `sig`
+ * is the WASI signal setitimer armed (REAL→ALRM, VIRTUAL→VTALRM, PROF→PROF).
+ * `out` is a caller-provided uint64_t out[4] =
+ * {it_value.tv_sec, it_value.tv_usec, it_interval.tv_sec, it_interval.tv_usec}.
+ * A disarmed timer (incl. every timer in a freshly forked child) reads all
+ * zeros. The host is the single source of truth; the guest tracks no timer
+ * state. Closes fork/9-1 (alarm remaining) + fork/13-1 (getitimer in child). */
+__wasi_errno_t __wasix_itimer_get(uint32_t sig, uint64_t *out);
+
 __wasi_errno_t __wasix_fd_chmod(__wasi_fd_t fd, uint32_t mode);
 __wasi_errno_t __wasix_path_chmod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode);
 __wasi_errno_t __wasix_path_lchmod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode);

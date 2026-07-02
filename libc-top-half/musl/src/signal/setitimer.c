@@ -68,16 +68,27 @@ int setitimer(int which, const struct itimerval *restrict new, struct itimerval 
 		default:             sig = (__wasi_signal_t)__WASI_SIGNAL_ALRM;   break;
 	}
 
-	/* POSIX: report the PREVIOUS timer state in `old`. We do not track the
-	 * remaining time in the guest, so report a disarmed timer (zeroed) — the
-	 * same posture as before this fix (it left `old` untouched). `alarm()`'s
-	 * return value (seconds left on a prior alarm) is therefore 0; matching
-	 * the pre-existing behavior. */
+	/* firebox#KZ0 — POSIX: `old` reports the PREVIOUS timer state. Query the
+	 * host's authoritative remaining-time BEFORE re-arming (the same single
+	 * source getitimer reads), so `alarm()`'s "seconds left on the prior alarm"
+	 * is faithful (Open POSIX fork/9-1: the parent's second `alarm(10)` must
+	 * return non-zero). A freshly forked child has an empty host interval map,
+	 * so `old` reads 0 there — the child's `alarm()` correctly returns 0 (no
+	 * inherited pending alarm). Before this fix the guest reported a hardcoded
+	 * disarmed timer, so `alarm()` always returned 0 — the fork/9-1 failure. */
 	if (old) {
-		old->it_interval.tv_sec = 0;
-		old->it_interval.tv_usec = 0;
-		old->it_value.tv_sec = 0;
-		old->it_value.tv_usec = 0;
+		uint64_t obuf[4] = {0, 0, 0, 0};
+		if (__wasix_itimer_get((uint32_t)sig, obuf) == 0) {
+			old->it_value.tv_sec     = (time_t)obuf[0];
+			old->it_value.tv_usec    = (suseconds_t)obuf[1];
+			old->it_interval.tv_sec  = (time_t)obuf[2];
+			old->it_interval.tv_usec = (suseconds_t)obuf[3];
+		} else {
+			old->it_value.tv_sec = 0;
+			old->it_value.tv_usec = 0;
+			old->it_interval.tv_sec = 0;
+			old->it_interval.tv_usec = 0;
+		}
 	}
 
 	int ret = __wasi_proc_raise_interval(sig, ts, repeat);
