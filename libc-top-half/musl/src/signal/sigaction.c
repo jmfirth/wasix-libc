@@ -269,6 +269,52 @@ void __fbx_rtsig_repend(int sig) {
 	if (self) a_or((volatile int *)&self->pending_sigs[word], bit);
 	a_or(&__wasm_pending_sigs[word], bit);
 }
+
+/* firebox#EMN — cross-process sigqueue si_value pull.
+ *
+ * A `sigqueue(pid, sig, value)` targeting ANOTHER process cannot deliver the
+ * `si_value` through the machinery above: the forked receiver holds a SEPARATE
+ * linear memory (so the sender's `__fbx_rtsigq` self-ring is unreachable), and
+ * the WASI `proc_signal` seam is `(pid, signal)` only. The value round-trips
+ * through the HOST instead — the sender routes an RT cross-process sigqueue
+ * through `proc_signal_info` (sigqueue.c), the host stashes the payload on the
+ * target process, and this helper (called from `__wasm_signal`'s SA_SIGINFO
+ * delivery when the local self-ring is empty) pulls it back via `signal_info_get`.
+ * Returns 1 and fills *si on a hit; 0 when the host has no queued cross-process
+ * value for `sig` (a bare kill()/raise()), so the caller builds the SI_USER
+ * default.
+ *
+ * Inv 8: `signal_info_get`/`proc_signal_info` are ADDITIVE WASIX imports — a
+ * deliberate, recorded divergence, needed only because faithful cross-process
+ * sigqueue payload delivery has no home in the (pid, signal) seam. A guest that
+ * never sigqueues cross-process never emits them. */
+#if defined(__wasm64__)
+#define __FBX_WASIX_MODULE "wasix_64v1"
+#else
+#define __FBX_WASIX_MODULE "wasix_32v1"
+#endif
+
+extern int32_t __imported_fbx_signal_info_get(int32_t sig, void *ret_value,
+                                              void *ret_pid)
+	__attribute__((__import_module__(__FBX_WASIX_MODULE),
+	               __import_name__("signal_info_get")));
+
+static int __fbx_signal_info_fill_si(int sig, siginfo_t *si) {
+	uint64_t value = 0;
+	uint32_t spid = 0;
+	/* 0 == __WASI_ERRNO_SUCCESS (payload written); nonzero == ENOENT (none). */
+	if (__imported_fbx_signal_info_get(sig, &value, &spid) != 0)
+		return 0;
+	union sigval sv;
+	memset(&sv, 0, sizeof sv);
+	memcpy(&sv, &value, sizeof sv);   /* width-correct: 4 bytes wasm32, 8 wasm64 */
+	memset(si, 0, sizeof *si);
+	si->si_signo = sig;
+	si->si_code  = SI_QUEUE;
+	si->si_value = sv;
+	si->si_pid   = (pid_t)spid;
+	return 1;
+}
 #endif
 
 void __get_handler_set(sigset_t *set)
@@ -855,6 +901,22 @@ void __wasm_signal(int sig) {
 						h3(sig, &si, NULL);
 					}
 				} while (__fbx_rtsigq_pop_si(sig, &si));
+			} else if (__fbx_sig_is_rt(sig) && __fbx_signal_info_fill_si(sig, &si)) {
+				/* firebox#EMN — cross-process sigqueue si_value. The queued
+				 * value was sent by ANOTHER process, so it lives in the HOST,
+				 * not this process's `__fbx_rtsigq` ring (a forked child cannot
+				 * see the sender's guest memory, and the WASI proc_signal seam
+				 * carries no payload). `__fbx_signal_info_fill_si` pulls it via
+				 * the `signal_info_get` import and populates the real si_value/
+				 * si_code/si_pid, so the SA_SIGINFO handler observes the sent
+				 * value instead of a zero (sigqueue/1-1). Falls through to the
+				 * SI_USER default below when the host has no queued value (a
+				 * bare kill()/raise()-delivered RT). */
+				if (on_alt) {
+					__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
+				} else {
+					h3(sig, &si, NULL);
+				}
 			} else {
 				memset(&si, 0, sizeof si);
 				si.si_signo = sig;

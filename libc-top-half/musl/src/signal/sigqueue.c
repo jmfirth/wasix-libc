@@ -15,6 +15,23 @@
  * standard signal. */
 extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
+
+/* firebox#EMN — cross-process sigqueue si_value. A sigqueue to ANOTHER process
+ * cannot stash the value in the self-ring above (the forked receiver has a
+ * separate linear memory) and the plain `__wasi_proc_signal` seam carries only
+ * (pid, signal). `proc_signal_info` is an additive WASIX import that carries the
+ * `union sigval` as a raw guest word so the host can deliver it to the target's
+ * SA_SIGINFO handler (pulled back via `signal_info_get` in sigaction.c). See the
+ * matching block in sigaction.c for the Inv-8 note. */
+#if defined(__wasm64__)
+#define __FBX_WASIX_MODULE "wasix_64v1"
+#else
+#define __FBX_WASIX_MODULE "wasix_32v1"
+#endif
+extern int32_t __imported_fbx_proc_signal_info(int32_t pid, int32_t sig,
+                                               int64_t value)
+	__attribute__((__import_module__(__FBX_WASIX_MODULE),
+	               __import_name__("proc_signal_info")));
 #endif
 
 int sigqueue(pid_t pid, int sig, const union sigval value)
@@ -112,8 +129,26 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 			 * thread-signal → __wasm_signal path (mirrors raise()). */
 			e = __wasi_thread_signal((__wasi_tid_t)self->tid,
 			                         (__wasi_signal_t)sig);
+		} else if (sig >= 35 && sig <= (_NSIG - 1)) {
+			/* firebox#EMN — cross-process RT sigqueue: carry the si_value to
+			 * the target THROUGH THE HOST. The queued value cannot ride in
+			 * guest memory across the fork boundary, and __wasi_proc_signal
+			 * carries only (pid, signal); proc_signal_info additionally hands
+			 * the host the raw `union sigval` word, which it stashes on the
+			 * target process for its __wasm_signal to pull back via
+			 * signal_info_get. Gated to the RT range so it matches the RT-gated
+			 * pull in sigaction.c (a standard signal never queues a value on
+			 * Linux, so the plain path below stays faithful and leaves no
+			 * unclaimed host payload). */
+			uint64_t raw = 0;
+			memcpy(&raw, &value, sizeof value);   /* 4 bytes wasm32, 8 wasm64 */
+			int32_t r = __imported_fbx_proc_signal_info((int32_t)pid,
+			                                            (int32_t)sig,
+			                                            (int64_t)raw);
+			e = (uint16_t)r;
 		} else {
-			/* Cross-process: si_value not carried (needs host assist, #27M). */
+			/* Cross-process standard signal: no queued value on Linux — the
+			 * plain (pid, signal) path is faithful. */
 			e = __wasi_proc_signal((__wasi_pid_t)pid,
 			                       (__wasi_signal_t)sig);
 		}
