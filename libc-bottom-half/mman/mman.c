@@ -138,6 +138,51 @@ extern int __wasix_is_shm_inode(ino_t ino);
 // construction and is not regressed.
 #define WASIX_MMAN_SYS_PAGE_SIZE ((size_t)PAGESIZE)
 
+// firebox#9VY-24: the Linux per-process mapping-count ceiling (vm.max_map_count,
+// default 65530). POSIX mmap(2) mandates [ENOMEM] "if the process exceeds the
+// maximum number of allowed memory mappings" — the SAME clause Open POSIX
+// mmap/24-1 targets (it opens /proc/sys/vm/max_map_count and clamps it to 65530
+// to bound its own runtime, then maps a /dev/shm object in a loop until ENOMEM).
+//
+// WHY Firebox needs an explicit counter (the substrate can't exhaust naturally
+// here): a MAP_SHARED /dev/shm mapping routes to the host shared-memory window
+// (the #61X/#F4A window — see the routing block in mmap() below), which is
+// IDEMPOTENT PER INODE (invariant C1: the same object occupies the same guest
+// offset in every process, so a fork-inherited child and an independent
+// sem_open of the same name agree). Idempotency means mapping the SAME object N
+// times returns the SAME window address every time and consumes NO additional
+// resource — so the exhaustion loop never receives MAP_FAILED and spins forever
+// (mmap/24-1 TIMEOUT on BOTH widths; on wasm64 the loop bound is 2^64). The
+// window CANNOT be made to exhaust by handing out distinct addresses without
+// breaking C1 coherence. The faithful resolution is the one Linux itself uses
+// for this test: cap the number of live mappings. This is a real Linux limit
+// Firebox otherwise lacks — width-independent, and it preserves every coherence
+// invariant (the window still returns its canonical slot; we merely refuse to
+// CREATE a new mapping past the ceiling). The blink MAP_FIXED linear-mapping
+// path (handled/returned before this gate) is deliberately NOT counted — it is
+// a Firebox-specific whole-address-space mode, not a portable VMA.
+#define WASIX_MMAN_MAX_MAP_COUNT 65530
+
+// Live mapping count. Accessed with __atomic builtins so the threaded build is
+// race-free (in the non-threaded build these lower to plain loads/stores).
+// Rides proc_fork's private-memory copy, so a child inherits the parent's live
+// count — exactly as a forked process inherits the parent's VMAs on Linux.
+static int g_map_count;
+
+// True iff creating one more mapping would exceed vm.max_map_count. Checked
+// once per mmap() (a pure gate — the increment happens only on a successful
+// map), so a rare check/inc race can overshoot by at most the thread count,
+// which is harmless for a 65530 ceiling.
+static int wasix_map_count_would_exceed(void) {
+    return __atomic_load_n(&g_map_count, __ATOMIC_SEQ_CST) >= WASIX_MMAN_MAX_MAP_COUNT;
+}
+static void wasix_map_count_inc(void) {
+    __atomic_fetch_add(&g_map_count, 1, __ATOMIC_SEQ_CST);
+}
+static void wasix_map_count_dec(void) {
+    __atomic_fetch_sub(&g_map_count, 1, __ATOMIC_SEQ_CST);
+}
+
 struct map {
     int prot;
     int flags;
@@ -324,6 +369,24 @@ static int wasix_mmap_check_file_preconditions(int prot, int flags, int fd,
         return -1;
     }
 
+    // firebox#9VY-23: POSIX mmap(2) [ENODEV] — "The fildes argument refers to a
+    // file whose type is not supported by mmap()" (mmap/23-1). Only a regular
+    // file (the malloc-backed pread emulation / the /dev/shm window) and a
+    // character device are mmap-able; a pipe/FIFO, socket, directory, or block
+    // device is not. This MUST precede the FD_READ (EACCES) and the alloc/pread
+    // path: the emulation below unconditionally `pread`s a non-ANON fd to seed
+    // the mapping, and a pread on a pipe with no writer BLOCKS FOREVER — that is
+    // exactly mmap/23-1's 142 s TIMEOUT (map the read end of an empty pipe). On
+    // WASI a pipe reports fs_filetype == __WASI_FILETYPE_UNKNOWN (0); a regular
+    // file and a /dev/shm object both report __WASI_FILETYPE_REGULAR_FILE (4), so
+    // the window-routed and legacy file paths are unaffected. Faithful to Linux,
+    // where mmap of a pipe/socket returns ENODEV rather than reading it.
+    if (fds.fs_filetype != __WASI_FILETYPE_REGULAR_FILE &&
+        fds.fs_filetype != __WASI_FILETYPE_CHARACTER_DEVICE) {
+        errno = ENODEV;
+        return -1;
+    }
+
     // POSIX: the fd must have been opened for reading regardless of prot.
     if ((fds.fs_rights_base & __WASI_RIGHTS_FD_READ) == 0) {
         errno = EACCES;
@@ -453,6 +516,18 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
+    // firebox#9VY-24: enforce the Linux vm.max_map_count ceiling (mmap/24-1).
+    // AFTER the precondition checks so a bad fd / wrong-type / access error takes
+    // precedence (POSIX errno ordering: EBADF/ENODEV/EACCES/EINVAL before
+    // ENOMEM), and BEFORE the window routing + allocation so no resource is
+    // consumed once the process is at its mapping limit. Covers the ANON,
+    // file-private, and /dev/shm-window paths — every real VMA — but not the
+    // blink MAP_FIXED path (returned above). See WASIX_MMAN_MAX_MAP_COUNT.
+    if (wasix_map_count_would_exceed()) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+
     // firebox#61X (Stage-1 1b-libc): a MAP_SHARED mapping of a /dev/shm object
     // is a cross-process shared-memory region. Route it to the host shared
     // window — raw stores/loads are then coherent across processes (fork/16-1)
@@ -477,9 +552,41 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         if (fstat(fd, &shm_st) == 0 && __wasix_is_shm_inode(shm_st.st_ino)) {
             uint64_t shm_off = 0;
             uint32_t shm_created = 0;
-            if (__wasilibc_shm_map((uint64_t)shm_st.st_ino, (uint64_t)length,
-                                   &shm_off, &shm_created) == 0) {
-                // firebox#V12 gap #1: the host window is a FRESH zero-filled OS
+            // firebox#F4A-partialpage: POSIX mmap(2) maps WHOLE pages — "the
+            // implementation shall include, in any mapping operation, any partial
+            // page specified by [pa, pa+len)" and "shall always zero-fill any
+            // partial page at the end of an object" (mmap/11-4/5/6). The
+            // window-routed path must therefore back the FULL system page(s) the
+            // mapping touches — round the mapped length up to the 64 KiB WASM
+            // system page, exactly as the legacy aligned_alloc path does via
+            // `body_len` below. Without this, a sub-page mapping (e.g. mmap/11-5's
+            // ftruncate(len=32 KiB) + mmap(32 KiB), where sysconf(_SC_PAGE_SIZE)
+            // == 64 KiB) maps only `length` bytes at the window; a conformant read
+            // of the zero-fill tail [length, PAGESIZE) runs off the mapped OS
+            // object and HeapAccessOutOfBounds-traps. The host's own
+            // `page_round_up` only rounds to the HOST page (4 KiB / 16 KiB), which
+            // is SMALLER than the WASM POSIX page and so does not cover the tail.
+            // The fresh OS object is zero-filled, so the rounded tail reads as zero
+            // (11-5's assertion) for free. `length` is kept for the fd seed below:
+            // only the bytes actually in the object are seeded; the rounded tail
+            // stays the object's zeros.
+            uint64_t shm_map_len = (uint64_t)length;
+            {
+                const uint64_t mask = (uint64_t)(WASIX_MMAN_SYS_PAGE_SIZE - 1);
+                if ((shm_map_len & mask) != 0) {
+                    uint64_t rounded;
+                    if (__builtin_add_overflow(
+                            shm_map_len,
+                            (uint64_t)WASIX_MMAN_SYS_PAGE_SIZE - (shm_map_len & mask),
+                            &rounded)) {
+                        errno = ENOMEM;
+                        return MAP_FAILED;
+                    }
+                    shm_map_len = rounded;
+                }
+            }
+            if (__wasilibc_shm_map((uint64_t)shm_st.st_ino, shm_map_len,
+                                   &shm_off, &shm_created) == 0) {                // firebox#V12 gap #1: the host window is a FRESH zero-filled OS
                 // object; the fd's current bytes (e.g. the `value` musl write()s
                 // into a named sem before mmap, or the byte mmap/1-2 write()s)
                 // are NOT in it. Seed the window from the fd — but ONLY on the
@@ -541,6 +648,12 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                     if (held >= 0)
                         wasix_window_register((uintptr_t)shm_off, held);
                 }
+                // firebox#9VY-24: count this window mapping toward
+                // vm.max_map_count. Repeated maps of the same inode return the
+                // same window address (C1 idempotency) but are each a distinct
+                // VMA on Linux, so each must count — this is what lets mmap/24-1
+                // reach ENOMEM instead of spinning on the idempotent window.
+                wasix_map_count_inc();
                 return (void *)(uintptr_t)shm_off;
             }
             // else: fall through to the private emulation below.
@@ -675,6 +788,9 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         map->fd = -1;
     }
 
+    // firebox#9VY-24: count this private (file-backed or ANON) mapping toward
+    // vm.max_map_count. Balanced by the decrement in munmap()'s private path.
+    wasix_map_count_inc();
     return addr;
 }
 
@@ -727,6 +843,8 @@ int munmap(void *addr, size_t length) {
         // firebox#V12 gap #3: release the held /dev/shm inode-lifetime pin for
         // this window mapping (see wasix_window_register). A no-op if none held.
         wasix_window_release(wa);
+        // firebox#9VY-24: balance the window-map increment (vm.max_map_count).
+        wasix_map_count_dec();
         return 0;
     }
 
@@ -780,6 +898,9 @@ int munmap(void *addr, size_t length) {
     // Release the memory. free() must see the same pointer aligned_alloc
     // returned (== base), not the offset user pointer.
     free(base);
+
+    // firebox#9VY-24: balance the private-map increment (vm.max_map_count).
+    wasix_map_count_dec();
 
     // Success!
     return 0;
