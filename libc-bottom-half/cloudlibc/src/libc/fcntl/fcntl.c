@@ -124,10 +124,6 @@ int fcntl(int fildes, int cmd, ...) {
         return -1;
       }
 
-      uint32_t op = (cmd == F_SETLK)  ? __FIREBOX_LOCK_OP_SETLK
-                  : (cmd == F_SETLKW) ? __FIREBOX_LOCK_OP_SETLKW
-                                      : __FIREBOX_LOCK_OP_GETLK;
-
       uint32_t l_type;
       switch (fl->l_type) {
         case F_RDLCK: l_type = 0; break;
@@ -148,22 +144,46 @@ int fcntl(int fildes, int cmd, ...) {
           return -1;
       }
 
+      /* firebox#KZ0 — F_GETLK now returns the CONFLICTING lock (real POSIX).
+       * The prior code called fd_lock_range and hardcoded fl->l_type=F_UNLCK
+       * because that flat ABI had no conflict-readback channel — so a child
+       * never saw the parent's lock (Open POSIX fork/11-1: "found F_UNLCK,
+       * should be F_WRLCK"). The additive fd_getlk import carries the conflict
+       * back; F_SETLK/F_SETLKW keep the untouched fd_lock_range path. */
+      if (cmd == F_GETLK) {
+        uint64_t out[4] = {0, 0, 0, 0};
+        __wasi_errno_t err = __wasix_fd_getlk(
+            (__wasi_fd_t)fildes, l_type, whence,
+            (int64_t)fl->l_start, (int64_t)fl->l_len, out);
+        if (err != __WASI_ERRNO_SUCCESS) {
+          errno = (int)err;
+          return -1;
+        }
+        /* out = {l_type (0=RDLCK,1=WRLCK,2=UNLCK), l_pid, l_start, l_len}. */
+        switch (out[0]) {
+          case 0:  fl->l_type = F_RDLCK; break;
+          case 1:  fl->l_type = F_WRLCK; break;
+          default: fl->l_type = F_UNLCK; break;
+        }
+        if (out[0] != 2) {
+          /* A real conflict: POSIX fills the conflicting lock's fields. The
+           * host reports absolute offsets, so l_whence becomes SEEK_SET. */
+          fl->l_pid    = (pid_t)out[1];
+          fl->l_whence = SEEK_SET;
+          fl->l_start  = (off_t)out[2];
+          fl->l_len    = (off_t)out[3];
+        }
+        return 0;
+      }
+
+      uint32_t op = (cmd == F_SETLK) ? __FIREBOX_LOCK_OP_SETLK
+                                     : __FIREBOX_LOCK_OP_SETLKW;
       __wasi_errno_t err = __wasix_fd_lock_range(
           (__wasi_fd_t)fildes, op, l_type, whence,
           (int64_t)fl->l_start, (int64_t)fl->l_len);
       if (err != __WASI_ERRNO_SUCCESS) {
         errno = (int)err;
         return -1;
-      }
-
-      /* For F_GETLK, real POSIX writes the conflicting lock back into
-       * `fl`. Our runtime currently does not return the conflict
-       * structure (it only tells us success/conflict via errno). To
-       * stay POSIX-correct for the no-conflict case, mark the lock
-       * as F_UNLCK so callers detect "no conflict". This matches the
-       * documented runtime limitation in the WASIX-side handler. */
-      if (cmd == F_GETLK) {
-        fl->l_type = F_UNLCK;
       }
       return 0;
     }
