@@ -62,6 +62,34 @@ unsigned long __fbx_handler_set[_NSIG/(8*sizeof(long))];
 volatile uintptr_t __fbx_main_pthread;
 const uint32_t __fbx_blocked_off = offsetof(struct pthread, blocked_sigmask);
 
+/* firebox#HDH — offsetof(struct pthread, pending_sigs), the PER-THREAD pending
+ * bitmask (pthread_impl.h). Mirrors __fbx_blocked_off's posture exactly: the
+ * threaded/edge link --export[-if-defined]s it, the host reads the immutable
+ * global (= this const's linear address), then the offset value from the live
+ * MemoryView — so the host carries no struct-layout knowledge (robust to field
+ * reordering), just like the blocked-mask offset above.
+ *
+ * WHY the host needs it: POSIX fork(2) gives the child an EMPTY pending-signal
+ * set — the child inherits the parent's signal DISPOSITIONS and its blocked
+ * mask, but NOT its pending signals. Firebox forks by copying the parent's
+ * entire linear memory (wasmer SpawnType::CopyMemory), so the child WRONGLY
+ * inherits the parent's pended signals in BOTH guest-side pending stores: the
+ * process-wide __wasm_pending_sigs[] (sigpending(2)'s authoritative view) and
+ * this main thread's per-thread pending_sigs[] (what __wasm_drain_pending_sigs
+ * re-raises on a later unblock). The host zeroes both in the child at the
+ * proc_fork child rewind — a deterministic post-copy / pre-resume point that a
+ * guest-side clear cannot pin in Firebox's cooperative/asyncify runtime (the
+ * #HDH Heisenbug: a libc-only _fork_internal clear FAILED clean but PASSED the
+ * instant a debug write() perturbed the signal-drain timing). It reads the main
+ * thread's struct base from __fbx_main_pthread and this field offset.
+ *
+ * The process-wide __wasm_pending_sigs[] is already a defined symbol (below);
+ * the host reaches it by the SAME --export-if-defined mechanism, no new symbol.
+ * Same backward-compat story as __fbx_blocked_off: a host predating the read
+ * just ignores it; the guest imports NOTHING new, so wasm built with this libc
+ * still instantiates on an older runtime (the fix is simply dormant). */
+const uint32_t __fbx_pending_off = offsetof(struct pthread, pending_sigs);
+
 #ifdef __wasilibc_unmodified_upstream
 #else
 static volatile int __eintr_callback_registered = 0;
