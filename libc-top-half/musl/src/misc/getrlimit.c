@@ -3,6 +3,9 @@
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 #endif
+#ifndef __wasilibc_unmodified_upstream
+#include <__wasilibc_rlimit.h>
+#endif
 
 #define FIX(x) do{ if ((x)>=SYSCALL_RLIM_INFINITY) (x)=RLIM_INFINITY; }while(0)
 
@@ -24,8 +27,13 @@ int getrlimit(int resource, struct rlimit *rlim)
 	FIX(rlim->rlim_cur);
 	FIX(rlim->rlim_max);
 #else
-    rlim->rlim_cur = RLIM_INFINITY;
-	rlim->rlim_max = RLIM_INFINITY;
+	// firebox#KZ1: WASI has no host getrlimit syscall; return the limits
+	// setrlimit() stored for this resource (RLIM_INFINITY if never set).
+	if (resource < 0 || resource >= RLIM_NLIMITS) {
+		errno = EINVAL;
+		return -1;
+	}
+	__wasilibc_get_stored_rlimit(resource, rlim);
 #endif
 	return 0;
 }
