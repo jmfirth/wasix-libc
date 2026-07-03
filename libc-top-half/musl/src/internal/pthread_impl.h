@@ -246,6 +246,16 @@ enum {
 #define _rw_lock __u.__vi[0]
 #define _rw_waiters __u.__vi[1]
 #define _rw_shared __u.__i[2]
+/* firebox (pthread_rwlock_wrlock/3-1) — write-owner tid, stored in a
+ * dedicated, otherwise-unused rwlock slot (__vi[3]). Upstream musl rwlocks
+ * only touch __vi[0], __vi[1], __i[2]; __vi[3] is free in both the wasm32
+ * (__vi[8]) and wasm64 (__vi[14]) pthread_rwlock_t layouts, so this is an
+ * ABI-safe internal use (no struct size/field change). 0 means "no write
+ * owner"; a live thread's tid is always non-zero (main = 0x3fffffff, host-
+ * allocated threads = 1..0x1fffffff), so 0 never collides with an owner.
+ * Used by pthread_rwlock_wrlock/timedwrlock to return EDEADLK on a self-
+ * deadlocking re-acquire instead of blocking forever. */
+#define _rw_owner __u.__vi[3]
 #define _b_lock __u.__vi[0]
 #define _b_waiters __u.__vi[1]
 #define _b_limit __u.__i[2]
