@@ -90,6 +90,28 @@ const uint32_t __fbx_blocked_off = offsetof(struct pthread, blocked_sigmask);
  * still instantiates on an older runtime (the fix is simply dormant). */
 const uint32_t __fbx_pending_off = offsetof(struct pthread, pending_sigs);
 
+/* firebox#GF1 — per-signal sa_flags, host-readable. Written by __libc_sigaction
+ * on every disposition change; read by the FIREBOX RUNTIME to detect
+ * SA_NOCLDWAIT on the SIGCHLD disposition. POSIX: a parent whose SIGCHLD action
+ * carries SA_NOCLDWAIT does NOT accumulate zombie children, and once it has no
+ * unwaited children wait()/waitpid() fails with ECHILD. Firebox's zombie table
+ * (wasmer #42) and proc_join have no other channel to that flag — the WASI
+ * proc_signal/proc_join seams carry no sa_flags — so the guest exposes it here.
+ *
+ * Same posture as __fbx_handler_set / __fbx_pending_off: the threaded/edge link
+ * `--export[-if-defined]`s this symbol, wasm-ld emits an immutable global holding
+ * its linear-memory base address, and the host reads the SIGCHLD slot straight
+ * from the live MemoryView (no guest call — the parent that must observe the flag
+ * is parked in proc_join, not runnable cooperatively). `volatile` so the store is
+ * never dead-store-eliminated under LTO: the ONLY reader is the host, invisible to
+ * the compiler. `uint32_t` (not `unsigned long`) fixes the element width at 4
+ * bytes on BOTH wasm32 and wasm64, so the host reads slot `sig` at `sig*4` without
+ * pointer-width knowledge; sa_flags is an `int`, so the value is exact. Indexed by
+ * [sig] (not sig-1), mirroring __eintr_handler_callbacks[]. Backward-compatible: a
+ * host predating the read ignores it, and the guest imports NOTHING new, so wasm
+ * built with this libc still instantiates on an older runtime (fix simply dormant). */
+volatile uint32_t __fbx_sa_flags[_NSIG];
+
 #ifdef __wasilibc_unmodified_upstream
 #else
 static volatile int __eintr_callback_registered = 0;
@@ -326,6 +348,26 @@ extern int32_t __imported_fbx_signal_info_get(int32_t sig, void *ret_value,
                                               void *ret_pid)
 	__attribute__((__import_module__(__FBX_WASIX_MODULE),
 	               __import_name__("signal_info_get")));
+
+/* firebox#4WF — host-provided si_code pull for a host-originated signal.
+ *
+ * A SIGCHLD delivered to a parent because a child was STOPPED or CONTINUED
+ * carries si_code == CLD_STOPPED / CLD_CONTINUED on Linux (Open POSIX
+ * sigaction/10-1). Firebox synthesises those edges in the host
+ * (WasiProcess::set_stopped / set_continued), but the WASI (pid, signal)
+ * delivery seam has no si_code field, so the guest cannot know the code the
+ * host chose. This import returns it: 0 (SUCCESS) with *ret_code written when
+ * the host has a code queued for `sig`, nonzero (ENOENT) for a bare
+ * kill()/raise()-delivered signal (caller keeps SI_USER).
+ *
+ * Inv 8: ADDITIVE (a NEW import, not a widening of signal_info_get — widening
+ * the 3-param signal_info_get would break every #EMN sigqueue guest already
+ * emitting the 3-arg form). A guest that never handles a host-coded SIGCHLD
+ * never emits this import, so prebuilt upstream wasmer.io artifacts are
+ * unaffected. Arity: 2 params (i32 sig, ptr ret_code) -> i32 errno. */
+extern int32_t __imported_fbx_signal_code_get(int32_t sig, void *ret_code)
+	__attribute__((__import_module__(__FBX_WASIX_MODULE),
+	               __import_name__("signal_code_get")));
 
 static int __fbx_signal_info_fill_si(int sig, siginfo_t *si) {
 	uint64_t value = 0;
@@ -949,6 +991,22 @@ void __wasm_signal(int sig) {
 				memset(&si, 0, sizeof si);
 				si.si_signo = sig;
 				si.si_code = SI_USER;
+				/* firebox#4WF — a SIGCHLD raised because a child was STOPPED
+				 * or CONTINUED carries si_code == CLD_STOPPED / CLD_CONTINUED
+				 * (Open POSIX sigaction/10-1). The host stamps that code
+				 * (set_stopped/set_continued) but the (pid, signal) WASI seam
+				 * can't carry it, so pull it via the additive signal_code_get
+				 * import. Scoped to SIGCHLD: it is the only signal for which
+				 * the host synthesises a si_code, and gating here keeps every
+				 * other SA_SIGINFO delivery free of the extra host round-trip.
+				 * A bare kill()/raise() SIGCHLD (no host code) returns ENOENT
+				 * and keeps the SI_USER default set above. */
+				if (sig == SIGCHLD) {
+					int32_t __fbx_code;
+					if (__imported_fbx_signal_code_get(sig, &__fbx_code) == 0) {
+						si.si_code = __fbx_code;
+					}
+				}
 				if (on_alt) {
 					__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
 				} else {
@@ -1174,6 +1232,12 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		ksa_old = __eintr_handler_callbacks[sig];
 		if (sa) {
 			__eintr_handler_callbacks[sig] = ksa;
+			/* firebox#GF1 — publish the new sa_flags for the host's
+			 * SA_NOCLDWAIT reap decision (see __fbx_sa_flags decl). Record the
+			 * user-supplied sa->sa_flags, not ksa.flags (which OR-adds
+			 * SA_RESTORER); SA_NOCLDWAIT lives in the low bits either way, but
+			 * the raw value is what a SA_* query means. */
+			__fbx_sa_flags[sig] = (uint32_t)sa->sa_flags;
 		}
 		UNLOCK(__eintr_handler_lock);
 		r = 0;
