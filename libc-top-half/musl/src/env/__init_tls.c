@@ -78,6 +78,20 @@ extern void __set_tp(uintptr_t p);
 
 void __wasi_init_tp()
 {
+	/* firebox#XGD: idempotent. For a THIN dynamically-linked main, the host
+	 * runtime linker (acting as ld.so) calls __wasi_init_tp BEFORE running
+	 * libc.so's constructors, so the main thread's TP is live when
+	 * __wasilibc_init_ssp does `__pthread_self()->canary = __stack_chk_guard`
+	 * (a NULL TP there scribbles the random guard into offsetof(struct pthread,
+	 * canary) in low linear memory — the BT1 Blocker-A .rodata corruption).
+	 * crt1's _start then calls __wasi_init_tp a second time; without this guard
+	 * that would allocate a SECOND struct pthread, leak the first, and re-point
+	 * the TP. A statically-linked main reaches this exactly once (TP unset ->
+	 * runs), so the guard is a no-op for it. __wasilibc_pthread_self is a
+	 * zero-init TLS var written only by __set_tp (only ever from here / from
+	 * pthread_create), so __get_tp() reliably reads 0 before the first init. */
+	if (__get_tp())
+		return;
 	// See comments on start_args.pthread_self_ptr in pthread_create.c for how TLS is handled in WASIX threads.
 	void *tp = aligned_alloc(_Alignof(struct pthread), sizeof(struct pthread));
 	/* Zero-init so fields added by Firebox patches (e.g. blocked_sigmask
