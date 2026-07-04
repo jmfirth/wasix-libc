@@ -44,6 +44,30 @@ extern int32_t __wasilibc_shm_map(uint64_t inode, uint64_t len, uint64_t *ret_of
                                   uint32_t *ret_created);
 extern int __wasix_is_shm_inode(ino_t ino);
 
+// firebox#SAH (native-only, #5WQ mechanism): the HOST mprotect libcall. Applies
+// a host `region::protect` to `[offset, offset+len)` of the guest linear memory
+// so a guest access that violates `prot` FAULTS on the host — a real SIGSEGV
+// wasmer's trap handler catches and maps to a guest SIGSEGV. This is the
+// enforcement the no-MMU malloc backing below cannot provide on its own. Returns
+// 0 on success, -1 on error / browser-absent (the capability is native-only;
+// declared absent on browser via sysconf(_SC_MEMORY_PROTECTION) == -1). A -1
+// means "not enforced" — the mapping is never FAILED for lack of enforcement.
+// Defined in libc-bottom-half/sources/__wasixlibc_firebox.c.
+extern int __wasilibc_mprotect_host(uintptr_t offset, uintptr_t len, int prot);
+
+// firebox#SAH: does this mapping's protection require host-mprotect enforcement?
+// A mapping missing PROT_WRITE (read-only or PROT_NONE) must fault a guest write
+// (and PROT_NONE must additionally fault a guest read). The malloc-backed no-MMU
+// emulation always yields RW pages, so such a mapping is instead backed by host
+// pages that belong to it ALONE (64 KiB-isolated) and `region::protect`ed via
+// __wasilibc_mprotect_host. An ordinary read-write mapping needs no enforcement
+// and keeps the compact legacy backing. (A PROT_EXEC-only / PROT_READ|PROT_EXEC
+// mapping also lacks PROT_WRITE, so a guest write to it faults too — faithful
+// W^X; the host JIT executes guest code, so PROT_EXEC never affects guest reads.)
+static int wasix_prot_needs_enforcement(int prot) {
+    return (prot & PROT_WRITE) == 0;
+}
+
 // firebox#61X: the base of the cross-process shared window in the guest address
 // space. A pointer at or above this was returned by mmap() routing a /dev/shm
 // MAP_SHARED to the host window — it lives ABOVE the grow-capped heap, has NO
@@ -190,6 +214,21 @@ struct map {
     size_t length;     // user-requested mapping length (what munmap() must match)
     size_t body_len;   // allocated user-visible body = round_up(length, sys page)
     int fd;
+    // firebox#SAH: host-mprotect bookkeeping.
+    //   prefix         distance from the user addr back to the aligned_alloc base
+    //                  (== WASIX_MMAN_PAGE_SIZE for the compact 4 KiB-prefixed
+    //                  legacy layout; == WASIX_MMAN_SYS_PAGE_SIZE / 64 KiB for a
+    //                  host-protectable mapping whose body is 64 KiB-isolated so
+    //                  region::protect never disturbs a neighbour). The header
+    //                  always sits at addr - WASIX_MMAN_PAGE_SIZE either way, so
+    //                  munmap()/msync() header recovery is uniform; free() takes
+    //                  addr - prefix.
+    //   host_protected 1 iff the body's host pages were mprotect'd to a sub-RW
+    //                  protection and must be restored to RW before free() (so
+    //                  malloc can safely reuse them — a still-PROT_NONE page
+    //                  handed back to the allocator would fault a normal access).
+    size_t prefix;
+    int host_protected;
 };
 
 // firebox#796: MAP_FIXED support for blink's wasm64 linear mapping.
@@ -682,34 +721,50 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
+    // firebox#SAH: choose the backing layout by whether the mapping must ENFORCE
+    // a sub-RW protection. An enforceable mapping (missing PROT_WRITE) is backed
+    // by host pages that belong to it ALONE: the body is 64 KiB-isolated (the
+    // safe superset of any host page — 4 KiB Linux / 16 KiB Apple Silicon) so the
+    // later region::protect cannot disturb a neighbour, and the header lives in a
+    // 64 KiB prefix page. An ordinary read-write mapping keeps the compact 4 KiB
+    // prefix (unchanged from pre-#SAH). EITHER WAY the header sits at
+    // addr - WASIX_MMAN_PAGE_SIZE (uniform munmap()/msync() recovery); free()
+    // takes addr - prefix.
+    const int enforce = wasix_prot_needs_enforcement(prot);
+    const size_t prefix = enforce ? WASIX_MMAN_SYS_PAGE_SIZE : WASIX_MMAN_PAGE_SIZE;
+
     // Compute allocation size: rounded body plus one full prefix page for the
     // header. Overflow-check before passing to aligned_alloc.
     size_t buf_len = 0;
-    if (__builtin_add_overflow(body_len, WASIX_MMAN_PAGE_SIZE, &buf_len)) {
+    if (__builtin_add_overflow(body_len, prefix, &buf_len)) {
         errno = ENOMEM;
         return MAP_FAILED;
     }
 
-    // Allocate page-aligned backing memory. The returned base IS the
-    // header location and (base + WASIX_MMAN_PAGE_SIZE) is the user-
-    // visible page-aligned mapping.
-    void *base = aligned_alloc(WASIX_MMAN_PAGE_SIZE, buf_len);
+    // Allocate prefix-aligned backing memory. (base + prefix) is the user-visible
+    // mapping; it is prefix-aligned (== 64 KiB / host-page aligned for an
+    // enforceable mapping) because aligned_alloc returns a prefix-aligned base.
+    void *base = aligned_alloc(prefix, buf_len);
     if (!base) {
         errno = ENOMEM;
         return MAP_FAILED;
     }
 
-    // Initialize the header at the front of the prefix page.
-    struct map *map = (struct map *)base;
+    // User-visible mapping starts one prefix past the alloc base.
+    addr = (char *)base + prefix;
+
+    // Initialize the header — it sits exactly one WASIX_MMAN_PAGE_SIZE below the
+    // user addr regardless of prefix, so munmap()/msync() recover it uniformly
+    // (for the legacy 4 KiB prefix this is `base` itself; for the 64 KiB prefix
+    // it is the last 4 KiB slot of the prefix page).
+    struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
     map->prot = prot;
     map->flags = flags;
     map->offset = offset;
     map->length = length;
     map->body_len = body_len;
-
-    // User-visible mapping starts one page past the header. Page-aligned
-    // by construction (base is page-aligned per aligned_alloc contract).
-    addr = (char *)base + WASIX_MMAN_PAGE_SIZE;
+    map->prefix = prefix;
+    map->host_protected = 0;
 
     // firebox#7C5: zero the ENTIRE body up front (aligned_alloc does not zero).
     // This guarantees the partial-page tail [filelen, body_len) reads as zero
@@ -786,6 +841,21 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     } else {
         map->fd = -1;
+    }
+
+    // firebox#SAH: apply the host protection AFTER seeding. The memset + pread
+    // above are HOST writes into the body, which must land while it is still RW;
+    // only now do we restrict it so a later GUEST access that violates `prot`
+    // faults on the host → guest SIGSEGV (mmap/6-1/6-2/6-3). A -1 return (browser
+    // js/v8 where the capability is absent, or an unexpected host error) leaves
+    // the body RW — the mapping is never FAILED for lack of enforcement, which is
+    // exactly the no-MMU degradation the browser profile declares via
+    // sysconf(_SC_MEMORY_PROTECTION) == -1. `body_len` is 64 KiB-aligned (the
+    // enforce path rounded it above), so the host mprotect covers whole host
+    // pages that back ONLY this mapping.
+    if (enforce &&
+        __wasilibc_mprotect_host((uintptr_t)addr, body_len, prot) == 0) {
+        map->host_protected = 1;
     }
 
     // firebox#9VY-24: count this private (file-backed or ANON) mapping toward
@@ -866,10 +936,10 @@ int munmap(void *addr, size_t length) {
         return -1;
     }
 
-    // Recover the header that lives one page below the user address.
-    // Symmetric to the mmap return: addr == base + WASIX_MMAN_PAGE_SIZE.
-    void *base = (char *)addr - WASIX_MMAN_PAGE_SIZE;
-    struct map *map = (struct map *)base;
+    // Recover the header that lives one WASIX_MMAN_PAGE_SIZE below the user
+    // address (uniform across the legacy 4 KiB prefix and the #SAH 64 KiB
+    // prefix — see the mmap layout note).
+    struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
 
     // We don't support partial munmapping.
     if (map->length != length) {
@@ -895,9 +965,22 @@ int munmap(void *addr, size_t length) {
         close(map->fd);
     }
 
+    // firebox#SAH: restore the body's host pages to RW before free(). A
+    // host-protected mapping left at PROT_READ/PROT_NONE would, once malloc hands
+    // those pages to a later allocation, fault a perfectly normal access — so the
+    // protection must be lifted before the memory re-enters the allocator.
+    // `body_len` is the 64 KiB-aligned extent that was protected. (No-op for a
+    // legacy RW mapping: host_protected == 0.)
+    if (map->host_protected) {
+        __wasilibc_mprotect_host((uintptr_t)addr, map->body_len,
+                                 PROT_READ | PROT_WRITE);
+    }
+
     // Release the memory. free() must see the same pointer aligned_alloc
-    // returned (== base), not the offset user pointer.
-    free(base);
+    // returned — addr - prefix (== the header for a legacy 4 KiB mapping, or the
+    // 64 KiB prefix base for a host-protected mapping), not the offset user
+    // pointer.
+    free((char *)addr - map->prefix);
 
     // firebox#9VY-24: balance the private-map increment (vm.max_map_count).
     wasix_map_count_dec();

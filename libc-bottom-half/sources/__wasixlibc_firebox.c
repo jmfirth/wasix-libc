@@ -89,6 +89,33 @@ int32_t __wasilibc_shm_map(uint64_t inode,uint64_t len,uint64_t *ret_offset,uint
 int32_t __imported_wasix_fbx_shm_unmap(int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_unmap")));
 int32_t __wasilibc_shm_unmap(uint64_t inode){return __imported_wasix_fbx_shm_unmap((int64_t)inode);}
 
+/* firebox#SAH (native-only, #5WQ mechanism) — the HOST mprotect import.
+ *
+ * WebAssembly has no MMU, so the no-MMU mman.c emulation backs every mapping
+ * with plain malloc — a guest access to a PROT_READ/PROT_NONE region simply
+ * SUCCEEDS and no SIGSEGV/SIGBUS is ever delivered (the documented no-MMU gap).
+ * The NATIVE fix: the HOST `region::protect`s the slice of the wasm linear
+ * memory that backs a protected guest mapping. A guest access that violates the
+ * protection then faults on the HOST — a real SIGSEGV that wasmer's trap handler
+ * catches and maps to a guest SIGSEGV. mman.c calls this on a restrictive-prot
+ * mmap()/mprotect() and on munmap() (→ PROT_NONE), closing the mmap
+ * memory-protection POSIX family (mmap/6-*, mmap/11-*, munmap/1-*).
+ *
+ * `offset`/`len` are guest linear-memory coordinates passed as int64_t (a wasm32
+ * guest zero-extends its 32-bit pointer; wasm64 passes the full 64-bit value),
+ * so the import resolves under both wasix_32v1 and wasix_64v1 — host sig
+ * (u64,u64,i32)->i32. `prot` is the POSIX prot mask (PROT_NONE/READ/WRITE/EXEC).
+ * Returns 0 on success, -1 on error (bad alignment/bounds, host mprotect fail).
+ *
+ * NATIVE-ONLY: the browser js/v8 backends return -1 (the WebAssembly.Memory
+ * backing has no page-wise mprotect). The capability is declared ABSENT on the
+ * browser profile via sysconf(_SC_MEMORY_PROTECTION) == -1 (capability-profiles
+ * #1BK native-only registry). A -1 here means "not enforced" — the caller leaves
+ * the mapping RW; a mapping is never FAILED for lack of enforcement. Ships
+ * together with the matching runtime, same contract as shm_map. */
+int32_t __imported_wasix_fbx_mprotect_host(int64_t,int64_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("mprotect_host")));
+int __wasilibc_mprotect_host(uintptr_t offset,uintptr_t len,int prot){return __imported_wasix_fbx_mprotect_host((int64_t)offset,(int64_t)len,(int32_t)prot);}
+
 /* firebox#811 Phase 2 — HOST held-list registration syscalls.
  *
  * The host (jmfirth/wasmer#firebox-patches) records (lock-word-addr, tid)

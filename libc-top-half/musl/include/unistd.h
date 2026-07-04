@@ -324,6 +324,23 @@ pid_t gettid(void);
 #define _POSIX_MEMORY_PROTECTION _POSIX_VERSION
 #define _POSIX_MESSAGE_PASSING  _POSIX_VERSION
 #endif
+// firebox#SAH (native-only, #5WQ/#1BK; capability-profiles capability-signals.tsv
+// `memory-protection` row → macro-target 0): memory protection is a NATIVE-only
+// capability (host mprotect + trap→guest-SIGSEGV; the browser WebAssembly.Memory
+// has no per-page MMU). The SAME shared libc build must be honest on both
+// profiles, so this feature macro takes the POSIX **0 sentinel** ("supported,
+// determined at runtime") rather than a fixed `>0` (which would lie to the
+// browser) or leaving it undefined (which would lie to native). A portable
+// program then feature-probes the ACTUAL per-profile answer at runtime via
+// `sysconf(_SC_MEMORY_PROTECTION)` — _POSIX_VERSION on native, -1 on browser
+// (see src/conf/sysconf.c). `#ifdef _POSIX_MEMORY_PROTECTION` (the older idiom
+// the Open POSIX mmap/6-*, mmap/11-* tests use) is TRUE with the 0 sentinel, so
+// those bodies compile and run — passing on native where the host enforces the
+// protection. NOTE: this supersedes the `__wasilibc_unmodified_upstream`-gated
+// `_POSIX_VERSION` definition above, which is undefined in the Firebox build.
+#ifndef _POSIX_MEMORY_PROTECTION
+#define _POSIX_MEMORY_PROTECTION 0
+#endif
 #define _POSIX_FSYNC            _POSIX_VERSION
 #define _POSIX_NO_TRUNC         1
 #ifdef __wasilibc_unmodified_upstream /* WASI has no raw sockets */

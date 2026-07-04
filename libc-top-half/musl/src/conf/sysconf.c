@@ -213,6 +213,24 @@ long sysconf(int name)
 		[_SC_THREAD_ROBUST_PRIO_PROTECT] = -1,
 	};
 
+	// firebox#SAH: _SC_MEMORY_PROTECTION is a NATIVE-only capability (host
+	// mprotect + trap→guest-SIGSEGV translation; capability-profiles tier-3,
+	// #5WQ/#1BK). The SAME shared libc build must answer honestly on BOTH
+	// profiles, so we advertise it via a runtime substrate probe rather than the
+	// static `values[_SC_MEMORY_PROTECTION] = VER` (which cannot distinguish
+	// native from browser): the mprotect_host libcall enforces on native (a
+	// len==0 no-op probe returns 0) and is absent on the browser js/v8 backends
+	// (returns -1, since WebAssembly.Memory has no page-wise mprotect). POSIX-
+	// native discovery — native returns _POSIX_VERSION ("supported, determined at
+	// runtime"), browser returns -1 ("absent") — the honest signal a portable
+	// program uses to feature-probe an optional capability (Invariant 4 gated
+	// absence). This is the POSIX-native absence signal the #1BK native-only
+	// registry declares (`sysconf(_SC_MEMORY_PROTECTION)==-1`).
+	if (name == _SC_MEMORY_PROTECTION) {
+		extern int __wasilibc_mprotect_host(uintptr_t, uintptr_t, int);
+		return __wasilibc_mprotect_host(0, 0, 0) == 0 ? _POSIX_VERSION : -1;
+	}
+
 	if (name >= sizeof(values)/sizeof(values[0]) || !values[name]) {
 		errno = EINVAL;
 		return -1;
