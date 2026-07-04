@@ -169,6 +169,32 @@ int __timedwait_cp(volatile int *addr, int val,
 	 * SIGCANCEL handler's `cancelasync` branch fires regardless of the
 	 * deferred state. */
 	__testcancel_async();
+	/* firebox#QBH — surface a MASKED-state deferred cancel as ECANCELED so the
+	 * pthread_cond_wait loop unwinds. pthread_cond_wait brackets its wait in
+	 * PTHREAD_CANCEL_MASKED and needs __timedwait_cp to RETURN ECANCELED so its
+	 * loop (pthread_cond_timedwait.c: `while (*fut==seq && (!e || e==EINTR))`)
+	 * breaks this iteration and proceeds to PTHREAD_CANCELED. In MASKED state
+	 * __testcancel()->__cancel() does NOT pthread_exit — it DISARMS cancellation
+	 * (sets canceldisable=DISABLE) and, upstream, returns -ECANCELED that
+	 * __syscall_cp_c surfaces as the cancellable syscall's result (`r=__cancel()`).
+	 * The WASIX port has no __syscall_cp_asm, so the cancel is acted on by the
+	 * __testcancel() call below, but its -ECANCELED was DISCARDED: __timedwait_cp
+	 * returned the spurious Woken (r==0) from the SIGCANCEL interrupt, the cond
+	 * loop saw e==0 with *fut==seq, and re-parked with cancellation now DISABLED
+	 * (set by __cancel) — the cancel was lost until the caller's own timeout fired
+	 * (libc-test pthread_cond_wait-cancel_ignored). Detect the MASKED-cancel here
+	 * (pending cancel + canceldisable==MASKED — the async and ENABLE cases already
+	 * pthread_exit'd inside __testcancel_async()/the __testcancel() below and never
+	 * return) and fold ECANCELED into r; the __testcancel() below still performs
+	 * the DISABLE-disarm exactly as before. ETIMEDOUT is deliberately preserved:
+	 * a genuine timeout that races a cancel keeps its ETIMEDOUT (matching upstream,
+	 * which converts only the EINTR-interrupt to __cancel and never a timeout) and
+	 * acts on the still-pending cancel at the next cancellation point. That guard
+	 * also makes this fix inert on the #486 timeout path — with no pending cancel
+	 * the condition is false and ETIMEDOUT flows through untouched. */
+	if (r != ETIMEDOUT && self && self->cancel
+	    && self->canceldisable == PTHREAD_CANCEL_MASKED)
+		r = ECANCELED;
 	__testcancel();
 #endif
 
