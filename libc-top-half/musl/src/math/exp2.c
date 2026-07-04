@@ -35,6 +35,7 @@ static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki)
 		sbits -= 1ull << 52;
 		scale = asdouble(sbits);
 		y = 2 * (scale + scale * tmp);
+		if (isinf(y)) feraiseexcept(FE_OVERFLOW | FE_INEXACT);  /* #7CD */
 		return eval_as_double(y);
 	}
 	/* k < 0, need special care in the subnormal range.  */

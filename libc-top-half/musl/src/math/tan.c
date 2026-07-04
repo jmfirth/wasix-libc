@@ -54,7 +54,7 @@ double tan(double x)
 	if (ix <= 0x3fe921fb) {
 		if (ix < 0x3e400000) { /* |x| < 2**-27 */
 			/* raise inexact if x!=0 and underflow if subnormal */
-			FORCE_EVAL(ix < 0x00100000 ? x/0x1p120f : x+0x1p120f);
+			{ if (ix < 0x00100000 && x != 0.0) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 			return x;
 		}
 		return __tan(x, 0.0, 0);
@@ -62,7 +62,7 @@ double tan(double x)
 
 	/* tan(Inf or NaN) is NaN */
 	if (ix >= 0x7ff00000)
-		return x - x;
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); return x - x; }  /* #7CD */
 
 	/* argument reduction */
 	n = __rem_pio2(x, y);

@@ -130,6 +130,7 @@ static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki)
 		sbits -= 1009ull << 52;
 		scale = asdouble(sbits);
 		y = 0x1p1009 * (scale + scale * tmp);
+		if (isinf(y)) feraiseexcept(FE_OVERFLOW | FE_INEXACT);  /* #7CD */
 		return eval_as_double(y);
 	}
 	/* k < 0, need special care in the subnormal range.  */
@@ -288,6 +289,7 @@ double pow(double x, double y)
 				x2 = -x2;
 			/* Without the barrier some versions of clang hoist the 1/x2 and
 			   thus division by zero exception can be signaled spuriously.  */
+			if ((iy >> 63) && x2 == 0) feraiseexcept(FE_DIVBYZERO);  /* #7CD */
 			return iy >> 63 ? fp_barrier(1 / x2) : x2;
 		}
 		/* Here x and y are non-zero finite.  */

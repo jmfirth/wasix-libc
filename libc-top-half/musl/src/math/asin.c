@@ -78,14 +78,14 @@ double asin(double x)
 		if ((ix-0x3ff00000 | lx) == 0)
 			/* asin(1) = +-pi/2 with inexact */
 			return x*pio2_hi + 0x1p-120f;
-		return 0/(x-x);
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); return 0/(x-x); }  /* #7CD */
 	}
 	/* |x| < 0.5 */
 	if (ix < 0x3fe00000) {
 		/* if 0x1p-1022 <= |x| < 0x1p-26, avoid raising underflow */
 		if (ix < 0x3e500000 && ix >= 0x00100000)
 			return x;
-		return x + x*R(x*x);
+		{ if (ix < 0x00100000 && x != 0.0) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); return x + x*R(x*x); }  /* #7CD */
 	}
 	/* 1 > |x| >= 0.5 */
 	z = (1 - fabs(x))*0.5;

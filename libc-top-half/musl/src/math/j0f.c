@@ -108,9 +108,9 @@ float y0f(float x)
 
 	GET_FLOAT_WORD(ix, x);
 	if ((ix & 0x7fffffff) == 0)
-		return -1/0.0f;
+		{ feraiseexcept(FE_DIVBYZERO); return -1/0.0f; }  /* #7CD */
 	if (ix>>31)
-		return 0/0.0f;
+		{ feraiseexcept(FE_INVALID); return 0/0.0f; }  /* #7CD */
 	if (ix >= 0x7f800000)
 		return 1/x;
 	if (ix >= 0x40000000) {  /* |x| >= 2.0 */

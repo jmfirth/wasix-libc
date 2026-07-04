@@ -87,7 +87,7 @@ void sincosf(float x, float *sin, float *cos)
 
 	/* sin(Inf or NaN) is NaN */
 	if (ix >= 0x7f800000) {
-		*sin = *cos = x - x;
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); *sin = *cos = x - x; }  /* #7CD */
 		return;
 	}
 

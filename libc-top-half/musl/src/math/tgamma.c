@@ -116,16 +116,16 @@ double tgamma(double x)
 	/* special cases */
 	if (ix >= 0x7ff00000)
 		/* tgamma(nan)=nan, tgamma(inf)=inf, tgamma(-inf)=nan with invalid */
-		return x + INFINITY;
+		{ if (x < 0 && isinf(x)) feraiseexcept(FE_INVALID); return x + INFINITY; }  /* #7CD */
 	if (ix < (0x3ff-54)<<20)
 		/* |x| < 2^-54: tgamma(x) ~ 1/x, +-0 raises div-by-zero */
-		return 1/x;
+		{ if (x == 0) feraiseexcept(FE_DIVBYZERO); return 1/x; }  /* #7CD */
 
 	/* integer arguments */
 	/* raise inexact when non-integer */
 	if (x == floor(x)) {
 		if (sign)
-			return 0/0.0;
+			{ feraiseexcept(FE_INVALID); return 0/0.0; }  /* #7CD */
 		if (x <= sizeof fact/sizeof *fact)
 			return fact[(int)x - 1];
 	}

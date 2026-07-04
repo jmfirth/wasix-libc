@@ -63,7 +63,7 @@ double cos(double x)
 
 	/* cos(Inf or NaN) is NaN */
 	if (ix >= 0x7ff00000)
-		return x-x;
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); return x-x; }  /* #7CD */
 
 	/* argument reduction */
 	n = __rem_pio2(x, y);

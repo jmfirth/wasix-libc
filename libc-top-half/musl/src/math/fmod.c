@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdint.h>
+#include <fenv.h>	/* #7CD: software fenv raises */
 
 double fmod(double x, double y)
 {
@@ -14,7 +15,7 @@ double fmod(double x, double y)
 	uint64_t uxi = ux.i;
 
 	if (uy.i<<1 == 0 || isnan(y) || ex == 0x7ff)
-		return (x*y)/(x*y);
+		{ if (!isnan(x) && !isnan(y)) feraiseexcept(FE_INVALID); return (x*y)/(x*y); }  /* #7CD */
 	if (uxi<<1 <= uy.i<<1) {
 		if (uxi<<1 == uy.i<<1)
 			return 0*x;

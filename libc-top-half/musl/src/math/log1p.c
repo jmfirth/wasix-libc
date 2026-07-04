@@ -78,13 +78,13 @@ double log1p(double x)
 	if (hx < 0x3fda827a || hx>>31) {  /* 1+x < sqrt(2)+ */
 		if (hx >= 0xbff00000) {  /* x <= -1.0 */
 			if (x == -1)
-				return x/0.0; /* log1p(-1) = -inf */
-			return (x-x)/0.0;     /* log1p(x<-1) = NaN */
+				{ feraiseexcept(FE_DIVBYZERO); return x/0.0; /* log1p(-1) = -inf */ }  /* #7CD */
+			{ if (!isnan(x)) feraiseexcept(FE_INVALID); return (x-x)/0.0;     /* log1p(x<-1) = NaN */ }  /* #7CD */
 		}
 		if (hx<<1 < 0x3ca00000<<1) {  /* |x| < 2**-53 */
 			/* underflow if subnormal */
 			if ((hx&0x7ff00000) == 0)
-				FORCE_EVAL((float)x);
+				{ if (x != 0.0) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 			return x;
 		}
 		if (hx <= 0xbfd2bec4) {  /* sqrt(2)/2- <= 1+x < sqrt(2)+ */

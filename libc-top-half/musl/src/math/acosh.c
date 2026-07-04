@@ -15,7 +15,7 @@ double acosh(double x)
 
 	if (e < 0x3ff + 1)
 		/* |x| < 2, up to 2ulp error in [1,1.125] */
-		return log1p(x-1 + sqrt((x-1)*(x-1)+2*(x-1)));
+		{ if (x < 1) feraiseexcept(FE_INVALID); return log1p(x-1 + sqrt((x-1)*(x-1)+2*(x-1))); }  /* #7CD */
 	if (e < 0x3ff + 26)
 		/* |x| < 0x1p26 */
 		return log(2*x - 1/(x+sqrt(x*x-1)));

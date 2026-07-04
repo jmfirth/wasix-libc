@@ -64,7 +64,7 @@ float cosf(float x)
 
 	/* cos(Inf or NaN) is NaN */
 	if (ix >= 0x7f800000)
-		return x-x;
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); return x-x; }  /* #7CD */
 
 	/* general argument reduction needed */
 	n = __rem_pio2f(x,&y);

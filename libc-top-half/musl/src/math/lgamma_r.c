@@ -191,7 +191,7 @@ double __lgamma_r(double x, int *signgamp)
 		x = -x;
 		t = sin_pi(x);
 		if (t == 0.0) /* -integer */
-			return 1.0/(x-x);
+			{ feraiseexcept(FE_DIVBYZERO); return 1.0/(x-x); }  /* #7CD */
 		if (t > 0.0)
 			*signgamp = -1;
 		else

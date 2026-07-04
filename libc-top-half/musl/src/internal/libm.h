@@ -5,6 +5,7 @@
 #include <float.h>
 #include <math.h>
 #include <endian.h>
+#include <fenv.h>	/* firebox #7CD: software fenv — math routines raise FE_* explicitly on wasm */
 #include "fp_arch.h"
 
 #if LDBL_MANT_DIG == 53 && LDBL_MAX_EXP == 1024

@@ -45,7 +45,7 @@ float acosf(float x)
 				return 2*pio2_hi + 0x1p-120f;
 			return 0;
 		}
-		return 0/(x-x);
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); return 0/(x-x); }  /* #7CD */
 	}
 	/* |x| < 0.5 */
 	if (ix < 0x3f000000) {

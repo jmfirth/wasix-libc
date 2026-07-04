@@ -22,9 +22,9 @@ float nextafterf(float x, float y)
 	e = ux.i & 0x7f800000;
 	/* raise overflow if ux.f is infinite and x is finite */
 	if (e == 0x7f800000)
-		FORCE_EVAL(x+x);
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);	/* #7CD: was gutted FORCE_EVAL */
 	/* raise underflow if ux.f is subnormal or zero */
 	if (e == 0)
-		FORCE_EVAL(x*x + ux.f*ux.f);
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);	/* #7CD: was gutted FORCE_EVAL */
 	return ux.f;
 }

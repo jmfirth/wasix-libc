@@ -38,7 +38,7 @@ double tanh(double x)
 	} else {
 		/* |x| is subnormal */
 		/* note: the branch above would not raise underflow in [0x1p-1023,0x1p-1022) */
-		FORCE_EVAL((float)x);
+		{ if (x != 0.0) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 		t = x;
 	}
 	return sign ? -t : t;

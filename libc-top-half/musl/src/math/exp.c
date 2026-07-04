@@ -37,6 +37,7 @@ static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki)
 		sbits -= 1009ull << 52;
 		scale = asdouble(sbits);
 		y = 0x1p1009 * (scale + scale * tmp);
+		if (isinf(y)) feraiseexcept(FE_OVERFLOW | FE_INEXACT);	/* #7CD */
 		return eval_as_double(y);
 	}
 	/* k < 0, need special care in the subnormal range.  */
@@ -57,7 +58,7 @@ static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki)
 		if (WANT_ROUNDING && y == 0.0)
 			y = 0.0;
 		/* The underflow exception needs to be signaled explicitly.  */
-		fp_force_eval(fp_barrier(0x1p-1022) * 0x1p-1022);
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);	/* #7CD: exp underflow */
 	}
 	y = 0x1p-1022 * y;
 	return eval_as_double(y);

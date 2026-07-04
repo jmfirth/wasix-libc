@@ -11,7 +11,7 @@ int ilogb(double x)
 	if (!e) {
 		i <<= 12;
 		if (i == 0) {
-			FORCE_EVAL(0/0.0f);
+			feraiseexcept(FE_INVALID);	/* #7CD: ilogb(0) */
 			return FP_ILOGB0;
 		}
 		/* subnormal x */
@@ -19,7 +19,7 @@ int ilogb(double x)
 		return e;
 	}
 	if (e == 0x7ff) {
-		FORCE_EVAL(0/0.0f);
+		feraiseexcept(FE_INVALID);	/* #7CD: ilogb(inf/nan) */
 		return i<<12 ? FP_ILOGBNAN : INT_MAX;
 	}
 	return e - 0x3ff;

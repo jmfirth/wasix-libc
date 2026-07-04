@@ -20,6 +20,12 @@ double __expo2(double x)
 	/* in directed rounding correct sign before rounding or overflow is important */
 	return exp(x - kln2) * (sign * scale) * scale;
 #else
-	return exp(x - kln2) * scale * scale;
+	/* #7CD: this is the |x| >= log(DBL_MAX) path; when the result overflows to
+	 * infinity, signal FE_OVERFLOW|FE_INEXACT explicitly (wasm has no HW flags)
+	 * so cosh()/sinh() report overflow. */
+	double r = exp(x - kln2) * scale * scale;
+	if (isinf(r) && !isinf(x))
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+	return r;
 #endif
 }

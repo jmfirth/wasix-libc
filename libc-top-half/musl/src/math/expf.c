@@ -76,5 +76,5 @@ float expf(float x)
 	y = C[2] * r + 1;
 	y = z * r2 + y;
 	y = y * s;
-	return eval_as_float(y);
+	{ float __r = eval_as_float(y); if (__r != 0.0f && __builtin_fabsf(__r) < 0x1p-126f) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); return __r; }  /* #7CD */
 }

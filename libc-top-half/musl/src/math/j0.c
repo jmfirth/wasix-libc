@@ -165,9 +165,9 @@ double y0(double x)
 
 	/* y0(nan)=nan, y0(<0)=nan, y0(0)=-inf, y0(inf)=0 */
 	if ((ix<<1 | lx) == 0)
-		return -1/0.0;
+		{ feraiseexcept(FE_DIVBYZERO); return -1/0.0; }  /* #7CD */
 	if (ix>>31)
-		return 0/0.0;
+		{ feraiseexcept(FE_INVALID); return 0/0.0; }  /* #7CD */
 	if (ix >= 0x7ff00000)
 		return 1/x;
 

@@ -152,6 +152,7 @@ float powf(float x, float y)
 				x2 = -x2;
 			/* Without the barrier some versions of clang hoist the 1/x2 and
 			   thus division by zero exception can be signaled spuriously.  */
+			if ((iy & 0x80000000) && x2 == 0) feraiseexcept(FE_DIVBYZERO);  /* #7CD */
 			return iy & 0x80000000 ? fp_barrierf(1 / x2) : x2;
 		}
 		/* x and y are non-zero finite.  */

@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdint.h>
+#include <fenv.h>	/* #7CD: software fenv raises */
 
 double remquo(double x, double y, int *quo)
 {
@@ -14,7 +15,7 @@ double remquo(double x, double y, int *quo)
 
 	*quo = 0;
 	if (uy.i<<1 == 0 || isnan(y) || ex == 0x7ff)
-		return (x*y)/(x*y);
+		{ if (!isnan(x) && !isnan(y)) feraiseexcept(FE_INVALID); return (x*y)/(x*y); }  /* #7CD */
 	if (ux.i<<1 == 0)
 		return x;
 

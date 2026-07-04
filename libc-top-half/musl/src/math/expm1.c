@@ -132,6 +132,7 @@ double expm1(double x)
 		if (sign)
 			return -1;
 		if (x > o_threshold) {
+			if (!isinf(x)) feraiseexcept(FE_OVERFLOW | FE_INEXACT);	/* #7CD: expm1 overflow (not for inf input) */
 			x *= 0x1p1023;
 			return x;
 		}
@@ -159,7 +160,7 @@ double expm1(double x)
 		c = (hi-x)-lo;
 	} else if (hx < 0x3c900000) {  /* |x| < 2**-54, return x */
 		if (hx < 0x00100000)
-			FORCE_EVAL((float)x);
+			{ if (x != 0.0) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 		return x;
 	} else
 		k = 0;

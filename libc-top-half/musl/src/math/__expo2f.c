@@ -20,6 +20,11 @@ float __expo2f(float x)
 	/* in directed rounding correct sign before rounding or overflow is important */
 	return expf(x - kln2) * (sign * scale) * scale;
 #else
-	return expf(x - kln2) * scale * scale;
+	/* #7CD: signal FE_OVERFLOW|FE_INEXACT when the |x| >= log(FLT_MAX) result
+	 * overflows to infinity (wasm has no HW flags) so coshf()/sinhf() report it. */
+	float r = expf(x - kln2) * scale * scale;
+	if (isinf(r) && !isinf(x))
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+	return r;
 #endif
 }

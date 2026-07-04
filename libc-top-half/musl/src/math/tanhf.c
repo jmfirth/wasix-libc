@@ -32,7 +32,7 @@ float tanhf(float x)
 		t = -t/(t+2);
 	} else {
 		/* |x| is subnormal */
-		FORCE_EVAL(x*x);
+		{ if (x != 0.0f) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 		t = x;
 	}
 	return sign ? -t : t;

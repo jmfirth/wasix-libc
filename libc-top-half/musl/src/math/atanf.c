@@ -57,7 +57,7 @@ float atanf(float x)
 		if (ix < 0x39800000) {  /* |x| < 2**-12 */
 			if (ix < 0x00800000)
 				/* raise underflow for subnormal x */
-				FORCE_EVAL(x*x);
+				{ if (x != 0.0f) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 			return x;
 		}
 		id = -1;

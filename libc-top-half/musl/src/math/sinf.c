@@ -36,7 +36,7 @@ float sinf(float x)
 	if (ix <= 0x3f490fda) {  /* |x| ~<= pi/4 */
 		if (ix < 0x39800000) {  /* |x| < 2**-12 */
 			/* raise inexact if x!=0 and underflow if subnormal */
-			FORCE_EVAL(ix < 0x00800000 ? x/0x1p120f : x+0x1p120f);
+			{ if (ix < 0x00800000 && x != 0.0f) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 			return x;
 		}
 		return __sindf(x);
@@ -62,7 +62,7 @@ float sinf(float x)
 
 	/* sin(Inf or NaN) is NaN */
 	if (ix >= 0x7f800000)
-		return x - x;
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); return x - x; }  /* #7CD */
 
 	/* general argument reduction needed */
 	n = __rem_pio2f(x, &y);

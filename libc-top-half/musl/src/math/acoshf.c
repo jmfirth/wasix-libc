@@ -17,7 +17,7 @@ float acoshf(float x)
 	if (a < 0x3f800000+(1<<23))
 		/* |x| < 2, invalid if x < 1 or nan */
 		/* up to 2ulp error in [1,1.125] */
-		return log1pf(x-1 + sqrtf((x-1)*(x-1)+2*(x-1)));
+		{ if (x < 1) feraiseexcept(FE_INVALID); return log1pf(x-1 + sqrtf((x-1)*(x-1)+2*(x-1))); }  /* #7CD */
 	if (a < 0x3f800000+(12<<23))
 		/* |x| < 0x1p12 */
 		return logf(2*x - 1/(x+sqrtf(x*x-1)));

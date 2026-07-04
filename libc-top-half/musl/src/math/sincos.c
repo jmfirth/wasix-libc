@@ -39,7 +39,7 @@ void sincos(double x, double *sin, double *cos)
 
 	/* sincos(Inf or NaN) is NaN */
 	if (ix >= 0x7ff00000) {
-		*sin = *cos = x - x;
+		{ if (!isnan(x)) feraiseexcept(FE_INVALID); *sin = *cos = x - x; }  /* #7CD */
 		return;
 	}
 

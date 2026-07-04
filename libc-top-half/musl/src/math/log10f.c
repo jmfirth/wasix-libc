@@ -15,6 +15,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <fenv.h>	/* #7CD: software fenv raises */
 
 static const float
 ivln10hi  =  4.3432617188e-01, /* 0x3ede6000 */
@@ -38,9 +39,9 @@ float log10f(float x)
 	k = 0;
 	if (ix < 0x00800000 || ix>>31) {  /* x < 2**-126  */
 		if (ix<<1 == 0)
-			return -1/(x*x);  /* log(+-0)=-inf */
+			{ feraiseexcept(FE_DIVBYZERO); return -1/(x*x);  /* log(+-0)=-inf */ }  /* #7CD */
 		if (ix>>31)
-			return (x-x)/0.0f; /* log(-#) = NaN */
+			{ if (!isnan(x)) feraiseexcept(FE_INVALID); return (x-x)/0.0f; /* log(-#) = NaN */ }  /* #7CD */
 		/* subnormal number, scale up x */
 		k -= 25;
 		x *= 0x1p25f;

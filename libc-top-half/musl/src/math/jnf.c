@@ -171,7 +171,7 @@ float ynf(int n, float x)
 	if (ix > 0x7f800000) /* nan */
 		return x;
 	if (sign && ix != 0) /* x < 0 */
-		return 0/0.0f;
+		{ feraiseexcept(FE_INVALID); return 0/0.0f; }  /* #7CD */
 	if (ix == 0x7f800000)
 		return 0.0f;
 

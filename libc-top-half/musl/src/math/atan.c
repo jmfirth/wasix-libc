@@ -79,7 +79,7 @@ double atan(double x)
 		if (ix < 0x3e400000) {  /* |x| < 2^-27 */
 			if (ix < 0x00100000)
 				/* raise underflow for subnormal x */
-				FORCE_EVAL((float)x);
+				{ if (x != 0.0) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 			return x;
 		}
 		id = -1;

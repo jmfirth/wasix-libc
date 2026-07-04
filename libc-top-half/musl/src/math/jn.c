@@ -225,7 +225,7 @@ double yn(int n, double x)
 	if ((ix | (lx|-lx)>>31) > 0x7ff00000) /* nan */
 		return x;
 	if (sign && (ix|lx)!=0) /* x < 0 */
-		return 0/0.0;
+		{ feraiseexcept(FE_INVALID); return 0/0.0; }  /* #7CD */
 	if (ix == 0x7ff00000)
 		return 0.0;
 

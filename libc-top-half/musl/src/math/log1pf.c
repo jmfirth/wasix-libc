@@ -33,13 +33,13 @@ float log1pf(float x)
 	if (ix < 0x3ed413d0 || ix>>31) {  /* 1+x < sqrt(2)+  */
 		if (ix >= 0xbf800000) {  /* x <= -1.0 */
 			if (x == -1)
-				return x/0.0f; /* log1p(-1)=+inf */
-			return (x-x)/0.0f;     /* log1p(x<-1)=NaN */
+				{ feraiseexcept(FE_DIVBYZERO); return x/0.0f; /* log1p(-1)=+inf */ }  /* #7CD */
+			{ if (!isnan(x)) feraiseexcept(FE_INVALID); return (x-x)/0.0f;     /* log1p(x<-1)=NaN */ }  /* #7CD */
 		}
 		if (ix<<1 < 0x33800000<<1) {   /* |x| < 2**-24 */
 			/* underflow if subnormal */
 			if ((ix&0x7f800000) == 0)
-				FORCE_EVAL(x*x);
+				{ if (x != 0.0f) feraiseexcept(FE_UNDERFLOW | FE_INEXACT); }  /* #7CD */
 			return x;
 		}
 		if (ix <= 0xbe95f619) { /* sqrt(2)/2- <= 1+x < sqrt(2)+ */

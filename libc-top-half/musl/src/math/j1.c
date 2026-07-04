@@ -157,9 +157,9 @@ double y1(double x)
 	EXTRACT_WORDS(ix, lx, x);
 	/* y1(nan)=nan, y1(<0)=nan, y1(0)=-inf, y1(inf)=0 */
 	if ((ix<<1 | lx) == 0)
-		return -1/0.0;
+		{ feraiseexcept(FE_DIVBYZERO); return -1/0.0; }  /* #7CD */
 	if (ix>>31)
-		return 0/0.0;
+		{ feraiseexcept(FE_INVALID); return 0/0.0; }  /* #7CD */
 	if (ix >= 0x7ff00000)
 		return 1/x;
 
