@@ -56,7 +56,17 @@ hidden char *__gettextdomain(void);
         &libc.current_locale; \
     }))
 
-#define CURRENT_UTF8 (!!libc.global_locale.cat[LC_CTYPE])
+// firebox#QWE: read the LC_CTYPE category through the settable current-locale
+// pointer, not the global struct. In this fork's live (#else) branch
+// CURRENT_LOCALE is the pointer libc.current_locale (uselocale()/iconv's
+// `*ploc = UTF8_LOCALE` move it); the previous `libc.global_locale.cat[...]`
+// read ignored that pointer, so MB_CUR_MAX stayed 1 (byte mode) for every
+// uselocale()'d/iconv UTF-8 ctype — corrupting iconv's UTF-8 intermediate
+// codec (iso-8859 roundtrip). Upstream's CURRENT_UTF8 (line 47) reads through
+// the SAME indirection as CURRENT_LOCALE; this restores that invariant.
+// setlocale() still works: current_locale defaults to &global_locale, so a
+// setlocale(LC_CTYPE) that mutates global_locale.cat is still seen here.
+#define CURRENT_UTF8 (!!CURRENT_LOCALE->cat[LC_CTYPE])
 #endif
 
 #undef MB_CUR_MAX

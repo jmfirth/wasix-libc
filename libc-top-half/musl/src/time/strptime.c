@@ -135,12 +135,22 @@ char *strptime(const char *restrict s, const char *restrict f, struct tm *restri
 			if (!s) return 0;
 			break;
 		case 's':
-			/* firebox#RNS: seconds since epoch. Faithful port of upstream
-			 * musl: parse only — effect on tm is unspecified and (as
-			 * upstream) no effect is implemented. */
-			if (*s == '-') s++;
-			if (!isdigit(*s)) return 0;
-			while (isdigit(*s)) s++;
+			/* firebox#59D: seconds since the Epoch. glibc-faithful — POSIX
+			 * leaves %s to the implementation; glibc parses the (possibly very
+			 * large) count digit-by-digit into a time_t and fills *tm via
+			 * localtime_r (which honors TZ). Linux programs — and musl
+			 * libc-test functional/strptime ("683078400" %s -> 1991-08-25) —
+			 * expect the broken-down fields to be set. Upstream musl parsed and
+			 * discarded, leaving tm unchanged: the conformance gap. Like glibc
+			 * we require at least one digit and do not accept a sign. */
+			{
+				time_t __s_secs = 0;
+				if (!isdigit(*s)) return 0;
+				do {
+					__s_secs = __s_secs * 10 + (*s++ - '0');
+				} while (isdigit(*s));
+				if (!localtime_r(&__s_secs, tm)) return 0;
+			}
 			break;
 		case 'S':
 			dest = &tm->tm_sec;
@@ -176,15 +186,23 @@ char *strptime(const char *restrict s, const char *restrict f, struct tm *restri
 			range = 7;
 			goto numeric_range;
 		case 'z':
-			/* firebox#RNS: UTC offset +/-HHMM (upstream musl). */
+			/* firebox#59D: UTC offset. glibc accepts both +HH and +HHMM (and
+			 * the '-' forms); upstream musl required exactly 4 digits, which
+			 * rejects the 2-digit +HH form that glibc and Linux programs accept
+			 * (musl libc-test %z "-06"). Parse the sign, the mandatory HH, then
+			 * an optional MM. */
 			if (*s == '+') neg = 0;
 			else if (*s == '-') neg = 1;
 			else return 0;
-			for (i=0; i<4; i++) if (!isdigit(s[1+i])) return 0;
-			tm->__tm_gmtoff = (s[1]-'0')*36000 + (s[2]-'0')*3600
-				+ (s[3]-'0')*600 + (s[4]-'0')*60;
+			s++;
+			if (!isdigit(s[0]) || !isdigit(s[1])) return 0;
+			tm->__tm_gmtoff = ((s[0]-'0')*10 + (s[1]-'0')) * 3600;
+			s += 2;
+			if (isdigit(s[0]) && isdigit(s[1])) {
+				tm->__tm_gmtoff += ((s[0]-'0')*10 + (s[1]-'0')) * 60;
+				s += 2;
+			}
 			if (neg) tm->__tm_gmtoff = -tm->__tm_gmtoff;
-			s += 5;
 			break;
 		case 'x':
 			s = strptime(s, nl_langinfo(D_FMT), tm);

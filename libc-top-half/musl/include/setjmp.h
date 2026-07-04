@@ -63,6 +63,33 @@ _Noreturn void _longjmp (jmp_buf, int);
 typedef __wasi_stack_snapshot_t __jmp_buf_tag;
 typedef __wasi_stack_snapshot_t jmp_buf[1];
 typedef jmp_buf sigjmp_buf;
+
+/* firebox#WJJ: this fallback (non-EH, stack-snapshot) branch declared
+ * sigjmp_buf but NOT sigsetjmp/siglongjmp/_setjmp/_longjmp, so a POSIX
+ * program that uses them (musl libc-test functional/setjmp) failed to BUILD
+ * (-Werror=implicit-function-declaration) even though the sysroot libc
+ * already ships the implementations — src/signal/sigsetjmp_wasix.c does real
+ * signal-mask save/restore via pthread_sigmask + a TLS slot. Mirror the other
+ * two branches' declarations so consumers see the identical setjmp API
+ * regardless of which branch the header selects. */
+#if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 1)
+#define __setjmp_attr __attribute__((__returns_twice__))
+#else
+#define __setjmp_attr
+#endif
+
+#if defined(_POSIX_SOURCE) || defined(_POSIX_C_SOURCE) || \
+	defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+int sigsetjmp(sigjmp_buf, int) __setjmp_attr;
+_Noreturn void siglongjmp(sigjmp_buf, int);
+#endif
+
+#if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+int _setjmp(jmp_buf) __setjmp_attr;
+_Noreturn void _longjmp(jmp_buf, int);
+#endif
+
+#undef __setjmp_attr
 #endif
 
 int setjmp (jmp_buf);
