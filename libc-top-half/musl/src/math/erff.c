@@ -177,7 +177,15 @@ float erfcf(float x)
 		return 0.5f - (x - 0.5f + x*y);
 	}
 	if (ix < 0x41e00000) {  /* |x| < 28 */
-		return sign ? 2 - erfc2(ix,x) : erfc2(ix,x);
+		if (sign)
+			return 2 - erfc2(ix,x);
+		/* firebox #C36: erfc(x) for large positive x is a tiny inexact
+		   sub-normal — a genuine underflow. wasm has no HW fp status word, so
+		   raise it explicitly (erfc is transcendental → never exact here). */
+		float er = erfc2(ix,x);
+		if (er != 0 && __builtin_fabsf(er) < 0x1p-126f)
+			feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
+		return er;
 	}
 	return sign ? 2 - 0x1p-120f : 0x1p-120f*0x1p-120f;
 }

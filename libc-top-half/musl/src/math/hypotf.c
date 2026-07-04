@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdint.h>
+#include <fenv.h>	/* firebox #C36: software fenv — raise range-error flags explicitly on wasm */
 
 float hypotf(float x, float y)
 {
@@ -31,5 +32,12 @@ float hypotf(float x, float y)
 		x *= 0x1p90f;
 		y *= 0x1p90f;
 	}
-	return z*sqrtf((double)x*x + (double)y*y);
+	/* firebox #C36: explicit range-error flags (see hypot.c). Operands here are
+	   finite and non-zero, so inf → overflow, sub-normal → inexact underflow. */
+	float r = z*sqrtf((double)x*x + (double)y*y);
+	if (isinf(r))
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+	else if (r != 0 && fabsf(r) < 0x1p-126f)
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
+	return r;
 }

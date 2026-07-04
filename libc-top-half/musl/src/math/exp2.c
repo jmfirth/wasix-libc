@@ -26,7 +26,12 @@
    a double.  (int32_t)KI is the k used in the argument reduction and exponent
    adjustment of scale, positive k here means the result may overflow and
    negative k means the result may underflow.  */
-static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki)
+/* firebox #C36: x_inexact is 1 when x is not an integer. In the sub-normal
+   range exp2(x) is exact iff x is an integer (the result is an exact power of
+   two, which must NOT raise UNDERFLOW); a non-integer x gives an inexact
+   sub-normal, which must. wasm has no HW fp status word to distinguish these,
+   so the caller passes the integer test. */
+static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki, int x_inexact)
 {
 	double_t scale, y;
 
@@ -55,8 +60,10 @@ static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki)
 		/* Avoid -0.0 with downward rounding.  */
 		if (WANT_ROUNDING && y == 0.0)
 			y = 0.0;
-		/* The underflow exception needs to be signaled explicitly.  */
-		fp_force_eval(fp_barrier(0x1p-1022) * 0x1p-1022);
+		/* firebox #C36: the sub-normal result is inexact (→ UNDERFLOW) exactly
+		   when x is not an integer (replaces the no-op FORCE_EVAL on wasm). */
+		if (x_inexact)
+			feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 	}
 	y = 0x1p-1022 * y;
 	return eval_as_double(y);
@@ -114,7 +121,10 @@ double exp2(double x)
 	/* Worst case error is less than 0.5+0.86/N+(abs poly error * 2^53) ulp.  */
 	tmp = tail + r * C1 + r2 * (C2 + r * C3) + r2 * r2 * (C4 + r * C5);
 	if (predict_false(abstop == 0))
-		return specialcase(tmp, sbits, ki);
+		/* firebox #C36: pass whether x is non-integer. Here |x| is bounded well
+		   below 2^63 (x>=1024 overflowed and x<=-1075 underflowed earlier), so
+		   the int64 round-trip is a safe exact-integer test. */
+		return specialcase(tmp, sbits, ki, x != (double)(int64_t)x);
 	scale = asdouble(sbits);
 	/* Note: tmp == 0 or |tmp| > 2^-65 and scale > 2^-928, so there
 	   is no spurious underflow here even without fma.  */

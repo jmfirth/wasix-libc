@@ -73,6 +73,10 @@ float atan2f(float y, float x)
 		z = 0.0;
 	else
 		z = atanf(fabsf(y/x));
+	/* firebox #C36: for x>0 the result is z; a tiny y/x makes it a sub-normal or
+	   zero — an inexact underflow (y is non-zero here). Raise it explicitly. */
+	if (!(m&2) && z < 0x1p-126f)
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 	switch (m) {
 	case 0: return z;              /* atan(+,+) */
 	case 1: return -z;             /* atan(-,+) */
