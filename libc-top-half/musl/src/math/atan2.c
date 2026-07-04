@@ -97,6 +97,11 @@ double atan2(double y, double x)
 		z = 0;
 	else
 		z = atan(fabs(y/x));
+	/* firebox #C36: for x>0 the result is z (= atan(|y/x|)); a tiny y/x makes it
+	   a sub-normal or zero — an inexact underflow (y is non-zero here, y==0
+	   returned early). wasm has no HW fp status word, so raise it explicitly. */
+	if (!(m&2) && z < 0x1p-1022)
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 	switch (m) {
 	case 0: return z;              /* atan(+,+) */
 	case 1: return -z;             /* atan(-,+) */

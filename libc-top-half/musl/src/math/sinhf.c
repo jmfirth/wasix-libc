@@ -18,8 +18,14 @@ float sinhf(float x)
 	if (w < 0x42b17217) {
 		t = expm1f(absx);
 		if (w < 0x3f800000) {
-			if (w < 0x3f800000 - (12<<23))
+			if (w < 0x3f800000 - (12<<23)) {
+				/* firebox #C36: for a sub-normal x, sinhf(x)~=x is a tiny
+				   inexact underflow; wasm has no HW fp status word, and the
+				   `return x` copy raises nothing, so flag it explicitly. */
+				if (w != 0 && w < 0x00800000)
+					feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 				return x;
+			}
 			return h*(2*t - t*t/(t+1));
 		}
 		return h*(t + t/(t+1));

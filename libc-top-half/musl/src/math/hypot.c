@@ -1,6 +1,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <float.h>
+#include <fenv.h>	/* firebox #C36: software fenv — raise range-error flags explicitly on wasm */
 
 #if FLT_EVAL_METHOD > 1U && LDBL_MANT_DIG == 64
 #define SPLIT (0x1p32 + 1)
@@ -63,5 +64,14 @@ double hypot(double x, double y)
 	}
 	sq(&hx, &lx, x);
 	sq(&hy, &ly, y);
-	return z*sqrt(ly+lx+hy+hx);
+	/* firebox #C36: raise the range-error flags explicitly (wasm has no HW fp
+	   status word). Both operands are finite (inf/nan returned early) and
+	   non-zero (the uy.i==0 case returned early), so an infinite result is a
+	   genuine overflow and a sub-normal result is a genuine inexact underflow. */
+	double r = z*sqrt(ly+lx+hy+hx);
+	if (isinf(r))
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);
+	else if (r != 0 && fabs(r) < 0x1p-1022)
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
+	return r;
 }
