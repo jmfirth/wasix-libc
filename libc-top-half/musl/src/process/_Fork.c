@@ -4,6 +4,9 @@
 #ifdef __wasilibc_unmodified_upstream
 #else
 #include <wasi/api.h>
+#include <errno.h>
+#include <sys/resource.h>
+#include <__wasilibc_rlimit.h>
 #endif
 #include "libc.h"
 #include "lock.h"
@@ -19,6 +22,36 @@ pid_t _Fork(int copy_mem)
 {
 	pid_t ret;
 	sigset_t set;
+#ifndef __wasilibc_unmodified_upstream
+	// firebox#AB2 — RLIMIT_NPROC fork admission control.
+	//
+	// Linux fails fork()/clone() with EAGAIN in copy_process when the calling
+	// user's live process count already meets or exceeds RLIMIT_NPROC (the soft
+	// limit). WASI exposes no host process-count authority the guest can
+	// consult, but the calling process ITSELF always counts as at least one
+	// process against that per-user limit — so whenever the soft limit is <= 1
+	// the count is already met with certainty and fork MUST fail EAGAIN. That
+	// reproduces Linux exactly for RLIMIT_NPROC 0 and 1 (the cases decidable in
+	// the guest) with zero risk of a false denial; the default limit is
+	// RLIM_INFINITY, so an unconstrained process is never touched. Soft limits
+	// >= 2 need a global live-process count only the host control plane tracks
+	// and are left unenforced here (documented in work/tasks/AB2). Both fork()
+	// and the non-EH vfork() (which is _fork_internal(0)) funnel through here,
+	// so both honor the limit. The atfork PARENT handlers still run on this
+	// failure path — _fork_internal calls __fork_handler(!ret)==__fork_handler(0)
+	// for ret<0, the parent phase — and the EAGAIN errno survives their clobber
+	// via _fork_internal's errno_save/restore. That errno-across-a-failed-fork
+	// contract is exactly what regression/pthread_atfork-errno-clobber pins.
+	{
+		struct rlimit __fbx_nproc_rlim;
+		__wasilibc_get_stored_rlimit(RLIMIT_NPROC, &__fbx_nproc_rlim);
+		if (__fbx_nproc_rlim.rlim_cur != RLIM_INFINITY &&
+		    __fbx_nproc_rlim.rlim_cur <= 1) {
+			errno = EAGAIN;
+			return -1;
+		}
+	}
+#endif
 	__block_all_sigs(&set);
 	__aio_atfork(-1);
 	LOCK(__abort_lock);
