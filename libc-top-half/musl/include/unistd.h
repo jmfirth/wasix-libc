@@ -317,11 +317,22 @@ pid_t gettid(void);
 #ifdef __wasilibc_unmodified_upstream /* WASI has no processes, mmap, or mq */
 #define _POSIX_JOB_CONTROL      1
 #define _POSIX_MAPPED_FILES     _POSIX_VERSION
-#define _POSIX_MEMLOCK          _POSIX_VERSION
-#define _POSIX_MEMLOCK_RANGE    _POSIX_VERSION
 #define _POSIX_MEMORY_PROTECTION _POSIX_VERSION
 #define _POSIX_MESSAGE_PASSING  _POSIX_VERSION
 #endif
+// firebox#R23: memory locking (mlock/munlock/mlockall/munlockall) genuinely
+// exists on BOTH profiles. On WASM linear memory every page is resident and
+// unswappable, so the residency guarantee holds unconditionally in pure
+// userspace — no MMU, no host mprotect, unlike native-only
+// _POSIX_MEMORY_PROTECTION (the 0-sentinel case below). Honest POSIX feature
+// discovery (Invariant 4) therefore reports a fixed positive, not a 0 sentinel:
+// there is no per-profile divergence to defer to runtime. This makes the
+// compile-time macro consistent with the already-honest runtime probe —
+// sysconf(_SC_MEMLOCK)/_SC_MEMLOCK_RANGE already return _POSIX_VERSION
+// unconditionally (src/conf/sysconf.c) — closing a machinery-present-but-
+// unreachable inconsistency (munlockall/5-1 self-reports UNSUPPORTED without it).
+#define _POSIX_MEMLOCK          _POSIX_VERSION
+#define _POSIX_MEMLOCK_RANGE    _POSIX_VERSION
 // firebox#SAH (native-only, #5WQ/#1BK; capability-profiles capability-signals.tsv
 // `memory-protection` row → macro-target 0): memory protection is a NATIVE-only
 // capability (host mprotect + trap→guest-SIGSEGV; the browser WebAssembly.Memory

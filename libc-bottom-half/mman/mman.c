@@ -29,6 +29,14 @@
 // firebox#61X (Stage-1 1b-libc): struct stat / fstat / st_ino to recognise a
 // /dev/shm fd at mmap time and key the host shared-window mapping.
 #include <sys/stat.h>
+// firebox#R23: the POSIX RLIMIT_MEMLOCK privilege/accounting gate for
+// mlock/mlockall (getrlimit, struct rlimit, RLIMIT_MEMLOCK, RLIM_INFINITY,
+// rlim_t). getrlimit here reads the firebox#KZ1 stored process rlimit table
+// (setrlimit persists every resource, RLIMIT_MEMLOCK included). We use the
+// PUBLIC getrlimit — NOT the private __wasilibc_get_stored_rlimit — because the
+// emulated-mman objects are not compiled with -I headers/private (only the
+// top-half objects are); getrlimit reaches the same table with no Makefile change.
+#include <sys/resource.h>
 
 // firebox#61X: the host shared-memory-window import (defined in
 // libc-bottom-half/sources/__wasixlibc_firebox.c) and the process-local
@@ -205,6 +213,52 @@ static void wasix_map_count_inc(void) {
 }
 static void wasix_map_count_dec(void) {
     __atomic_fetch_sub(&g_map_count, 1, __ATOMIC_SEQ_CST);
+}
+
+// firebox#R23: process memory-lock accounting for mlock/munlock/mlockall/
+// munlockall. WASM linear memory is all-resident and unswappable, so a lock's
+// RESIDENCY guarantee is satisfied trivially — the success path is a genuine
+// no-op. What is real and must be faithful is the POSIX CAP_IPC_LOCK +
+// RLIMIT_MEMLOCK gate (Linux performs the permission check INDEPENDENTLY of the
+// residency it guarantees) and the msync(MS_INVALIDATE)->EBUSY-on-locked rule.
+// Atomics keep the threaded build race-free (mirroring g_map_count above); the
+// counters ride proc_fork's private-memory copy exactly like g_map_count (a
+// child inherits the parent's locked state, as on Linux). geteuid()==0 ==
+// holds CAP_IPC_LOCK (the sandbox has no fine-grained cap set; root ==
+// privileged — the same model as the fs check_access root-bypass).
+static int    g_mlock_mode;     // mlockall() flags in effect: 0 | MCL_CURRENT | MCL_FUTURE
+static size_t g_locked_bytes;   // total currently-locked bytes (advisory accounting)
+
+// True iff the caller holds CAP_IPC_LOCK. The sandbox models capabilities as
+// "root has all, non-root has none" (identical to the shipped fs-enforcement
+// root-bypass), and the conformance tests drop euid precisely to LOSE
+// CAP_IPC_LOCK, so this is faithful to the common Linux case they target.
+static int wasix_has_ipc_lock(void) { return geteuid() == 0; }
+
+// The process RLIMIT_MEMLOCK soft limit (rlim_cur). Reads the firebox#KZ1
+// stored rlimit table via the public getrlimit; RLIM_INFINITY if never set.
+// getrlimit cannot fail for a valid resource (RLIMIT_MEMLOCK < RLIM_NLIMITS),
+// but rl is pre-initialised to RLIM_INFINITY so an impossible failure fails
+// open (never denies on garbage) rather than reading an uninitialised field.
+static rlim_t wasix_memlock_limit(void) {
+    struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+    (void)getrlimit(RLIMIT_MEMLOCK, &rl);
+    return rl.rlim_cur;
+}
+
+static int    wasix_mlock_mode(void)   { return __atomic_load_n(&g_mlock_mode,   __ATOMIC_SEQ_CST); }
+static size_t wasix_locked_bytes(void) { return __atomic_load_n(&g_locked_bytes, __ATOMIC_SEQ_CST); }
+
+// [addr, addr+len) escapes linear memory => not "valid mapped pages" => ENOMEM.
+// Faithful-enough on a no-MMU target: catches the LONG_MAX probe (mlock/8-1,
+// munlock/10-1); an in-bounds hole is the documented no-MMU known-gap (no test
+// hits it). len==0 is not a range and never ENOMEMs.
+static int wasix_range_unmapped(const void *addr, size_t len) {
+    uintptr_t a = (uintptr_t)addr, end;
+    size_t mem = (size_t)__builtin_wasm_memory_size(0) * (size_t)65536;
+    if (len == 0) return 0;
+    if (__builtin_add_overflow(a, len, &end)) return 1;
+    return a >= mem || end > mem;
 }
 
 struct map {
@@ -565,6 +619,28 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     if (wasix_map_count_would_exceed()) {
         errno = ENOMEM;
         return MAP_FAILED;
+    }
+
+    // firebox#R23: if mlockall(MCL_FUTURE) is in effect and the caller lacks
+    // CAP_IPC_LOCK, every new mapping must be locked into memory; if locking it
+    // would exceed RLIMIT_MEMLOCK the mapping fails EAGAIN (mmap/18-1, whose
+    // header quotes "[EAGAIN] The mapping could not be locked in memory, if
+    // required by mlockall(), due to a lack of resources"). Root/CAP_IPC_LOCK
+    // bypasses. INERT for every ordinary mmap (fires only under MCL_FUTURE AND
+    // unprivileged), so it cannot regress any root-run mmap test. Placed after
+    // the fd-precondition + map-count gates (POSIX errno precedence) and before
+    // any allocation / window routing, so no resource is consumed on denial.
+    // The success path deliberately does NOT mutate g_locked_bytes: the
+    // observable POSIX contract for 18-1 is the EAGAIN denial, and cumulative
+    // MCL_FUTURE lock accounting is advisory + unexercised by the corpus, while
+    // mutating it here would be inconsistent with mmap's early-returning window
+    // and fixed-mapping success paths (explicit mlock()/munlock() own the count).
+    if ((wasix_mlock_mode() & MCL_FUTURE) && !wasix_has_ipc_lock()) {
+        rlim_t lim = wasix_memlock_limit();
+        if ((rlim_t)length > lim - (rlim_t)wasix_locked_bytes()) {
+            errno = EAGAIN;
+            return MAP_FAILED;
+        }
     }
 
     // firebox#61X (Stage-1 1b-libc): a MAP_SHARED mapping of a /dev/shm object
@@ -990,6 +1066,22 @@ int munmap(void *addr, size_t length) {
 }
 
 int msync (void *addr, size_t length, int flags) {
+    // firebox#R23: POSIX msync EBUSY — "MS_INVALIDATE was specified and a memory
+    // lock exists for the specified address range." mlockall(MCL_CURRENT) locks
+    // ALL current pages, so an MS_INVALIDATE of any mapped page then fails EBUSY
+    // (mlockall/3-6 on a /dev/shm page, 3-7 on a file page). Placed FIRST — before
+    // the window and fixed no-ops below — because 3-6's page is a /dev/shm
+    // MAP_SHARED window mapping, which would otherwise take the window no-op and
+    // return 0 (a FAIL). Safe: only MS_INVALIDATE callers with MCL_CURRENT active
+    // are affected. munmap()'s internal msync uses MS_SYNC (no MS_INVALIDATE); the
+    // standalone msync/* tests never call mlockall, so g_mlock_mode==0 for them ->
+    // no spurious EBUSY. (A per-range lock model is possible but the coarse
+    // MCL_CURRENT-active flag is faithful for the corpus, and window mappings carry
+    // no struct map header to hang per-range state on.)
+    if ((flags & MS_INVALIDATE) && (wasix_mlock_mode() & MCL_CURRENT)) {
+        errno = EBUSY;
+        return -1;
+    }
     // firebox#796: fixed mappings (blink wasm64 linear mapping) have no
     // header and no separate backing file to flush — the bytes already live in
     // linear memory. Treat msync as a no-op success.
@@ -1124,4 +1216,99 @@ int posix_madvise(void *addr, size_t length, int advice) {
     default:
         return EINVAL;  // posix_madvise returns errno directly, not via errno
     }
+}
+
+// firebox#R23: mlock/munlock/mlockall/munlockall — see the process memory-lock
+// accounting note above g_mlock_mode. WASM linear memory is all-resident and
+// unswappable, so the RESIDENCY guarantee is a genuine no-op; the observable
+// POSIX surface a portable program can depend on is the FAILURE gate
+// (EPERM/EAGAIN under CAP_IPC_LOCK + RLIMIT_MEMLOCK, ENOMEM for an unmapped
+// range, EINVAL for bad mlockall flags), which we reproduce byte-for-byte. This
+// is the mman-layer sibling of the fs check_access root-bypass — the privilege
+// gate is real even though nothing is physically pinned.
+
+// mlock: errno precedence ENOMEM (range) -> root no-op -> EPERM/EAGAIN -> 0.
+int mlock(const void *addr, size_t len) {
+    // Address-validity, not permission: Linux returns ENOMEM to root too, so it
+    // precedes the CAP_IPC_LOCK bypass (mlock/8-1 unmapped LONG_MAX range).
+    if (wasix_range_unmapped(addr, len)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    // Root/CAP_IPC_LOCK: the lock is trivially satisfied -> no-op success
+    // (mlock/5-1 valid range; mlock/10-1 unaligned — Linux rounds down, does not
+    // require alignment, so we succeed rather than EINVAL).
+    if (wasix_has_ipc_lock()) {
+        return 0;
+    }
+    rlim_t lim = wasix_memlock_limit();
+    // rlim_cur == 0 + unprivileged -> EPERM (mlock/12-1: setrlimit(MEMLOCK,{0,0})
+    // + seteuid(nonroot)).
+    if (lim == 0) {
+        errno = EPERM;
+        return -1;
+    }
+    // Over a non-zero limit -> EAGAIN (lack of lockable resources).
+    if ((rlim_t)len > lim - (rlim_t)wasix_locked_bytes()) {
+        errno = EAGAIN;
+        return -1;
+    }
+    __atomic_fetch_add(&g_locked_bytes, len, __ATOMIC_SEQ_CST);
+    return 0;
+}
+
+// munlock: unmapped range -> ENOMEM (munlock/10-1); otherwise a successful
+// unlock (munlock/7-1, 11-1). Unlocking needs no privilege on Linux.
+int munlock(const void *addr, size_t len) {
+    if (wasix_range_unmapped(addr, len)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    // Advisory accounting, clamped at 0 (never underflow the counter).
+    size_t locked = wasix_locked_bytes();
+    if (locked >= len) {
+        __atomic_fetch_sub(&g_locked_bytes, len, __ATOMIC_SEQ_CST);
+    } else {
+        __atomic_store_n(&g_locked_bytes, 0, __ATOMIC_SEQ_CST);
+    }
+    return 0;
+}
+
+// mlockall: EINVAL (bad flags) -> root no-op -> EPERM/ENOMEM -> 0.
+int mlockall(int flags) {
+    // flags==0 (mlockall/13-1) or bits outside MCL_CURRENT|MCL_FUTURE
+    // (mlockall/13-2) -> EINVAL, before the mode is recorded.
+    if (flags == 0 || (flags & ~(MCL_CURRENT | MCL_FUTURE))) {
+        errno = EINVAL;
+        return -1;
+    }
+    // Record the mode for the mmap MCL_FUTURE gate + the msync MCL_CURRENT EBUSY
+    // facet. Per-process (rides proc_fork's private-memory copy) and reset each
+    // process, so a failed mlockall in one conformance binary cannot leak into
+    // another (each test is its own process).
+    __atomic_store_n(&g_mlock_mode, flags, __ATOMIC_SEQ_CST);
+    // Root/CAP_IPC_LOCK -> no-op success (mlockall/8-1; mmap/18-1's root
+    // mlockall(MCL_FUTURE) that arms the mmap gate).
+    if (wasix_has_ipc_lock()) {
+        return 0;
+    }
+    rlim_t lim = wasix_memlock_limit();
+    // rlim_cur == 0 + unprivileged -> EPERM (mlockall/15-1 + speculative/15-1).
+    if (lim == 0) {
+        errno = EPERM;
+        return -1;
+    }
+    // MCL_CURRENT over the limit -> ENOMEM (lack of lockable resources).
+    if ((flags & MCL_CURRENT) && (rlim_t)wasix_locked_bytes() > lim) {
+        errno = ENOMEM;
+        return -1;
+    }
+    return 0;
+}
+
+// munlockall: always succeeds (munlockall/5-1). Clears the mode + accounting.
+int munlockall(void) {
+    __atomic_store_n(&g_mlock_mode, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_locked_bytes, 0, __ATOMIC_SEQ_CST);
+    return 0;
 }
