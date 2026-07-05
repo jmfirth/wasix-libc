@@ -64,6 +64,37 @@ __wasi_errno_t __wasi_fd_ioctl(__wasi_fd_t fd, uint32_t request, void *argp, int
  * __wasixlibc_firebox.c for the full rationale. */
 int32_t __fbx_signal_poll(void);
 
+/* firebox#MHZ/#BDY (heavy half firebox#K9N) — the per-process POSIX credential
+ * imports (jmfirth/wasmer#firebox-patches). Host-authoritative: the credential
+ * lives in WasiProcess; the guest getXid/setXid wrappers call these on EVERY
+ * invocation (never cached — a setuid must be immediately visible to a later
+ * getuid).
+ *
+ * READ path (#MHZ):
+ *   __wasix_proc_getcred(cred6) — writes SIX packed uint32_t at cred6 in the
+ *     pinned order {ruid, euid, suid, rgid, egid, sgid} (24 bytes).
+ *   __wasix_proc_getgroups(buf, buf_len, ret_count) — POSIX getgroups probe
+ *     semantics: *ret_count ALWAYS receives the true supplementary count;
+ *     buf_len==0 → count-only Success (buf untouched);
+ *     0 < buf_len < ngroups → EINVAL; else buf is filled with ngroups entries.
+ *
+ * WRITE path (#BDY):
+ *   __wasix_proc_setcred(which, id_a, id_b, id_c) — `which` selects the Linux
+ *     KERNEL syscall (0=setuid 1=setreuid 2=setresuid 3=setgid 4=setregid
+ *     5=setresgid; there is deliberately NO seteuid/setegid code — those are
+ *     library functions over setresuid/setresgid, exactly as musl builds them).
+ *     (uint32_t)-1 = "unchanged" for the re-/res- forms, invalid-id → EINVAL
+ *     for the single-arg forms. POSIX privilege rules are enforced HOST-side
+ *     (euid==0 is privileged) → EPERM/EINVAL as Linux would.
+ *   __wasix_proc_setgroups(buf, buf_len) — privileged-only (EPERM otherwise);
+ *     buf_len==0 clears the supplementary set. setgroups(n, list) →
+ *     __wasix_proc_setgroups(list, n) (note the swapped arg order).
+ */
+__wasi_errno_t __wasix_proc_getcred(uint32_t *cred6);
+__wasi_errno_t __wasix_proc_getgroups(uint32_t *buf, size_t buf_len, size_t *ret_count);
+__wasi_errno_t __wasix_proc_setcred(uint32_t which, uint32_t id_a, uint32_t id_b, uint32_t id_c);
+__wasi_errno_t __wasix_proc_setgroups(const uint32_t *buf, size_t buf_len);
+
 #ifdef __cplusplus
 }
 #endif

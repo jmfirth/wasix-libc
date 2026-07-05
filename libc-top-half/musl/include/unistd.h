@@ -163,9 +163,8 @@ int isatty(int);
 pid_t tcgetpgrp(int);
 int tcsetpgrp(int, pid_t);
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no getuid etc. */
+/* firebox#K9N: real credential substrate (#MHZ/#BDY imports) — getgroups is live. */
 int getgroups(int, gid_t []);
-#endif
 
 uid_t getuid(void);
 uid_t geteuid(void);
@@ -195,10 +194,9 @@ size_t confstr(int, char *, size_t);
 #define F_LOCK  1
 #define F_TLOCK 2
 #define F_TEST  3
-#ifdef __wasilibc_unmodified_upstream /* WASI has no setreuid */
+/* firebox#K9N: real credential substrate — setreuid/setregid are live. */
 int setreuid(uid_t, uid_t);
 int setregid(gid_t, gid_t);
-#endif
 #ifdef __wasilibc_unmodified_upstream /* WASI has no POSIX file locking */
 int lockf(int, int, off_t);
 #endif
@@ -250,8 +248,9 @@ int getdtablesize(void);
 int sethostname(const char *, size_t);
 int getdomainname(char *, size_t);
 int setdomainname(const char *, size_t);
-int setgroups(size_t, const gid_t *);
 #endif
+/* firebox#K9N: real credential substrate — setgroups is live (privileged-only). */
+int setgroups(size_t, const gid_t *);
 char *getpass(const char *);
 #ifdef __wasilibc_unmodified_upstream
 int daemon(int, int);
@@ -270,12 +269,11 @@ int getpagesize(void);
 
 #ifdef _GNU_SOURCE
 extern char **environ;
-#ifdef __wasilibc_unmodified_upstream /* WASI has no get/setresuid */
+/* firebox#K9N: real credential substrate — the res-triple family is live. */
 int setresuid(uid_t, uid_t, uid_t);
 int setresgid(gid_t, gid_t, gid_t);
 int getresuid(uid_t *, uid_t *, uid_t *);
 int getresgid(gid_t *, gid_t *, gid_t *);
-#endif
 #ifdef __wasilibc_unmodified_upstream /* WASI has no cwd */
 char *get_current_dir_name(void);
 #endif

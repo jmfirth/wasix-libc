@@ -164,3 +164,23 @@ void __firebox_host_deregister_held(volatile int *l){(void)__imported_wasix_fbx_
  * runtime, so the pair always ships together. */
 int32_t __imported_wasix_fbx_signal_poll(void) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("__fbx_signal_poll")));
 int32_t __fbx_signal_poll(void){return __imported_wasix_fbx_signal_poll();}
+
+/* firebox#MHZ/#BDY (heavy half firebox#K9N) — the per-process POSIX credential
+ * imports. The host (jmfirth/wasmer#firebox-patches, lib/wasix/src/syscalls/
+ * wasix/proc_{getcred,getgroups,setcred,setgroups}.rs) owns the credential in
+ * WasiProcess; these wrappers are the guest ends of the pinned ABI (see
+ * api_firebox.h for the full contract). Pointer/length args follow the
+ * intptr_t width convention of the wrappers above (host WasmPtr<_, M> /
+ * M::Offset → i32 on wasm32, i64 on wasm64, resolving under both wasix_32v1
+ * and wasix_64v1); proc_setcred is all-scalar (host fn is NOT generic over
+ * MemorySize — four i32 args either width). `ret_count` in proc_getgroups
+ * points at an M::Offset-sized slot, i.e. a size_t guest-side. Ships together
+ * with the matching runtime, same contract as shm_map. */
+int32_t __imported_wasix_fbx_proc_getcred(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_getcred")));
+__wasi_errno_t __wasix_proc_getcred(uint32_t *cred6){return (uint16_t)__imported_wasix_fbx_proc_getcred((intptr_t)cred6);}
+int32_t __imported_wasix_fbx_proc_getgroups(intptr_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_getgroups")));
+__wasi_errno_t __wasix_proc_getgroups(uint32_t *buf,size_t buf_len,size_t *ret_count){return (uint16_t)__imported_wasix_fbx_proc_getgroups((intptr_t)buf,(intptr_t)buf_len,(intptr_t)ret_count);}
+int32_t __imported_wasix_fbx_proc_setcred(int32_t,int32_t,int32_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_setcred")));
+__wasi_errno_t __wasix_proc_setcred(uint32_t which,uint32_t id_a,uint32_t id_b,uint32_t id_c){return (uint16_t)__imported_wasix_fbx_proc_setcred((int32_t)which,(int32_t)id_a,(int32_t)id_b,(int32_t)id_c);}
+int32_t __imported_wasix_fbx_proc_setgroups(intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_setgroups")));
+__wasi_errno_t __wasix_proc_setgroups(const uint32_t *buf,size_t buf_len){return (uint16_t)__imported_wasix_fbx_proc_setgroups((intptr_t)buf,(intptr_t)buf_len);}
