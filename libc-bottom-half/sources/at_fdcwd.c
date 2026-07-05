@@ -7,6 +7,7 @@
 // function, which then calls the appropriate WASI function.
 
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <dirent.h>
@@ -21,11 +22,23 @@
 #endif
 
 int openat(int dirfd, const char *pathname, int flags, ...) {
-    if (dirfd == AT_FDCWD || pathname[0] == '/') {
-        return open(pathname, flags);
+    // firebox#HXN: capture and thread the create mode (WASI's openat is
+    // nomode). For AT_FDCWD / absolute paths, forward through open(), which
+    // resolves the preopen and applies the mode; for a real dirfd, apply the
+    // mode against the already-relative path via the create-mode core.
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
     }
 
-    return __wasilibc_nocwd_openat_nomode(dirfd, pathname, flags);
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
+        return open(pathname, flags, mode);
+    }
+
+    return __wasilibc_nocwd_openat_mode(dirfd, pathname, flags, mode);
 }
 
 int symlinkat(const char *target, int dirfd, const char *linkpath) {
@@ -49,7 +62,8 @@ int mkdirat(int dirfd, const char *pathname, mode_t mode) {
         return mkdir(pathname, mode);
     }
 
-    return __wasilibc_nocwd_mkdirat_nomode(dirfd, pathname);
+    // firebox#HXN: honor the create mode on the relative-dirfd path too.
+    return __wasilibc_nocwd_mkdirat_mode(dirfd, pathname, mode);
 }
 
 DIR *opendirat(int dirfd, const char *path) {
