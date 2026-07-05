@@ -94,6 +94,16 @@ static void __wasilibc_apply_create_mode(int fd, mode_t mode) {
 //     another file's mode.
 int __wasilibc_nocwd_openat_mode(int dirfd, const char *relative_path,
                                  int oflag, mode_t mode) {
+    // firebox#HXN: preserve the caller's errno across our INTERNAL probe + chmod.
+    // The fstatat probe below fails ENOENT for the common create case (a file
+    // that does NOT yet exist), and __wasix_fd_chmod may perturb errno too —
+    // neither must leak into an otherwise-SUCCESSFUL open. rustc/LLVM read errno
+    // after opening their output stream and mis-report a stale ENOENT as "IO
+    // failure on output stream: No such file or directory" (this broke the whole
+    // rust toolchain in the #M4F warm-up gate — a successful create left
+    // errno=ENOENT). The old nomode open never touched errno on success; restore
+    // that invariant. On a REAL open failure we leave openat_nomode's errno.
+    int saved_errno = errno;
     int probe_existed = 0;
     if ((oflag & O_CREAT) && !(oflag & O_EXCL)) {
         struct stat st;
@@ -103,8 +113,11 @@ int __wasilibc_nocwd_openat_mode(int dirfd, const char *relative_path,
     }
 
     int fd = __wasilibc_nocwd_openat_nomode(dirfd, relative_path, oflag);
-    if (fd >= 0 && (oflag & O_CREAT) && ((oflag & O_EXCL) || !probe_existed))
+    if (fd < 0)
+        return fd;   // real failure: openat_nomode set errno — leave it for the caller
+    if ((oflag & O_CREAT) && ((oflag & O_EXCL) || !probe_existed))
         __wasilibc_apply_create_mode(fd, mode);
+    errno = saved_errno;   // success: hide the internal probe/chmod errno churn
     return fd;
 }
 
@@ -119,9 +132,14 @@ int __wasilibc_nocwd_mkdirat_mode(int dirfd, const char *relative_path,
                                   mode_t mode) {
     int r = __wasilibc_nocwd_mkdirat_nomode(dirfd, relative_path);
     if (r == 0) {
+        // firebox#HXN: as in openat_mode, don't let the internal chmod's errno
+        // churn leak into a SUCCESSFUL mkdir (the errno-transparency invariant
+        // the rust-toolchain break taught). Restore the post-mkdir errno.
+        int saved_errno = errno;
         mode_t eff = (mode & 07777) & ~__wasilibc_umask_get();
         (void)__wasix_path_chmod(dirfd, relative_path, strlen(relative_path),
                                  (uint32_t)eff);
+        errno = saved_errno;
     }
     return r;
 }
