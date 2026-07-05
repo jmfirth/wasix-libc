@@ -42,14 +42,6 @@ int __wasilibc_nocwd_fstatat(int, const char *__restrict, struct stat *__restric
     __attribute__((__warn_unused_result__));
 int __wasilibc_nocwd_mkdirat_nomode(int, const char *)
     __attribute__((__warn_unused_result__));
-/* firebox#HXN: create-mode-honoring variants of the *_nomode forms. WASI's
- * path_open/path_create_directory carry no mode, so these apply the caller's
- * create mode (mode & ~umask) after a real create via __wasix_fd_chmod /
- * __wasix_path_chmod. See libc-bottom-half/sources/posix.c. */
-int __wasilibc_nocwd_openat_mode(int, const char *, int, mode_t)
-    __attribute__((__warn_unused_result__));
-int __wasilibc_nocwd_mkdirat_mode(int, const char *, mode_t)
-    __attribute__((__warn_unused_result__));
 int __wasilibc_nocwd_utimensat(int, const char *, const struct timespec [2], int)
     __attribute__((__warn_unused_result__));
 DIR *__wasilibc_nocwd_opendirat(int, const char *)

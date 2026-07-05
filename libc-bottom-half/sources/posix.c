@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -47,125 +46,10 @@ static int find_relpath_alt(const char *path, char **relative) {
     return fd;
 }
 
-// firebox#HXN: process-wide file-mode creation mask (umask). WASI/WASIX has no
-// kernel umask, so libc maintains it in guest memory. It rides proc_fork's
-// private-memory copy, so a child inherits the parent's umask exactly as on
-// Linux. Accessed with __atomic builtins so a threaded program's concurrent
-// umask()/open() are well-defined (matching the sibling accounting in mman.c).
-// Only the low 0777 permission bits are significant (POSIX: "only the file
-// permission bits of cmask are used"). The default 022 is the conventional
-// Linux login default; it also reproduces the 0644 the host historically
-// stamped for the common open(..., 0666) create, so honoring the mode is a
-// no-op for that case while newly respecting explicit modes.
-static int __wasilibc_umask_value = 0022;
-
-static mode_t __wasilibc_umask_get(void) {
-    return (mode_t)(__atomic_load_n(&__wasilibc_umask_value, __ATOMIC_SEQ_CST) & 0777);
-}
-
-// firebox#HXN: apply a caller-supplied creation mode to a freshly-created
-// object. WASI path_open carries no mode, so the host stamps DEFAULT_FILE_MODE
-// (0644); recover the requested mode by chmod-ing the descriptor we just
-// created, exactly as Linux applies (mode & ~umask) at create time. Best-
-// effort: we own the just-created object, so __wasix_fd_chmod cannot fail for
-// lack of privilege; a pathological failure leaves the host default rather than
-// failing an otherwise-successful open (which would leak the created fd). The
-// import does not touch the global errno, so a successful open's errno is left
-// undisturbed.
-static void __wasilibc_apply_create_mode(int fd, mode_t mode) {
-    mode_t eff = (mode & 07777) & ~__wasilibc_umask_get();
-    (void)__wasix_fd_chmod(fd, (uint32_t)eff);
-}
-
-// firebox#HXN: create-mode-aware open on an already-resolved (dirfd, relative)
-// pair. The WASI ABI has no mode field, so honor the caller's create mode by
-// chmod-ing the descriptor after a REAL create. The "did this open actually
-// create the object?" test must be exact — chmod-ing a pre-existing file the
-// caller merely opened with O_CREAT would corrupt its mode (a real bug), and
-// Linux ignores the mode argument entirely unless the file is created. Two
-// cases:
-//   * O_CREAT|O_EXCL: a successful open ALWAYS created the object (O_EXCL fails
-//     with EEXIST otherwise) — race-free, no probe needed.
-//   * O_CREAT without O_EXCL: the object may or may not have pre-existed. Probe
-//     with fstatat BEFORE the open (matching the open's O_NOFOLLOW symlink
-//     semantics); only chmod if it did not exist. The residual TOCTOU is
-//     benign: we only ever chmod the fd THIS call opened, so a concurrent
-//     creator in the tiny window at worst leaves the host default mode — never
-//     another file's mode.
-int __wasilibc_nocwd_openat_mode(int dirfd, const char *relative_path,
-                                 int oflag, mode_t mode) {
-    // firebox#HXN: preserve the caller's errno across our INTERNAL probe + chmod.
-    // The fstatat probe below fails ENOENT for the common create case (a file
-    // that does NOT yet exist), and __wasix_fd_chmod may perturb errno too —
-    // neither must leak into an otherwise-SUCCESSFUL open. rustc/LLVM read errno
-    // after opening their output stream and mis-report a stale ENOENT as "IO
-    // failure on output stream: No such file or directory" (this broke the whole
-    // rust toolchain in the #M4F warm-up gate — a successful create left
-    // errno=ENOENT). The old nomode open never touched errno on success; restore
-    // that invariant. On a REAL open failure we leave openat_nomode's errno.
-    int saved_errno = errno;
-    int probe_existed = 0;
-    if ((oflag & O_CREAT) && !(oflag & O_EXCL)) {
-        struct stat st;
-        int atflag = (oflag & O_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
-        if (__wasilibc_nocwd_fstatat(dirfd, relative_path, &st, atflag) == 0)
-            probe_existed = 1;
-    }
-
-    int fd = __wasilibc_nocwd_openat_nomode(dirfd, relative_path, oflag);
-    if (fd < 0)
-        return fd;   // real failure: openat_nomode set errno — leave it for the caller
-    if ((oflag & O_CREAT) && ((oflag & O_EXCL) || !probe_existed))
-        __wasilibc_apply_create_mode(fd, mode);
-    errno = saved_errno;   // success: hide the internal probe/chmod errno churn
-    return fd;
-}
-
-// firebox#HXN: create-mode-aware mkdir on an already-resolved (dirfd, relative)
-// pair. WASI's mkdirat carries no mode, so the host stamps DEFAULT_DIR_MODE
-// (0755). A successful mkdir ALWAYS created the directory (it fails EEXIST
-// otherwise), so honor the caller's mode unconditionally on success via
-// path_chmod (mode & ~umask), exactly as Linux does. Best-effort: the directory
-// exists regardless; a chmod hiccup must not fail an otherwise-successful mkdir,
-// and __wasix_path_chmod does not touch the global errno.
-int __wasilibc_nocwd_mkdirat_mode(int dirfd, const char *relative_path,
-                                  mode_t mode) {
-    int r = __wasilibc_nocwd_mkdirat_nomode(dirfd, relative_path);
-    if (r == 0) {
-        // firebox#HXN: as in openat_mode, don't let the internal chmod's errno
-        // churn leak into a SUCCESSFUL mkdir (the errno-transparency invariant
-        // the rust-toolchain break taught). Restore the post-mkdir errno.
-        int saved_errno = errno;
-        mode_t eff = (mode & 07777) & ~__wasilibc_umask_get();
-        (void)__wasix_path_chmod(dirfd, relative_path, strlen(relative_path),
-                                 (uint32_t)eff);
-        errno = saved_errno;
-    }
-    return r;
-}
-
 int open(const char *path, int oflag, ...) {
-    // WASI path_open carries no mode; capture the varargs mode (meaningful only
-    // when the open may create) and thread it to the create-mode-aware core,
-    // which applies it after a real create (firebox#HXN).
-    mode_t mode = 0;
-    if (oflag & O_CREAT) {
-        va_list ap;
-        va_start(ap, oflag);
-        mode = va_arg(ap, mode_t);
-        va_end(ap);
-    }
-
-    char *relative_path;
-    int dirfd = find_relpath(path, &relative_path);
-
-    // If we can't find a preopen for it, fail as if we can't find the path.
-    if (dirfd == -1) {
-        errno = ENOENT;
-        return -1;
-    }
-
-    return __wasilibc_nocwd_openat_mode(dirfd, relative_path, oflag, mode);
+    // WASI libc's `openat` ignores the mode argument, so call a special
+    // entrypoint which avoids the varargs calling convention.
+    return __wasilibc_open_nomode(path, oflag);
 }
 
 // See the documentation in libc.h
@@ -342,19 +226,12 @@ int mkdir(const char *path, mode_t mode) {
         return -1;
     }
 
-    return __wasilibc_nocwd_mkdirat_mode(dirfd, relative_path, mode);
+    return __wasilibc_nocwd_mkdirat_nomode(dirfd, relative_path);
 }
 
 mode_t umask(mode_t mode) {
-    // firebox#HXN: a real per-process umask. WASI/WASIX has no kernel umask, so
-    // libc maintains it (see __wasilibc_umask_value). Per POSIX, umask() sets
-    // the file-mode creation mask to the low 0777 bits of `mode` and returns
-    // the PREVIOUS mask; open()/openat()/mkdir()/mkdirat() then create objects
-    // with (requested_mode & ~umask). Atomic swap so a concurrent umask()/open()
-    // pair is well-defined.
-    int prev = __atomic_exchange_n(&__wasilibc_umask_value,
-                                   (int)(mode & 0777), __ATOMIC_SEQ_CST);
-    return (mode_t)(prev & 0777);
+    // WASI does not have the concept of umask
+    return mode;
 }
 
 int chmod(const char *path, mode_t mode) {
