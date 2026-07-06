@@ -800,6 +800,41 @@ static inline int __fbx_should_use_altstack(const struct k_sigaction *ksa) {
 
 __attribute__((export_name("__wasm_signal")))
 void __wasm_signal(int sig) {
+	/* firebox#93A — SIGCANCEL(33): act on a pending ASYNCHRONOUS cancel at this
+	 * cooperative delivery boundary (the #8B5 loop-header poll, or any syscall
+	 * drain). This is the RUNNING-thread half of the #5RE deferred-cancellation
+	 * model, completing its consumer matrix: (running, deferred) acts at a
+	 * cancellation point via __testcancel; (parked, async) acts via
+	 * __testcancel_async at the wait wrapper (pthread_cancel.c); (running,
+	 * async) — this arm — is the "any point" a compute-bound thread reaches.
+	 * Without it, an async pthread_cancel of a `for(;;)` spinner set the
+	 * cancel flag but never acted (no syscall → no cancellation point), so
+	 * pthread_join hung forever (functional/pthread_cancel TIMEOUT).
+	 *
+	 * POSIX: async cancellation (PTHREAD_CANCEL_ASYNCHRONOUS) is defined to take
+	 * effect at ANY point when cancellation is ENABLED. canceldisable is
+	 * honored: inside a PTHREAD_CANCEL_DISABLE bracket (including __timedwait's
+	 * internal bracket) this no-ops and the wait wrapper's __testcancel_async
+	 * (which deliberately ignores that internal bracket) acts instead — no
+	 * double-exit. A DEFERRED cancel (cancelasync==0) also no-ops here: the wake
+	 * was the effect and __testcancel acts at the next cancellation point.
+	 *
+	 * pthread_exit runs the pthread_cleanup_push handler LIFO walk + TSD dtors +
+	 * detach publish + join-wake and never returns; the interrupted computation
+	 * is ABANDONED (no asyncify rewind — the host unwinds the JIT frames via
+	 * WasiError::ThreadExit). Placed at the very top, before the reserved-range
+	 * drop and before any lock/in-handler bookkeeping (__eintr_handler_lock,
+	 * __wasm_in_handler), so the no-return exit strands no lock or dispatch
+	 * state. Keyed on sig==SIGCANCEL only: every other signal is byte-unchanged.
+	 * The reserved-range drop below then narrows to 32/34 (SIGTIMER/SIGSYNCCALL,
+	 * unused by wasix-libc); SIGCANCEL is no longer among the dropped. */
+	if (sig == SIGCANCEL) {
+		struct pthread *self = __pthread_self();
+		if (self && self->cancel && self->cancelasync
+		    && self->canceldisable == PTHREAD_CANCEL_ENABLE)
+			pthread_exit(PTHREAD_CANCELED);
+		return;
+	}
 	if (sig-32U < 3 || sig-1U >= _NSIG-1) {
 		return;
 	}
