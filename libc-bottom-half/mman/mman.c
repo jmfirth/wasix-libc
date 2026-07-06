@@ -261,6 +261,26 @@ static int wasix_range_unmapped(const void *addr, size_t len) {
     return a >= mem || end > mem;
 }
 
+// firebox#7KH: backing discriminator for a mapping's storage. An ANON mapping is
+// an address-space RESERVATION (a Linux VMA), not a heap object — it is served by
+// the reservation allocator below, OUT of the dlmalloc arena, so that multi-GiB
+// PROT_NONE map/unmap churn never enters dlmalloc's treebins (the source of the
+// regression/pthread_create-oom free-list corruption on BOTH widths — task 7KH
+// reports). A file-backed mapping keeps the aligned_alloc + pread emulation.
+#define WASIX_MMAN_BACKING_DLMALLOC 0
+#define WASIX_MMAN_BACKING_RESERVE  1
+
+// firebox#7KH: a struct-tail poison marking an already-unmapped header, so a
+// REPEATED munmap of a not-yet-reused range is a DEFINED silent `return 0` (Linux
+// munmap of an unmapped range succeeds) instead of a double-free / trap. It lives
+// at the END of struct map (see the munmap double-unmap note) precisely so it
+// survives a free-list node clobbering the payload start (reservation release) or
+// dlfree linkage written into the payload (dlmalloc release). `dead_magic` is only
+// ever 0 (live, set explicitly at map time) or WASIX_MMAN_DEAD (poisoned), so the
+// guard never false-positives on a fresh mapping. NO ABORT / __builtin_trap /
+// unreachable is introduced anywhere on the munmap path (the #W7T ghost mandate).
+#define WASIX_MMAN_DEAD ((size_t)0xDEADD00Du)
+
 struct map {
     int prot;
     int flags;
@@ -283,7 +303,229 @@ struct map {
     //                  handed back to the allocator would fault a normal access).
     size_t prefix;
     int host_protected;
+    // firebox#7KH: file-local storage discriminator + double-unmap poison. Both
+    // are at the END of the struct (dead_magic last) so a reservation free-list
+    // node or dlfree bin-linkage overwrite of the payload start cannot reach
+    // dead_magic. Neither crosses the libc boundary — struct map is file-local to
+    // mman.c (no ABI change, no exported symbol added).
+    int backing;         // WASIX_MMAN_BACKING_{DLMALLOC,RESERVE}
+    size_t dead_magic;   // 0 while live; WASIX_MMAN_DEAD once unmapped
 };
+
+// ── firebox#7KH: reservation allocator for ANON mappings ─────────────────────
+// On Linux, mmap(MAP_ANON) is an address-space RESERVATION — a VMA, pure kernel
+// bookkeeping, zero heap involvement, free overcommit. The pre-#7KH emulation
+// instead routed every anonymous mapping through aligned_alloc (→ dlmalloc
+// memalign), so t_vmfill's multi-GiB PROT_NONE map/unmap churn put GiB-scale
+// chunks into dlmalloc's treebins right at the memory.grow ceiling and corrupted
+// its free list (the [N]:0xffffffff OOB, both widths — task 7KH). This allocator
+// restores the Linux separation STRUCTURALLY: anonymous mappings are served from
+// linear memory obtained DIRECTLY from __builtin_wasm_memory_grow (never sbrk,
+// never malloc), tracked in an address-ordered intrusive free list (nodes live in
+// the freed extents themselves) that coalesces on insert. dlmalloc never sees the
+// churn, so it exhausts cleanly (sbrk GROWFAIL → malloc NULL) and pthread_create
+// returns EAGAIN. Carve granularity = WASIX_MMAN_PAGE_SIZE (4096), matching the
+// ANON path's aligned_alloc(prefix, …) contract byte-for-byte in structure.
+//
+// Disjoint by construction: each memory.grow returns the base of a range that
+// belongs exclusively to the caller. sbrk's #853 ownership model already treats
+// our grows as foreign (goes discontiguous around them); symmetrically this
+// allocator only ever owns ranges its OWN grows returned — no overlap possible,
+// no coordination beyond what #853 shipped. Fork: head + nodes live in private
+// linear memory, so a child inherits a coherent copy (same story as g_map_count).
+struct wasix_res_node {
+    struct wasix_res_node *next;   // next free extent, ascending address
+    size_t len;                    // extent length, multiple of WASIX_MMAN_PAGE_SIZE
+};
+static struct wasix_res_node *g_res_free_head;
+static volatile int g_res_lock;    // spinlock; alloc/free critical sections are short
+
+static void wasix_res_lock_acquire(void) {
+    while (__atomic_exchange_n(&g_res_lock, 1, __ATOMIC_ACQUIRE)) { /* spin */ }
+}
+static void wasix_res_lock_release(void) {
+    __atomic_store_n(&g_res_lock, 0, __ATOMIC_RELEASE);
+}
+
+// Current linear-memory size in bytes (the reservation allocator's high-water:
+// every address it hands out was returned by a memory.grow, so it is always
+// < wasix_mem_end()).
+static size_t wasix_res_mem_end(void) {
+    return (size_t)__builtin_wasm_memory_size(0) * (size_t)65536;
+}
+
+// Grow linear memory by `pages`, returning the byte-base of the freshly grown
+// extent, or (uintptr_t)-1 on failure. Two failure modes are folded into one
+// clean NULL-equivalent:
+//   1. memory.grow returns -1 (the ordinary ceiling-exhaustion signal).
+//   2. firebox#7KH/#845: on wasm64 the memory.grow page-DELTA is truncated to 32
+//      bits, so a request of >= 2^32 pages (which t_vmfill's mmap(SIZE_MAX/2)
+//      binary-search issues on wasm64 — up to ~2^47 pages) does NOT return -1; it
+//      returns the OLD size having grown by only `pages mod 2^32` (zero for the
+//      power-of-two probe sizes), i.e. memory.grow LIES about success. Trusting
+//      that lie would hand back a pointer into unbacked address space → OOB. We
+//      therefore VERIFY memory actually reached old+pages and treat any shortfall
+//      as failure — the huge request legitimately exceeds the ceiling, so ENOMEM
+//      is the faithful answer, and wasm64 exhaustion then behaves exactly like
+//      wasm32 (grow -1). (An allocator must never trust a grow it did not verify;
+//      the underlying wasm64 memory.grow u32-truncation is a separate substrate
+//      bug to fix in the runtime — this guard is correct defensive code either way.)
+static uintptr_t wasix_res_grow(size_t pages) {
+    if (pages == 0) return (uintptr_t)-1;
+    size_t old = __builtin_wasm_memory_grow(0, pages);
+    if (old == (size_t)-1) return (uintptr_t)-1;
+    if (__builtin_wasm_memory_size(0) < old + pages) return (uintptr_t)-1;  // truncated/partial grow
+    return (uintptr_t)old * (uintptr_t)65536;
+}
+
+// Insert [base, base+len) into the free list (address-ordered), coalescing with
+// adjacent extents in BOTH directions. If the range OVERLAPS an existing free
+// extent this is a repeated free (double-munmap of a reservation) — silently
+// ignore it: Linux munmap of an already-unmapped range succeeds, and a trap here
+// is forbidden (munmap/2-1, the #W7T ghost row). Caller holds g_res_lock.
+static void wasix_res_free_insert(uintptr_t base, size_t len) {
+    if (len == 0) return;
+    struct wasix_res_node **pp = &g_res_free_head;
+    struct wasix_res_node *prev = NULL, *n;
+    // Walk to the first extent at or past base.
+    while ((n = *pp) != NULL && (uintptr_t)n < base) {
+        if ((uintptr_t)n + n->len > base) return;   // overlap with predecessor
+        prev = n;
+        pp = &n->next;
+    }
+    if (n != NULL && base + len > (uintptr_t)n) return;   // overlap with successor
+    // Coalesce forward: [base,base+len) abuts the successor?
+    if (n != NULL && base + len == (uintptr_t)n) {
+        len += n->len;
+        n = n->next;                 // absorb successor; new node inherits its link
+    }
+    // Coalesce backward: the predecessor abuts base?
+    if (prev != NULL && (uintptr_t)prev + prev->len == base) {
+        prev->len += len;
+        prev->next = n;              // predecessor absorbs [base, …) (+ merged succ)
+        return;
+    }
+    // Otherwise write a fresh node at base, linking predecessor → base → n.
+    struct wasix_res_node *nn = (struct wasix_res_node *)base;
+    nn->next = n;
+    nn->len = len;
+    *pp = nn;
+}
+
+// First-fit carve of an `align`-aligned block of exactly `want` bytes (want a
+// multiple of WASIX_MMAN_PAGE_SIZE) from the free list. Head splinter [n, aligned)
+// and tail splinter [aligned+want, n_end) are 4096-granular (align ≥ 4096 and
+// every extent is 4096-granular, so a non-empty splinter is ≥ 4096 ≥ sizeof(node))
+// and stay on the list. Returns NULL if no extent fits. Caller holds g_res_lock.
+static void *wasix_res_carve(size_t align, size_t want) {
+    struct wasix_res_node **pp = &g_res_free_head;
+    struct wasix_res_node *n;
+    while ((n = *pp) != NULL) {
+        uintptr_t nbase = (uintptr_t)n;
+        uintptr_t nend  = nbase + n->len;
+        uintptr_t aligned = (nbase + (align - 1)) & ~(uintptr_t)(align - 1);
+        if (aligned + want > aligned /* no wrap */ && aligned + want <= nend) {
+            struct wasix_res_node *after = n->next;
+            uintptr_t head_len = aligned - nbase;
+            uintptr_t tail_start = aligned + want;
+            uintptr_t tail_len = nend - tail_start;
+            struct wasix_res_node *chain = after;
+            if (tail_len > 0) {
+                struct wasix_res_node *t = (struct wasix_res_node *)tail_start;
+                t->len = (size_t)tail_len;
+                t->next = after;
+                chain = t;
+            }
+            if (head_len > 0) {
+                n->len = (size_t)head_len;   // reuse n's slot in place (within head)
+                n->next = chain;
+                chain = n;
+            }
+            *pp = chain;
+            return (void *)aligned;
+        }
+        pp = &n->next;
+    }
+    return NULL;
+}
+
+// Return an `align`-aligned pointer to round_up(size, 4096) bytes from the free
+// list or directly from memory.grow — NEVER malloc/sbrk. NULL with no side effect
+// visible to malloc on exhaustion. *needs_zero = 1 iff the extent was REUSED
+// (fresh memory.grow pages are already zero by wasm semantics, so a fresh
+// PROT_NONE reservation needs no memset — this preserves Linux overcommit for
+// t_vmfill's multi-GiB fills). Caller must NOT hold g_res_lock.
+static void *wasix_res_alloc(size_t align, size_t size, int *needs_zero) {
+    size_t want;
+    if (__builtin_add_overflow(size, (size_t)WASIX_MMAN_PAGE_SIZE - 1, &want))
+        return NULL;
+    want &= ~((size_t)WASIX_MMAN_PAGE_SIZE - 1);
+    if (want == 0)
+        want = WASIX_MMAN_PAGE_SIZE;   // size==0 never reached (caller gates length>0)
+
+    wasix_res_lock_acquire();
+
+    // (1) First-fit carve from the free list (reused memory — always stale).
+    void *r = wasix_res_carve(align, want);
+    if (r) {
+        wasix_res_lock_release();
+        *needs_zero = 1;
+        return r;
+    }
+
+    // (2) Top-extension: if the HIGHEST free extent ends exactly at the current
+    // memory end, grow only the shortfall and merge, so t_vmfill's binary search
+    // reuses the top instead of burning the ceiling on dead fresh growth. A
+    // foreign grow interleaved (sbrk/dlmalloc, the dynamic linker) breaks the
+    // adjacency — detected via the grow-result base — so we insert the newly
+    // grown range as a FRESH extent rather than assume contiguity (#853 model).
+    struct wasix_res_node *hi = NULL;
+    for (struct wasix_res_node *s = g_res_free_head; s != NULL; s = s->next)
+        hi = s;                        // address-ordered list → tail = highest extent
+    size_t mem_end = wasix_res_mem_end();
+    if (hi != NULL && (uintptr_t)hi + hi->len == mem_end) {
+        uintptr_t aligned = ((uintptr_t)hi + (align - 1)) & ~(uintptr_t)(align - 1);
+        if (aligned + want > aligned) {           // no wrap
+            uintptr_t need_end = aligned + want;
+            if (need_end > mem_end) {
+                size_t shortfall = (size_t)(need_end - mem_end);
+                size_t pages = (shortfall + 65535) / 65536;
+                uintptr_t got = wasix_res_grow(pages);
+                if (got == (uintptr_t)-1) {
+                    wasix_res_lock_release();
+                    return NULL;                  // EXHAUSTION → mmap ENOMEM
+                }
+                size_t grown = pages * (size_t)65536;
+                if (got == (uintptr_t)mem_end) {
+                    hi->len += grown;             // contiguous: extend the top extent
+                } else {
+                    wasix_res_free_insert(got, grown);   // foreign grow: fresh extent
+                }
+                r = wasix_res_carve(align, want);
+                if (r) {
+                    wasix_res_lock_release();
+                    *needs_zero = 1;              // carve spans reused memory → stale
+                    return r;
+                }
+                // adjacency broke and carve still short → fall to fresh grow below
+            }
+        }
+    }
+
+    // (3) Fresh grow: a brand-new extent at the current memory end (zero pages).
+    size_t pages = (want + 65535) / 65536;
+    uintptr_t base = wasix_res_grow(pages);       // 64 KiB-aligned ≥ any align; verifies growth
+    if (base == (uintptr_t)-1) {
+        wasix_res_lock_release();
+        return NULL;                              // EXHAUSTION → mmap ENOMEM
+    }
+    size_t grown = pages * (size_t)65536;
+    if (grown > want)
+        wasix_res_free_insert(base + want, grown - want); // return the unused tail
+    wasix_res_lock_release();
+    *needs_zero = 0;                              // fresh pages are zero by wasm rule
+    return (void *)base;
+}
 
 // firebox#796: MAP_FIXED support for blink's wasm64 linear mapping.
 //
@@ -817,12 +1059,25 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         return MAP_FAILED;
     }
 
-    // Allocate prefix-aligned backing memory. (base + prefix) is the user-visible
-    // mapping; it is prefix-aligned (== 64 KiB / host-page aligned for an
-    // enforceable mapping) because aligned_alloc returns a prefix-aligned base.
-    void *base = aligned_alloc(prefix, buf_len);
+    // firebox#7KH: anonymous mappings are VMA reservations, not heap — back them
+    // from the reservation allocator (out of the dlmalloc arena) so GiB-scale ANON
+    // churn at the grow ceiling never corrupts dlmalloc's free list. File-backed
+    // mappings keep the aligned_alloc + pread emulation. `needs_zero` records
+    // whether the backing is STALE: dlmalloc memory always is; a reservation is
+    // stale only when reused from the free list (a fresh memory.grow extent is
+    // zero by wasm semantics). (base + prefix) is the user-visible mapping; it is
+    // prefix-aligned (== 64 KiB / host-page aligned for an enforceable mapping)
+    // because both backings return a prefix-aligned base.
+    const int reserve_backed = (flags & MAP_ANON) != 0;
+    int needs_zero = 1;                       // dlmalloc memory is always stale
+    void *base;
+    if (reserve_backed) {
+        base = wasix_res_alloc(prefix, buf_len, &needs_zero);
+    } else {
+        base = aligned_alloc(prefix, buf_len);
+    }
     if (!base) {
-        errno = ENOMEM;
+        errno = ENOMEM;                       // POSIX mmap exhaustion errno
         return MAP_FAILED;
     }
 
@@ -841,13 +1096,23 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     map->body_len = body_len;
     map->prefix = prefix;
     map->host_protected = 0;
+    map->backing = reserve_backed ? WASIX_MMAN_BACKING_RESERVE
+                                  : WASIX_MMAN_BACKING_DLMALLOC;
+    map->dead_magic = 0;              // live (poisoned to WASIX_MMAN_DEAD in munmap)
 
-    // firebox#7C5: zero the ENTIRE body up front (aligned_alloc does not zero).
-    // This guarantees the partial-page tail [filelen, body_len) reads as zero
-    // for a file-backed mapping (11-4/5/6) and that an ANON mapping is fully
-    // zero — the subsequent pread overwrites only the bytes actually present in
-    // the file, leaving the tail zero-filled.
-    memset(addr, 0, body_len);
+    // firebox#7C5/#7KH: zero the ENTIRE body up front so the partial-page tail
+    // [filelen, body_len) reads as zero for a file-backed mapping (11-4/5/6) and
+    // an ANON mapping is fully zero. SKIP the memset when the backing is a FRESH
+    // reservation extent (needs_zero==0, already zero) AND the mapping is
+    // PROT_NONE: a PROT_NONE map has no legal read (no guest mprotect() exists in
+    // wasix-libc to make it readable; native additionally host-faults access), so
+    // its zeroing is unobservable — and skipping it is exactly what preserves
+    // Linux overcommit for t_vmfill's multi-GiB PROT_NONE fills (writing them
+    // would commit ~3.75 GiB of host pages the test never reads). A file-backed
+    // mapping (reserve_backed==0, needs_zero==1) is memset exactly as before; the
+    // subsequent pread overwrites only the file bytes, leaving the tail zero.
+    if (needs_zero && !(reserve_backed && prot == PROT_NONE))
+        memset(addr, 0, body_len);
 
     // Initialize the main memory buffer with the contents of a file (the tail
     // past EOF stays zero from the memset above). ANON mappings are already
@@ -1017,6 +1282,18 @@ int munmap(void *addr, size_t length) {
     // prefix — see the mmap layout note).
     struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
 
+    // firebox#7KH: DEFINED double-munmap. A repeated munmap of a not-yet-reused
+    // range returns 0 (Linux munmap of an already-unmapped range succeeds). The
+    // dead_magic poison lives at the struct tail, so it survives the reservation
+    // free-list node (or dlfree bin linkage) that clobbers the payload start on
+    // the first unmap. This is placed BEFORE the length check: a double-unmap must
+    // return 0, not EINVAL, and the length field may itself have been clobbered.
+    // NO trap of any kind here — this turns an accidentally-benign UB corner into
+    // a defined no-op (the opposite of the #W7T ghost regression).
+    if (map->dead_magic == WASIX_MMAN_DEAD) {
+        return 0;
+    }
+
     // We don't support partial munmapping.
     if (map->length != length) {
         errno = EINVAL;
@@ -1052,11 +1329,29 @@ int munmap(void *addr, size_t length) {
                                  PROT_READ | PROT_WRITE);
     }
 
-    // Release the memory. free() must see the same pointer aligned_alloc
-    // returned — addr - prefix (== the header for a legacy 4 KiB mapping, or the
-    // 64 KiB prefix base for a host-protected mapping), not the offset user
-    // pointer.
-    free((char *)addr - map->prefix);
+    // firebox#7KH: poison the header BEFORE releasing, so a second munmap of this
+    // not-yet-reused range hits the dead_magic guard above and returns 0. The
+    // reservation free-list node clobbers only the payload start (dead_magic is at
+    // the struct tail, untouched).
+    map->dead_magic = WASIX_MMAN_DEAD;
+
+    // Release the backing. A reservation-backed ANON mapping goes back to the
+    // reservation free list (NEVER to dlmalloc) — the whole point is that ANON
+    // churn stays out of the dlmalloc arena. A file-backed mapping frees the
+    // aligned_alloc base exactly as before. free()/the free list see the same
+    // pointer the backing returned — addr - prefix (== the header for a legacy
+    // 4 KiB mapping, or the 64 KiB prefix base for a host-protected mapping).
+    if (map->backing == WASIX_MMAN_BACKING_RESERVE) {
+        // ext == buf_len == prefix + body_len (both 4 KiB-granular), the exact
+        // extent wasix_res_alloc carved; round_up is identity but kept explicit.
+        size_t ext = map->prefix + map->body_len;
+        ext = (ext + (WASIX_MMAN_PAGE_SIZE - 1)) & ~(WASIX_MMAN_PAGE_SIZE - 1);
+        wasix_res_lock_acquire();
+        wasix_res_free_insert((uintptr_t)addr - map->prefix, ext);
+        wasix_res_lock_release();
+    } else {
+        free((char *)addr - map->prefix);
+    }
 
     // firebox#9VY-24: balance the private-map increment (vm.max_map_count).
     wasix_map_count_dec();
