@@ -33,8 +33,19 @@ extern int open(const char *path, int flags, ...);
 // WebAssembly doesn't support shrinking linear memory.
 #define MORECORE_CANNOT_TRIM 1
 
-// Disable sanity checks to reduce code size.
-#define ABORT __builtin_unreachable()
+// firebox#7KH: a detected heap corruption / failed allocator assertion must be
+// a DETERMINISTIC fail-stop, never silent UB. Upstream wasi-libc defines this as
+// __builtin_unreachable() purely to shrink code, but that tells the compiler the
+// CORRUPTION_ERROR_ACTION / USAGE_ERROR_ACTION path is IMPOSSIBLE — so a real
+// free-list inconsistency (unlink_large_chunk's ok_address/fd-bk check, etc.)
+// lowers to undefined behavior that can hand out poisoned pointers and surfaces
+// as the opaque "[N]:0xffffffff" OOB trap that hid #7KH/#674's root cause for a
+// full investigation. __builtin_trap() emits a wasm `unreachable` — a clean,
+// diagnosable trap AT the point of detection (Invariant 0: faithful all the way
+// down — a corruption is caught, not laundered into UB). The size delta is
+// negligible next to the safety, and this path is unreachable in correct
+// operation, so it never affects the hot allocator paths.
+#define ABORT __builtin_trap()
 
 // If threads are enabled, enable support for threads.
 #ifdef _REENTRANT

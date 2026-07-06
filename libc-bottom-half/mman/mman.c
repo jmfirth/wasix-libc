@@ -847,7 +847,37 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     // for a file-backed mapping (11-4/5/6) and that an ANON mapping is fully
     // zero — the subsequent pread overwrites only the bytes actually present in
     // the file, leaving the tail zero-filled.
-    memset(addr, 0, body_len);
+    //
+    // firebox#7KH: EXCEPT a PROT_NONE anonymous mapping, which is a pure
+    // address-space RESERVATION. On Linux such a map is demand-zero OVERCOMMIT
+    // (0 physical pages until it is mprotect'd accessible and touched), so
+    // eagerly zero-filling its whole body force-commits every reserved page —
+    // e.g. t_vmfill's "fill the address space with PROT_NONE maps" idiom writes
+    // ~3.75 GiB of host RAM it never reads. The zero-fill is also UNOBSERVABLE
+    // for PROT_NONE: the region has no legal access, and on native the enforce
+    // path below host-mprotect's it PROT_NONE so a guest access FAULTS (a real
+    // SIGSEGV — strictly MORE faithful than reading back zero). So skip the
+    // memset for ANON+PROT_NONE, restoring overcommit; the host pages stay
+    // demand-zero. STRICTLY prot == PROT_NONE only: any readable/writable ANON
+    // prot IS legally accessible and MUST read zero (a recycled dlmalloc chunk
+    // would otherwise leak stale bytes), so every other prot keeps the memset.
+    // Edge note: wasix-libc ships NO guest mprotect() (musl mman/mprotect.c is
+    // not in the build; no mprotect symbol links), so the
+    // reserve-PROT_NONE-then-mprotect-then-read sequence is unreachable today; a
+    // future guest mprotect() MUST zero on the PROT_NONE→readable transition to
+    // keep anon demand-zero semantics faithful.
+    //
+    // SCOPE (measured, #7KH): this restores overcommit for the HOST physical
+    // backing only — it does NOT change the wasm linear-memory INDEX growth,
+    // because aligned_alloc above already grew memory.size to reserve the range.
+    // So on its own it does NOT prevent the #7KH exhaustion corruption (that is
+    // a dlmalloc free-list inconsistency from routing multi-GiB reservations
+    // through the heap allocator; the faithful fix routes ANON reservations OUT
+    // of the dlmalloc arena — see the #7KH bail report). Kept as an independent
+    // Invariant-0 faithfulness improvement (demand-zero overcommit).
+    if (!((flags & MAP_ANON) != 0 && prot == PROT_NONE)) {
+        memset(addr, 0, body_len);
+    }
 
     // Initialize the main memory buffer with the contents of a file (the tail
     // past EOF stays zero from the memset above). ANON mappings are already
