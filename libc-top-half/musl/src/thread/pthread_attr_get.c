@@ -23,13 +23,25 @@ int pthread_attr_getschedparam(const pthread_attr_t *restrict a, struct sched_pa
 	param->sched_priority = a->_a_prio;
 	return 0;
 }
+#endif
 
+/* firebox#WRQ — un-guarded from the upstream __wasilibc_unmodified_upstream
+ * block. The companion setter pthread_attr_setschedpolicy is already built and
+ * linking (it stores a->_a_policy after validating the policy), and the header
+ * declaration (pthread.h:164) is ALREADY un-guarded — only this definition was
+ * left inside the guard, so pthread_attr_getschedpolicy was an undefined symbol
+ * and Open POSIX pthread_attr_getschedpolicy/2-1 (set SCHED_FIFO/RR/OTHER, read
+ * each back) BUILDFAILed at link. WASI has no CPU scheduler so the policy has no
+ * runtime effect, but the attribute object must still report faithfully what was
+ * set, per POSIX — the same round-trip stance as the #CDZ mutex-protocol fix.
+ * pthread_attr_getschedparam stays guarded above because its header declaration
+ * (pthread.h:167) is still guarded: the schedpolicy(un-guarded)/schedparam
+ * (guarded) get+set asymmetry mirrors the header exactly. */
 int pthread_attr_getschedpolicy(const pthread_attr_t *restrict a, int *restrict policy)
 {
 	*policy = a->_a_policy;
 	return 0;
 }
-#endif
 
 int pthread_attr_getscope(const pthread_attr_t *restrict a, int *restrict scope)
 {
@@ -58,17 +70,28 @@ int pthread_barrierattr_getpshared(const pthread_barrierattr_t *restrict a, int 
 	return 0;
 }
 
-#ifdef __wasilibc_unmodified_upstream /* Forward declaration of WASI's `__clockid` type. */
+/* firebox#WRQ — un-guarded from the upstream __wasilibc_unmodified_upstream
+ * block. The companion setter pthread_condattr_setclock already links and the
+ * header declaration (pthread.h:190) is ALREADY un-guarded — only this
+ * definition was left guarded, so pthread_condattr_getclock was an undefined
+ * symbol and 12 Open POSIX rows (the two direct getclock tests plus 10 moat cond
+ * broadcast/signal/wait tests that build a CLOCK_MONOTONIC condvar) BUILDFAILed
+ * at link.
+ *
+ * Body note (corrects the audit's assumption): the built musl top-half compiles
+ * with clockid_t == `int` (the fork's <time.h> takes musl's `typedef int
+ * clockid_t`, NOT the pointer-to-`struct __clockid` from
+ * libc-bottom-half/headers/public/__typedef_clockid_t.h). The linking setter is
+ * ground truth — pthread_condattr_setclock.c does `a->__attr |= clk` treating
+ * clk as an integer. So the getter must mirror that with `*clk = ...`; the
+ * upstream #else branch `clk->id = ...` assumes the struct shape and would fail
+ * to compile here (`int` has no member `id`). Reading back the low 31 bits
+ * round-trips exactly what setclock stored. */
 int pthread_condattr_getclock(const pthread_condattr_t *restrict a, clockid_t *restrict clk)
 {
-#ifdef __wasilibc_unmodified_upstream
 	*clk = a->__attr & 0x7fffffff;
-#else
-	clk->id = (__wasi_clockid_t)(a->__attr & 0x7fffffff);
-#endif
 	return 0;
 }
-#endif
 
 int pthread_condattr_getpshared(const pthread_condattr_t *restrict a, int *restrict pshared)
 {
@@ -106,6 +129,29 @@ int pthread_mutexattr_getrobust(const pthread_mutexattr_t *restrict a, int *rest
 int pthread_mutexattr_gettype(const pthread_mutexattr_t *restrict a, int *restrict type)
 {
 	*type = a->__attr & 3;
+	return 0;
+}
+
+/* firebox#WRQ — mutex-attribute priority-ceiling getter. The header declares it
+ * (pthread.h:174) but neither get nor set had a definition, so it was an
+ * undefined symbol and Open POSIX pthread_mutexattr_getprioceiling/3-1
+ * BUILDFAILed at link. The companion setter
+ * (pthread_mutexattr_setprioceiling.c) stores the ceiling in bits 8-15 of
+ * __attr — a field the mutex lock path never reads (trylock/lock/timedlock/
+ * unlock mask __attr/_m_type only with 3/4/8/12/15/128, all in bits 0-7; the
+ * #CDZ protocol field at bits 4-5 is likewise excluded from those masks), so
+ * the ceiling round-trips through the attribute object without ever reaching
+ * the PI/robust lock logic. WASI models no priority scheduler, so
+ * PTHREAD_PRIO_PROTECT has no runtime effect; per POSIX the attribute must still
+ * report faithfully what was set. See pthread_mutexattr_setprioceiling.c for the
+ * field layout + range validation. (Test 3-1 reads an UNINITIALIZED attr and
+ * accepts either 0 or EINVAL — returning the stored field, 0-valued for a zeroed
+ * or init'd attr, satisfies the "may fail" clause.) */
+#define __MUTEXATTR_PRIOCEILING_SHIFT 8
+#define __MUTEXATTR_PRIOCEILING_MASK  (0xffU << __MUTEXATTR_PRIOCEILING_SHIFT)
+int pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *restrict a, int *restrict prioceiling)
+{
+	*prioceiling = (int)((a->__attr & __MUTEXATTR_PRIOCEILING_MASK) >> __MUTEXATTR_PRIOCEILING_SHIFT);
 	return 0;
 }
 
