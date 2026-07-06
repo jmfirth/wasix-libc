@@ -261,7 +261,29 @@ static int wasix_range_unmapped(const void *addr, size_t len) {
     return a >= mem || end > mem;
 }
 
+// firebox#W7T: a live-mapping sentinel written into every malloc-backed
+// mapping header at mmap() time and CLEARED (poisoned) by munmap() just before
+// the backing is free()d. It lets munmap()/msync() distinguish a header that
+// still describes a LIVE mapping from the FREED memory left one page below addr
+// after a prior unmap. On Linux, munmap() of an already-unmapped range is a
+// no-op returning 0 (munmap/2-1 double-unmaps the same range); the emulated
+// mman keeps no VMA registry for malloc-backed maps, so before this sentinel it
+// blindly recovered the freed header and re-free()d it — a double free the
+// mallocng allocator traps (get_meta()/nontrivial_free() assert -> a_crash() ->
+// __builtin_trap -> wasm `unreachable`). The value is an arbitrary,
+// unlikely-to-collide constant ("MMAP"); a stale/foreign 4 bytes matching it AND
+// the exact munmap length is ~2^-32 and requires a guest use-after-unmap, so the
+// sentinel is a sound, minimal probe for the whole-mapping emulation (which
+// already rejects partial unmaps). It is NOT a substitute for a full VMA
+// registry — see work/tasks/W7T-*.
+#define WASIX_MMAN_MAGIC ((unsigned)0x4D4D4150u)   /* "MMAP" */
+
 struct map {
+    // firebox#W7T: live-mapping sentinel (== WASIX_MMAN_MAGIC while mapped, 0
+    // after munmap() poisons it before free()). MUST stay first so it sits at
+    // the very start of the header page (addr - WASIX_MMAN_PAGE_SIZE), which
+    // mallocng's free-time in-band writes (at base-2/-3/-4/-8) never touch.
+    unsigned magic;
     int prot;
     int flags;
     off_t offset;
@@ -834,6 +856,7 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     // (for the legacy 4 KiB prefix this is `base` itself; for the 64 KiB prefix
     // it is the last 4 KiB slot of the prefix page).
     struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
+    map->magic = WASIX_MMAN_MAGIC;   // firebox#W7T: mark this mapping LIVE
     map->prot = prot;
     map->flags = flags;
     map->offset = offset;
@@ -1017,7 +1040,26 @@ int munmap(void *addr, size_t length) {
     // prefix — see the mmap layout note).
     struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
 
-    // We don't support partial munmapping.
+    // firebox#W7T: is there a LIVE malloc-backed mapping here? POSIX/Linux:
+    // munmap() of a range with no mappings "has no effect" and returns 0
+    // (munmap/2-1 maps a page, unmaps it, then unmaps the SAME range again —
+    // the second call must be a no-op). The emulated mman keeps no VMA registry
+    // for malloc-backed maps, so a second unmap would recover the now-FREED
+    // header below addr and re-free() it — a double free the mallocng allocator
+    // traps (get_meta()/nontrivial_free() assert -> a_crash() -> __builtin_trap
+    // -> wasm `unreachable`; this is the munmap/2-1 wasm32 regression). The live
+    // mapping carries WASIX_MMAN_MAGIC, cleared below before free(); if the
+    // sentinel is absent the range is already-unmapped (or was never a
+    // malloc-backed mapping) and we must NOT touch the header — return the Linux
+    // no-op. The geometry EINVAL preconditions above still run first, so
+    // munmap((void*)-1,...) (munmap/8-1, routed through the window branch) and a
+    // zero-length unmap (munmap/9-1) keep returning EINVAL, not 0.
+    if (map->magic != WASIX_MMAN_MAGIC) {
+        return 0;
+    }
+
+    // We don't support partial munmapping. (Only reachable for a LIVE mapping;
+    // a length mismatch on a real mapping is still EINVAL, unchanged.)
     if (map->length != length) {
         errno = EINVAL;
         return -1;
@@ -1051,6 +1093,16 @@ int munmap(void *addr, size_t length) {
         __wasilibc_mprotect_host((uintptr_t)addr, map->body_len,
                                  PROT_READ | PROT_WRITE);
     }
+
+    // firebox#W7T: poison the live-mapping sentinel BEFORE releasing the
+    // backing. A double munmap of this same range (munmap/2-1) then reads the
+    // cleared magic above and no-ops (return 0) instead of recovering this
+    // now-freed header and re-free()ing it (the mallocng double-free trap). The
+    // header is still live RW memory here (the #SAH host-protect covers only the
+    // body [addr, addr+body_len), never the prefix page that holds the header),
+    // so this store is sound; map->prefix below is read while the header is
+    // still valid, before free() reclaims it.
+    map->magic = 0;
 
     // Release the memory. free() must see the same pointer aligned_alloc
     // returned — addr - prefix (== the header for a legacy 4 KiB mapping, or the
