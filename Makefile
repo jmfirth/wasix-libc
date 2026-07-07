@@ -228,6 +228,9 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         wasix/reflection.c \
         wasix/context.c \
         wasix/flock.c \
+        aio/aio.c \
+        aio/aio_suspend.c \
+        aio/lio_listio.c \
     ) \
     $(filter-out %/procfdname.c %/syscall.c %/syscall_ret.c %/vdso.c %/version.c, \
                  $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/internal/*.c)) \
@@ -535,8 +538,11 @@ MUSL_OMIT_HEADERS += \
     "netinet/if_ether.h" \
     "netinet/ether.h" \
     "sys/timerfd.h" \
-    "sys/sysmacros.h" \
-    "aio.h"
+    "sys/sysmacros.h"
+# firebox#5DB — aio.h is NO LONGER omitted: POSIX AIO is now provided (musl's
+# thread-backed src/aio/*.c, enabled above). The header ships so aio_read/
+# aio_write/aio_error/aio_return/aio_suspend/aio_cancel/aio_fsync/lio_listio +
+# struct aiocb are visible (closes the build:no-posix-aio conformance class).
 
 ifeq ($(THREAD_MODEL), single)
 # Remove headers not supported in single-threaded mode.
