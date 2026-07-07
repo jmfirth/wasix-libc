@@ -179,6 +179,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         time/__secs_to_tm.c \
         time/__year_to_secs.c \
         time/__tz.c \
+        time/timer_create.c \
         fcntl/creat.c \
         dirent/alphasort.c \
         dirent/versionsort.c \
