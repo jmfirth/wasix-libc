@@ -5,7 +5,11 @@
 #include <signal.h>
 #include <unistd.h>
 #include "syscall.h"
+#ifndef __wasilibc_unmodified_upstream
+#include "mq_impl.h" /* firebox#KS9 */
+#endif
 
+#ifdef __wasilibc_unmodified_upstream
 struct args {
 	pthread_barrier_t barrier;
 	int sock;
@@ -28,9 +32,13 @@ static void *start(void *p)
 		func(val);
 	return 0;
 }
+#endif /* __wasilibc_unmodified_upstream */
 
 int mq_notify(mqd_t mqd, const struct sigevent *sev)
 {
+#ifndef __wasilibc_unmodified_upstream
+	return __fbx_mq_notify(mqd, sev);
+#else
 	struct args args = { .sev = sev };
 	pthread_attr_t attr;
 	pthread_t td;
@@ -70,4 +78,5 @@ int mq_notify(mqd_t mqd, const struct sigevent *sev)
 	}
 
 	return 0;
+#endif /* __wasilibc_unmodified_upstream */
 }

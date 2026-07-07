@@ -250,6 +250,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/process/*.c) \
     $(filter-out %/sched_yield.c, \
                  $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/sched/*.c)) \
+    $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/mq/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/env/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/exit/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/search/*.c) \
