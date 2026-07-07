@@ -18,6 +18,18 @@
 static void dummy(int x) { }
 weak_alias(dummy, __aio_atfork);
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#VYD — clear the child's queued/pending signal state (defined in
+ * signal/sigaction.c). POSIX fork(2): the child's set of pending signals is
+ * empty. The child inherits a COPY of the parent's linear memory, so without
+ * this its __fbx_rtsigq RT ring keeps the parent's queued records — and since
+ * regression/raise-race's handler1 fork()s from INSIDE the ring-drain loop, a
+ * child with a non-empty ring would re-enter that loop and fork grandchildren
+ * unboundedly. Clearing here makes the child's drain re-check see an empty ring
+ * and exit. */
+extern void __fbx_clear_pending_on_fork(void);
+#endif
+
 pid_t _Fork(int copy_mem)
 {
 	pid_t ret;
@@ -72,6 +84,13 @@ pid_t _Fork(int copy_mem)
 #endif
 	if (!ret) {
 		pthread_t self = __pthread_self();
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#VYD — POSIX: the child starts with an EMPTY pending-signal
+		 * set. Clear the inherited __fbx_rtsigq ring + pending bitmasks so a
+		 * child forked from inside an RT signal handler's ring-drain does not
+		 * re-deliver the parent's queued instances (regression/raise-race). */
+		__fbx_clear_pending_on_fork();
+#endif
 #ifdef __wasilibc_unmodified_upstream
 		self->tid = __syscall(SYS_gettid);
 #else

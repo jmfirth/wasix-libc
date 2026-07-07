@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>  /* firebox#KKR — offsetof() for __fbx_blocked_off */
 #include <string.h>
+#include <unistd.h>  /* firebox#VYD — getpid()/getuid() for the self-raise ring record */
 #include <sysexits.h>
 #ifndef __wasilibc_unmodified_upstream
 #include <wasi/api.h>
@@ -216,7 +217,14 @@ static volatile int __wasm_nodefer_active[_NSIG];
 #define __FBX_RTSIG_MIN   35              /* == __libc_current_sigrtmin() */
 #define __FBX_RTSIG_MAX   (_NSIG - 1)     /* 64 == __libc_current_sigrtmax() */
 #define __FBX_RTSIG_N     (__FBX_RTSIG_MAX - __FBX_RTSIG_MIN + 1)   /* 30 */
-#define __FBX_SIGQ_DEPTH  32              /* >= _POSIX_SIGQUEUE_MAX (32) */
+/* firebox#VYD — per-signal RT queue depth. Raised 32 -> 128: regression/raise-race
+ * cross-thread-kills a compute-bound worker 100x on ONE RT signal, so up to ~100
+ * instances can be queued on a single signo before a drain point runs. 128 = the
+ * test's worst case + margin. This is our RLIMIT_SIGPENDING analog (over-cap policy
+ * in __fbx_rtsigq_push: EAGAIN for SI_QUEUE, degrade-to-coalesce for SI_USER/SI_TKILL
+ * — both Linux-faithful). BSS cost: 30 sigs * 128 * sizeof(ent) ~= 92KB static, fine
+ * in wasm linear memory. sysconf(_SC_SIGQUEUE_MAX) still reports the POSIX floor (32). */
+#define __FBX_SIGQ_DEPTH  128             /* >= _POSIX_SIGQUEUE_MAX (32); #VYD RLIMIT_SIGPENDING analog */
 
 /* Field names deliberately avoid si_pid/si_uid/si_value: those are <signal.h>
  * accessor MACROS for siginfo_t (e.g. si_pid ->
@@ -318,6 +326,53 @@ void __fbx_rtsig_repend(int sig) {
 	int bit  = 1 << ((sig - 1) % 32);
 	if (self) a_or((volatile int *)&self->pending_sigs[word], bit);
 	a_or(&__wasm_pending_sigs[word], bit);
+}
+
+/* firebox#VYD — is a real USER handler installed for `sig` (as opposed to
+ * SIG_DFL or SIG_IGN)? __fbx_handler_set records the bit ONLY for a real
+ * handler (see __libc_sigaction: `sa_handler != SIG_DFL && != SIG_IGN`), so
+ * this is the exact discriminator __wasm_raise_self needs to decide whether an
+ * unblocked self-raise can be delivered synchronously in-guest (a handler runs)
+ * versus routed to the host (which owns the SIG_DFL terminate/core/ignore
+ * default + parent waitpid encoding). */
+static inline int __fbx_handler_installed(int sig) {
+	if (sig < 1 || sig >= _NSIG) return 0;
+	return (__fbx_handler_set[(sig-1)/(8*sizeof(long))]
+	        >> ((sig-1)%(8*sizeof(long)))) & 1UL;
+}
+
+/* firebox#VYD — clear ALL queued/pending signal state for the CALLING thread's
+ * process. POSIX fork(2): "the child process shall have ... the set of signals
+ * pending for the child process is cleared." Called from _Fork's child branch
+ * (the child inherits a COPY of the parent's linear memory, so without this the
+ * child's __fbx_rtsigq ring keeps the parent's queued RT records). This is both
+ * the faithful "child pending set is empty" AND the fix that prevents the
+ * async-fork-in-handler explosion regression/raise-race pins: handler1 fork()s
+ * from INSIDE the RT ring-drain loop, so a child that inherited a non-empty ring
+ * would re-enter the drain loop and fork grandchildren unboundedly. Clearing
+ * here makes the child's `while(__fbx_rtsigq_pop_si(...))` re-check see an empty
+ * ring and exit cleanly. Runs on the calling (sole surviving) thread only; the
+ * host gives the child a fresh empty per-thread signal queue (proc_fork), so
+ * this reconciles the guest depth store with the host's fresh state. */
+void __fbx_clear_pending_on_fork(void) {
+	/* Clear every per-signal RT ring. Reset lock words too — the child is
+	 * single-threaded at this point, so any lock held by a now-gone sibling
+	 * (or by this thread mid-op at the fork snapshot) must not wedge it. */
+	for (int i = 0; i < __FBX_RTSIG_N; i++) {
+		__fbx_rtsigq[i].lock[0] = 0;
+		__fbx_rtsigq[i].head = 0;
+		__fbx_rtsigq[i].count = 0;
+	}
+	/* Clear the process-wide + this-thread pending bitmasks. */
+	for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
+		__wasm_pending_sigs[w] = 0;
+	}
+	struct pthread *self = __pthread_self();
+	if (self) {
+		for (int w = 0; w < ((_NSIG + 31) / 32); w++) {
+			self->pending_sigs[w] = 0;
+		}
+	}
 }
 
 /* firebox#EMN — cross-process sigqueue si_value pull.
@@ -1013,7 +1068,42 @@ void __wasm_signal(int sig) {
 					h3(sig, &si, NULL);
 				}
 			}
+		} else if (__fbx_sig_is_rt(sig)) {
+			/* firebox#VYD — 1-arg RT dispatch delivers RECORDS-ONLY.
+			 *
+			 * A 1-arg handler (installed via signal() or sigaction() without
+			 * SA_SIGINFO — the regression/raise-race case) carries no siginfo,
+			 * so it just needs the COUNT of queued instances. Drain the guest
+			 * __fbx_rtsigq ring (self-raise via __wasm_raise_self/#RSQ, and
+			 * cross-thread pthread_kill / self kill()/killpg via #VYD-G2), then
+			 * the host external stash (cross-process kill/sigqueue via #EMN/#VYD-H1),
+			 * calling the handler ONCE per record. This is the branch raise-race
+			 * executes; before #VYD it called the handler once regardless of ring
+			 * depth (under-delivering a queued RT signal to a 1-arg handler).
+			 *
+			 * If NO record is consumed, deliver ZERO (a spurious doorbell — the
+			 * host WasiThread::signal Vec coalesces, so a second dispatch can land
+			 * after the ring was already drained by a prior one; Linux never
+			 * over-delivers). This closes the §3.4 over-count race that G2 opens.
+			 * Every genuine RT instance is recorded exactly once before its
+			 * doorbell (guest ring for same-process, host stash for external), so
+			 * handler-invocation count == records consumed regardless of how many
+			 * (coalesced) doorbells fire. The applied sa_mask holds across the
+			 * whole drain (`sig` stays blocked), identical to Linux re-applying
+			 * the mask per back-to-back delivery of the same signo. */
+			siginfo_t si;
+			while (__fbx_rtsigq_pop_si(sig, &si)) {
+				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
+				else ksa.handler(sig);
+			}
+			while (__fbx_signal_info_fill_si(sig, &si)) {
+				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
+				else ksa.handler(sig);
+			}
+			/* no record consumed -> deliver ZERO (spurious doorbell) */
 		} else {
+			/* Standard signal (1..31): at-most-one-pending coalescing — deliver
+			 * ONCE (the pending bitmask has no depth; unchanged pre-#VYD path). */
 			if (on_alt) {
 				__fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
 			} else {
@@ -1084,6 +1174,38 @@ void __wasm_signal(int sig) {
 	}
 }
 
+/* firebox#VYD — deliver every queued RT signal that is currently deliverable on
+ * THIS thread, synchronously in-guest. This is the raise()-boundary drain: Linux
+ * delivers all deliverable pending signals at every kernel->user transition, so
+ * each of regression/raise-race's 1000 raise() calls is a delivery point for the
+ * 100 cross-thread SIGRTMIN+1 kills main fires concurrently — which is what lets
+ * them land DURING the raise loop (where handler1's fork() hits `if(child)_exit`)
+ * rather than during the later `while(c1<100)` spin (where a fork would inherit a
+ * frozen c1 and hang — exactly Linux's own timing envelope for this test).
+ *
+ * Ring-DRIVEN (not pending-bit-driven): dispatches __wasm_signal(s) for every RT
+ * signal with a non-empty ring, an installed user handler, unblocked on this
+ * thread, and not already mid-dispatch. __wasm_signal drains the whole ring for
+ * `s` (the #VYD 1-arg / SA_SIGINFO drain), so ONE call delivers the full queued
+ * depth. Ring-driven so it is robust against the post-handler __wasm_drain_pending
+ * host-re-raise clearing the pending bit while the ring records remain (that path
+ * re-raises via the host, which DEFERS a self-target — thread_signal.rs — so it
+ * cannot deliver inline; the ring is the depth truth and we drain it directly).
+ *
+ * We call __wasm_signal directly (as __wasm_raise_self's NODEFER arm already
+ * does) — NOT __wasi_thread_signal — precisely because a self-target host nudge
+ * is deferred, not dispatched. */
+void __wasm_deliver_pending_rt_inline(void) {
+	if (__wasm_signals_blocked) return;
+	for (int s = __FBX_RTSIG_MIN; s <= __FBX_RTSIG_MAX; s++) {
+		if (__fbx_rtsigq_count(s) <= 0) continue;
+		if (!__fbx_handler_installed(s)) continue;
+		if (__wasm_in_handler[s] > 0) continue;
+		if (__wasm_thread_sig_blocked(s)) continue;
+		__wasm_signal(s);
+	}
+}
+
 /* firebox in-handler self-raise — the raise()/pthread_kill() fast path
  * for a thread raising a signal to ITSELF while a signal handler is
  * currently executing on this thread. Returns 1 if the raise was handled
@@ -1125,27 +1247,67 @@ void __wasm_signal(int sig) {
  * that does not overlap the handler body). */
 int __wasm_raise_self(int sig) {
 	if (sig < 1 || sig >= _NSIG) return 0;
-	/* Only intercept when a handler is actually executing on this
-	 * thread; otherwise the host path is correct and unchanged. */
-	if (__wasm_in_any_handler() <= 0) return 0;
-	/* Blocked (process-wide or by this thread's mask, which now carries
-	 * the active handler's applied sa_mask): hold pending in-guest so
-	 * sigpending() reports it. */
-	if (__wasm_signals_blocked || __wasm_thread_sig_blocked(sig)) {
-		__wasm_pend_signal(sig);
-		return 1;
+	if (__wasm_in_any_handler() > 0) {
+		/* IN-HANDLER cases (existing, unchanged). */
+		/* Blocked (process-wide or by this thread's mask, which now carries
+		 * the active handler's applied sa_mask): hold pending in-guest so
+		 * sigpending() reports it. */
+		if (__wasm_signals_blocked || __wasm_thread_sig_blocked(sig)) {
+			__wasm_pend_signal(sig);
+			return 1;
+		}
+		/* Unblocked AND this signal's SA_NODEFER handler is active: dispatch
+		 * synchronously (immediate re-entry). */
+		if (__wasm_nodefer_active[sig] > 0) {
+			__wasm_signal(sig);
+			return 1;
+		}
+		/* Unblocked, no active SA_NODEFER for this signal: fall through to
+		 * the host. The host's #912 guard will defer it to the next syscall
+		 * boundary after the outer dispatch returns — the faithful "deliver
+		 * after the handler returns" behavior for the non-NODEFER case. */
+		return 0;
 	}
-	/* Unblocked AND this signal's SA_NODEFER handler is active: dispatch
-	 * synchronously (immediate re-entry). */
-	if (__wasm_nodefer_active[sig] > 0) {
-		__wasm_signal(sig);
-		return 1;
+
+	/* firebox#VYD — TOP-LEVEL (not in any handler) unblocked RT self-raise with
+	 * a real user handler installed: deliver SYNCHRONOUSLY in-guest, matching
+	 * Linux's "an unblocked self-tkill delivers on the syscall-return path before
+	 * raise() returns". This is what makes regression/raise-race's worker reach
+	 * c0 == 1000 (1000 self-raise(SIGRTMIN) each deliver handler0 once) — before
+	 * #VYD these coalesced into a single host-deferred delivery (the compute-bound
+	 * worker makes no blocking syscall, so the host drain never runs → c0 == 1).
+	 *
+	 * Scoped narrowly so nothing else changes:
+	 *   - RT only. A standard-signal self-raise keeps its host-deferred path
+	 *     (at-most-one-pending coalescing is already conformant; no regression).
+	 *   - Real user handler only (__fbx_handler_installed). SIG_DFL / SIG_IGN keep
+	 *     the host path (host owns terminate/core/ignore + parent waitpid encoding).
+	 *   - Unblocked only. A blocked RT self-raise keeps the host path and pends via
+	 *     raise.c's #RSQ ring push.
+	 *   - Not already mid-dispatch for `sig` (the in-handler arm above owns that).
+	 *
+	 * Push exactly ONE ring record then dispatch: __wasm_signal's #VYD RT 1-arg
+	 * drain delivers exactly the records present (deliver-zero on none), so a
+	 * synchronous self-raise must enqueue its own instance for the drain to find.
+	 * Net-zero ring depth (pushed then immediately popped) — exactly Linux's
+	 * queue-one-then-deliver-one for an unblocked self-directed RT signal. No host
+	 * round-trip (a host nudge after in-guest delivery would double-deliver).
+	 *
+	 * Then drain any OTHER deliverable queued RT signal inline — the raise()
+	 * boundary drain that lands raise-race's 100 cross-thread SIGRTMIN+1 kills
+	 * DURING the raise loop (§__wasm_deliver_pending_rt_inline). */
+	if (!__fbx_sig_is_rt(sig)) return 0;
+	if (__wasm_signals_blocked || __wasm_thread_sig_blocked(sig)) return 0;
+	if (!__fbx_handler_installed(sig)) return 0;
+	if (__wasm_in_handler[sig] > 0) return 0;
+	{
+		union sigval sv;
+		memset(&sv, 0, sizeof sv);
+		(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
 	}
-	/* Unblocked, no active SA_NODEFER for this signal: fall through to
-	 * the host. The host's #912 guard will defer it to the next syscall
-	 * boundary after the outer dispatch returns — the faithful "deliver
-	 * after the handler returns" behavior for the non-NODEFER case. */
-	return 0;
+	__wasm_signal(sig);
+	__wasm_deliver_pending_rt_inline();
+	return 1;
 }
 
 /* Stub export for the runtime's callback_signal("__wasm_signal_blocked").
