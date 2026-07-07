@@ -17,13 +17,18 @@ int pthread_attr_getinheritsched(const pthread_attr_t *restrict a, int *restrict
 	return 0;
 }
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no CPU scheduling support. */
+/* firebox#QAF — un-guarded from the upstream __wasilibc_unmodified_upstream
+ * block, completing the schedparam attr get/set pair (the setter
+ * pthread_attr_setschedparam already stores a->_a_prio and links). The header
+ * declaration (pthread.h:167) is un-guarded in the same #QAF batch. A pthread
+ * attr is a passive config object, so — like the #WRQ schedpolicy round-trip —
+ * it must faithfully report whatever priority was stored, independent of what
+ * the substrate's single scheduling class will actually honor at create time. */
 int pthread_attr_getschedparam(const pthread_attr_t *restrict a, struct sched_param *restrict param)
 {
 	param->sched_priority = a->_a_prio;
 	return 0;
 }
-#endif
 
 /* firebox#WRQ — un-guarded from the upstream __wasilibc_unmodified_upstream
  * block. The companion setter pthread_attr_setschedpolicy is already built and
