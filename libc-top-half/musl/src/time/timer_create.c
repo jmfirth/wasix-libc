@@ -586,8 +586,15 @@ int timer_settime(timer_t tt, int flags, const struct itimerspec *restrict val,
                   struct itimerspec *restrict old)
 {
 	if (!val) { errno = EINVAL; return -1; }
+	/* Validate the FULL itimerspec, not just tv_nsec. POSIX/Linux (timespec64_valid)
+	 * require EINVAL for a negative tv_sec as well as an out-of-range tv_nsec, on
+	 * BOTH it_value and it_interval. Without the tv_sec check a negative it_value
+	 * armed the timer with a past expiry (or a negative interval armed it via a
+	 * valid it_value), and with no SIGALRM handler installed the default disposition
+	 * terminated the process — timer_settime/13-1 rows 51-56 (negative tv_sec). */
 	if (val->it_value.tv_nsec < 0 || val->it_value.tv_nsec >= 1000000000L ||
-	    val->it_interval.tv_nsec < 0 || val->it_interval.tv_nsec >= 1000000000L) {
+	    val->it_interval.tv_nsec < 0 || val->it_interval.tv_nsec >= 1000000000L ||
+	    val->it_value.tv_sec < 0 || val->it_interval.tv_sec < 0) {
 		errno = EINVAL;
 		return -1;
 	}

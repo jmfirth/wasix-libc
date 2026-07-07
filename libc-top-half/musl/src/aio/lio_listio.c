@@ -87,6 +87,17 @@ int lio_listio(int mode, struct aiocb *restrict const *restrict cbs, int cnt, st
 		return -1;
 	}
 
+	/* POSIX mandates EINVAL for an improper mode ("[EINVAL] The mode argument is
+	 * an improper value"). Upstream musl omits this check and falls through to the
+	 * LIO_NOWAIT path for any non-LIO_WAIT value; validate explicitly so an invalid
+	 * mode is rejected rather than silently treated as LIO_NOWAIT (lio_listio/18-1).
+	 * (Invalid aio_lio_opcode remains musl-faithful `continue`/skip — POSIX leaves
+	 * that unspecified, so it is a documented musl-vs-glibc divergence, not fixed here.) */
+	if (mode != LIO_WAIT && mode != LIO_NOWAIT) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	if (mode == LIO_WAIT || (sev && sev->sigev_notify != SIGEV_NONE)) {
 		if (!(st = malloc(sizeof *st + cnt*sizeof *cbs))) {
 			errno = EAGAIN;
