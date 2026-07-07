@@ -5,8 +5,31 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
+#ifdef __wasilibc_unmodified_upstream
 #include <sys/auxv.h>
 #include "syscall.h"
+#else
+/* firebox#5DB — faithful POSIX AIO on the wasix substrate.
+ *
+ * musl's aio is a thread-backed implementation: each submitted request runs on
+ * its own detached pthread doing an ordinary pread/pwrite/read/write/fsync, and
+ * synchronization is pure pthread/futex. Firebox has real pthreads, futexes and
+ * (as of #93A/#5RE) faithful async pthread_cancel unwind, so the model is
+ * enabled AS-IS. The only two Linux-syscall dependencies are routed to the
+ * substrate here:
+ *   - AT_MINSIGSTKSZ auxv probe (io_thread_stack_size): no auxv on wasm, so the
+ *     MINSIGSTKSZ floor applies (see __aio_get_queue).
+ *   - SIGEV_SIGNAL completion delivery (rt_sigqueueinfo): routed through the
+ *     fork's RT-signal FIFO + a process-directed host nudge (__aio_notify_signal
+ *     below). */
+#include <wasi/api.h>
+/* firebox RT-signal FIFO producer (defined in signal/sigaction.c); the queued
+ * si_value + SI_ASYNCIO record is drained by __wasm_signal's SA_SIGINFO
+ * dispatch so a completion handler observes the real payload. No-op for a
+ * non-RT signal. */
+extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
+                             pid_t pid, uid_t uid);
+#endif
 #include "atomic.h"
 #include "pthread_impl.h"
 #include "aio_impl.h"
@@ -15,6 +38,38 @@
 #define calloc __libc_calloc
 #define realloc __libc_realloc
 #define free __libc_free
+
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#5DB — see aio_impl.h. Deliver the aio/lio completion signal `signo`
+ * to the PROCESS carrying `value` + SI_ASYNCIO.
+ *
+ * WHY process-directed (not raise()/thread-directed): every aio worker thread —
+ * and lio_listio's wait_thread — runs with ALL signals blocked (submit() /
+ * lio_listio() sigfillset before pthread_create), and the caller here is that
+ * worker, about to exit. A thread-directed nudge would pend on the dying worker
+ * and the application's handler would never run. A process-directed
+ * __wasi_proc_signal is delivered by the host on an unblocked thread — the
+ * application thread that installed the handler (mirrors Linux, where
+ * rt_sigqueueinfo(getpid(), ...) targets the process).
+ *
+ * WHY the FIFO push: for a realtime completion signal the SA_SIGINFO handler
+ * expects si_value (Open POSIX lio_listio/3-1, /10-1 read info->si_value). The
+ * value cannot ride the (pid, signo)-only proc_signal seam, so it is enqueued
+ * into the guest RT-signal ring (shared across this process's threads in one
+ * linear memory); __wasm_signal's SA_SIGINFO drain pops it back with SI_ASYNCIO.
+ * A non-RT signal carries no queued value on Linux either, so the bare
+ * proc_signal delivery is faithful (__fbx_rtsigq_push no-ops for it). */
+void __aio_notify_signal(int signo, union sigval value)
+{
+	(void)__fbx_rtsigq_push(signo, value, SI_ASYNCIO, getpid(), getuid());
+	/* Best-effort delivery: like Linux, where a failed rt_sigqueueinfo does not
+	 * un-complete the I/O that already finished, a nonzero host errno here is
+	 * not propagated back into the (already-done) aio request. */
+	__wasi_errno_t __e = __wasi_proc_signal((__wasi_pid_t)getpid(),
+	                                        (__wasi_signal_t)signo);
+	(void)__e;
+}
+#endif
 
 /* The following is a threads-based implementation of AIO with minimal
  * dependence on implementation details. Most synchronization is
@@ -95,7 +150,12 @@ static struct aio_queue *__aio_get_queue(int fd, int need)
 		if (fcntl(fd, F_GETFD) < 0) return 0;
 		pthread_rwlock_wrlock(&maplock);
 		if (!io_thread_stack_size) {
+#ifdef __wasilibc_unmodified_upstream
 			unsigned long val = __getauxval(AT_MINSIGSTKSZ);
+#else
+			/* firebox#5DB — no auxv on wasm; the MINSIGSTKSZ floor applies. */
+			unsigned long val = 0;
+#endif
 			io_thread_stack_size = MAX(MINSIGSTKSZ+2048, val+512);
 		}
 		if (!map) map = calloc(sizeof *map, (-1U/2+1)>>24);
@@ -187,6 +247,7 @@ static void cleanup(void *ctx)
 	__aio_unref_queue(q);
 
 	if (sev.sigev_notify == SIGEV_SIGNAL) {
+#ifdef __wasilibc_unmodified_upstream
 		siginfo_t si = {
 			.si_signo = sev.sigev_signo,
 			.si_value = sev.sigev_value,
@@ -195,6 +256,11 @@ static void cleanup(void *ctx)
 			.si_uid = getuid()
 		};
 		__syscall(SYS_rt_sigqueueinfo, si.si_pid, si.si_signo, &si);
+#else
+		/* firebox#5DB — faithful completion signal via the RT-signal FIFO +
+		 * process-directed nudge (see __aio_notify_signal). */
+		__aio_notify_signal(sev.sigev_signo, sev.sigev_value);
+#endif
 	}
 	if (sev.sigev_notify == SIGEV_THREAD) {
 		a_store(&__pthread_self()->cancel, 0);

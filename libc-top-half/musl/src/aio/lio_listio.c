@@ -3,6 +3,9 @@
 #include <unistd.h>
 #include <string.h>
 #include "pthread_impl.h"
+#ifndef __wasilibc_unmodified_upstream
+#include "aio_impl.h"	/* firebox#5DB — __aio_notify_signal (shared with aio.c) */
+#endif
 
 struct lio_state {
 	struct sigevent *sev;
@@ -39,6 +42,7 @@ static int lio_wait(struct lio_state *st)
 
 static void notify_signal(struct sigevent *sev)
 {
+#ifdef __wasilibc_unmodified_upstream
 	siginfo_t si = {
 		.si_signo = sev->sigev_signo,
 		.si_value = sev->sigev_value,
@@ -47,6 +51,13 @@ static void notify_signal(struct sigevent *sev)
 		.si_uid = getuid()
 	};
 	__syscall(SYS_rt_sigqueueinfo, si.si_pid, si.si_signo, &si);
+#else
+	/* firebox#5DB — faithful list-completion notification. wait_thread runs
+	 * with all signals blocked (lio_listio sigfillsets before pthread_create),
+	 * so delivery is routed process-directed to the application thread via the
+	 * RT-signal FIFO (see __aio_notify_signal in aio.c). */
+	__aio_notify_signal(sev->sigev_signo, sev->sigev_value);
+#endif
 }
 
 static void *wait_thread(void *p)
