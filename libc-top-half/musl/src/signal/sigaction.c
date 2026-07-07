@@ -18,6 +18,35 @@
 #include "firebox_altstack.h"  /* firebox#9PX — per-thread alt-stack TLS state */
 #endif
 
+/* firebox#C44 — WEAK reference to pthread_exit so a NON-threaded program is not
+ * force-pulled into the thread-start machinery.
+ *
+ * sigaction.o is UNIVERSALLY linked: crt1 calls __wasi_init_signals (below), so
+ * every program drags this TU in. The one caller of pthread_exit here is the
+ * #93A SIGCANCEL async-cancel arm in __wasm_signal (pthread_exit(PTHREAD_CANCELED)
+ * ~L890). As a STRONG undefined reference that forces the linker to extract
+ * pthread_create.o (which defines pthread_exit) -> wasi_thread_start.o ->
+ * __wasm_init_tls, a symbol wasm-ld SYNTHESIZES only under --shared-memory. A
+ * plain `clang hello.c` link (no -pthread, no --shared-memory) then fails
+ * `undefined symbol: __wasm_init_tls`. On wasm32 this is masked because the
+ * non-threads sysroot's pthread_create.o is a single-thread stub that never
+ * references wasi_thread_start; on wasm64 the SAME threads-built libc.a sits at
+ * the non-threads path, so the real thread-start chain gets pulled.
+ *
+ * Making the reference WEAK is the faithful Linux-parity fix (Inv-2): a
+ * non-threaded program links non-threaded and never carries the thread runtime;
+ * -pthread opts in. A weak undefined reference does NOT force archive
+ * extraction, so a non-threaded link leaves pthread_exit unresolved (address 0),
+ * and the cancel arm that would call it is UNREACHABLE without pthreads
+ * (self->cancel / self->cancelasync are only ever set by pthread_cancel /
+ * pthread_setcanceltype, and SIGCANCEL is never raised in a single-threaded
+ * process). A THREADED program calls pthread_create -> pthread_create.o is
+ * force-extracted by that strong reference, providing pthread_exit's definition,
+ * to which this weak reference binds -> the SIGCANCEL cancel path is fully
+ * intact. Harmless on wasm32 (the weak ref binds to the same def whenever the
+ * program is threaded; is never reached otherwise). */
+extern _Noreturn void pthread_exit(void *) __attribute__((__weak__));
+
 static int unmask_done;
 
 /* Per-signal "a REAL handler is installed" bitmask: bit (sig-1) set ⇔ the
