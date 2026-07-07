@@ -130,14 +130,18 @@ int clock_nanosleep (clockid_t, int, const struct timespec *, struct timespec *)
 int clock_getcpuclockid (pid_t, clockid_t *);
 #endif
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no timers */
+/* firebox#GGW — POSIX per-process timers ARE provided on wasm (guest-backed
+ * implementation in src/time/timer_create.c using Firebox's real threads,
+ * clocks, and cross-thread signal delivery). The declarations must be visible
+ * to portable software (the upstream guard hid them because upstream WASI had
+ * no timer syscalls; Firebox does not marshal to syscalls, so the gap is
+ * closed). The _REDIR_TIME64 block below still handles the time64 ABI. */
 struct sigevent;
 int timer_create (clockid_t, struct sigevent *__restrict, timer_t *__restrict);
 int timer_delete (timer_t);
 int timer_settime (timer_t, int, const struct itimerspec *__restrict, struct itimerspec *__restrict);
 int timer_gettime (timer_t, struct itimerspec *);
 int timer_getoverrun (timer_t);
-#endif
 
 #ifdef __wasilibc_unmodified_upstream /* WASI has no timezone tables */
 extern char *tzname[2];
