@@ -97,6 +97,14 @@ int pthread_setcanceltype(int, int *);
 void pthread_testcancel(void);
 int pthread_cancel(pthread_t);
 
+/* firebox#QAF — forward-declare struct sched_param so the scheduling prototypes
+ * below satisfy -Wvisibility (-Werror). pthread.h includes <sched.h> above, but in
+ * wasilibc's split-header build a libc-internal TU (e.g. getrandom.c) resolves the
+ * angle-bracket <sched.h> via -I order to a bottom-half header lacking the full
+ * definition, so the struct would first appear inside these prototypes. Real callers
+ * still get the complete type from <sched.h>; this is a pointer-only forward decl. */
+struct sched_param;
+
 /* firebox#QAF — un-guarded: Firebox ships faithful unprivileged thread
  * scheduling (src/thread/pthread_{get,set}schedparam.c). Every thread runs
  * SCHED_OTHER/prio 0; selecting a real-time policy returns EPERM. */
