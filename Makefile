@@ -244,6 +244,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/thread/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/signal/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/process/*.c) \
+    $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/mq/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/env/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/exit/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/search/*.c) \

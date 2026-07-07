@@ -2,6 +2,9 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include "syscall.h"
+#ifndef __wasilibc_unmodified_upstream
+#include "mq_impl.h" /* firebox#KS9 — guest named-queue registry */
+#endif
 
 mqd_t mq_open(const char *name, int flags, ...)
 {
@@ -15,5 +18,9 @@ mqd_t mq_open(const char *name, int flags, ...)
 		attr = va_arg(ap, struct mq_attr *);
 		va_end(ap);
 	}
+#ifdef __wasilibc_unmodified_upstream
 	return syscall(SYS_mq_open, name, flags, mode, attr);
+#else
+	return __fbx_mq_open(name, flags, mode, attr);
+#endif
 }

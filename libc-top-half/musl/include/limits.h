@@ -75,9 +75,10 @@
 #define SEM_NSEMS_MAX 256
 #endif
 #define DELAYTIMER_MAX 0x7fffffff
-#ifdef __wasilibc_unmodified_upstream /* WASI has no mq */
+/* firebox#KS9: wasix-libc now ships a guest POSIX message-queue implementation
+ * (src/mq/mq_impl.c), so MQ_PRIO_MAX is a real limit here, not a WASI absence.
+ * Value matches Linux (the mq_send/mq_timedsend priority-range tests read it). */
 #define MQ_PRIO_MAX 32768
-#endif
 #define LOGIN_NAME_MAX 256
 
 /* Arbitrary numbers... */
