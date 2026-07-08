@@ -361,20 +361,27 @@ static int submit(struct aiocb *cb, int op)
 
 	if (!q) {
 		/* firebox#FY5 — glibc defers a bad-fd [EBADF] to aio_error rather than
-		 * failing aio_{read,write} eagerly. POSIX permits either form ("the call
-		 * shall fail OR the error status of the operation shall be [EBADF]"), but
-		 * the Open POSIX aio_read/10-1 + aio_write/8-1 assertions — and most
-		 * Linux, which is glibc — require the deferred form. Record the failure
-		 * on the aiocb and return success: no worker thread is spawned (the fd is
-		 * unusable), but aio_error()/aio_return() observe glibc's contract
-		 * (EBADF / -1). A resource shortage (EAGAIN) is still reported eagerly,
-		 * matching glibc. Deliberate glibc-alignment (docs/reference/forks.md). */
-		if (errno == EBADF) {
+		 * failing eagerly for the DATA-TRANSFER ops (aio_read/aio_write): POSIX
+		 * permits either form there ("the call shall fail OR the error status of
+		 * the operation shall be [EBADF]"), and the Open POSIX aio_read/10-1 +
+		 * aio_write/8-1 assertions — and most Linux (=glibc) — require the
+		 * deferred form. aio_fsync is DIFFERENT: POSIX requires it to validate
+		 * the descriptor synchronously and FAIL EAGERLY with -1/EBADF (Open POSIX
+		 * aio_fsync/12-1 asserts `aio_fsync(bad_fd) == -1 && errno == EBADF`), and
+		 * aio_fsync routes through this same submit(). So gate the deferral on the
+		 * data-transfer ops (LIO_READ/LIO_WRITE) only — for read/write, record the
+		 * failure on the aiocb and return success (no worker thread; the fd is
+		 * unusable, but aio_error()/aio_return() observe glibc's EBADF/-1
+		 * contract). For aio_fsync (and any resource shortage), fall through to the
+		 * eager -1: EBADF is preserved, other errnos become EAGAIN — the original
+		 * musl behavior, which aio_fsync/12-1 needs. Deliberate glibc-alignment
+		 * for the transfer ops (docs/reference/forks.md §5). */
+		if (errno == EBADF && (op == LIO_READ || op == LIO_WRITE)) {
 			cb->__ret = -1;
 			cb->__err = EBADF;
 			return 0;
 		}
-		errno = EAGAIN;
+		if (errno != EBADF) errno = EAGAIN;
 		cb->__ret = -1;
 		cb->__err = errno;
 		return -1;
