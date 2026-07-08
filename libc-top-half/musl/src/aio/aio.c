@@ -61,6 +61,16 @@ extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
  * proc_signal delivery is faithful (__fbx_rtsigq_push no-ops for it). */
 void __aio_notify_signal(int signo, union sigval value)
 {
+	/* firebox#FY5 — the null signal (signo 0) is never delivered on Linux:
+	 * rt_sigqueueinfo(pid, 0, ...) does only perms/existence checks and queues
+	 * nothing. A zero-initialised struct aiocb has sigev_notify == SIGEV_SIGNAL
+	 * (0) with sigev_signo == 0, so a completed request would route a spurious
+	 * signal 0 through __wasi_proc_signal and interrupt an unrelated blocking
+	 * syscall in the target (Open POSIX aio_write/2-1: EINTR on the
+	 * post-completion read()). The kernel drops sig 0; our libc must reproduce
+	 * that here because __wasi_proc_signal does not treat 0 as the null signal. */
+	if (signo == 0)
+		return;
 	(void)__fbx_rtsigq_push(signo, value, SI_ASYNCIO, getpid(), getuid());
 	/* Best-effort delivery: like Linux, where a failed rt_sigqueueinfo does not
 	 * un-complete the I/O that already finished, a nonzero host errno here is
@@ -350,7 +360,21 @@ static int submit(struct aiocb *cb, int op)
 	sem_init(&args.sem, 0, 0);
 
 	if (!q) {
-		if (errno != EBADF) errno = EAGAIN;
+		/* firebox#FY5 — glibc defers a bad-fd [EBADF] to aio_error rather than
+		 * failing aio_{read,write} eagerly. POSIX permits either form ("the call
+		 * shall fail OR the error status of the operation shall be [EBADF]"), but
+		 * the Open POSIX aio_read/10-1 + aio_write/8-1 assertions — and most
+		 * Linux, which is glibc — require the deferred form. Record the failure
+		 * on the aiocb and return success: no worker thread is spawned (the fd is
+		 * unusable), but aio_error()/aio_return() observe glibc's contract
+		 * (EBADF / -1). A resource shortage (EAGAIN) is still reported eagerly,
+		 * matching glibc. Deliberate glibc-alignment (docs/reference/forks.md). */
+		if (errno == EBADF) {
+			cb->__ret = -1;
+			cb->__err = EBADF;
+			return 0;
+		}
+		errno = EAGAIN;
 		cb->__ret = -1;
 		cb->__err = errno;
 		return -1;

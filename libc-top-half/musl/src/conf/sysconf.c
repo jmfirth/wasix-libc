@@ -29,6 +29,15 @@
 #define JT_AVPHYS_PAGES JT(9)
 #define JT_ZERO JT(10)
 #define JT_DELAYTIMER_MAX JT(11)
+/* firebox#R94: sysconf(_SC_THREAD_STACK_MIN) must be a multiple of the page
+ * size for Open-POSIX threads_scenarii.c to run its 16 pthread create/exit/
+ * join/detach scenarios (it does `if (minstacksize % pagesize) UNTESTED`).
+ * wasm has no sub-page stacks, so the arch-correct reported minimum is
+ * PTHREAD_STACK_MIN rounded up to a whole page. This is a REPORTED-value
+ * change ONLY: the PTHREAD_STACK_MIN macro (limits.h) stays 2048, so the
+ * pthread_attr_setstacksize/setstack EINVAL floor and the real thread-stack
+ * allocation minimum are unchanged (no 32x floor raise, no wasted memory). */
+#define JT_THREAD_STACK_MIN JT(12)
 
 #define RLIM(x) (-32768|(RLIMIT_ ## x))
 
@@ -126,7 +135,7 @@ long sysconf(int name)
 #if defined(__wasilibc_unmodified_upstream) || defined(_REENTRANT)
 		[_SC_THREAD_DESTRUCTOR_ITERATIONS] = PTHREAD_DESTRUCTOR_ITERATIONS,
 		[_SC_THREAD_KEYS_MAX] = PTHREAD_KEYS_MAX,
-		[_SC_THREAD_STACK_MIN] = PTHREAD_STACK_MIN,
+		[_SC_THREAD_STACK_MIN] = JT_THREAD_STACK_MIN,
 #else
 		[_SC_THREAD_DESTRUCTOR_ITERATIONS] = -1,
 		[_SC_THREAD_KEYS_MAX] = -1,
@@ -261,6 +270,9 @@ long sysconf(int name)
 #endif
 	case JT_PAGE_SIZE & 255:
 		return PAGE_SIZE;
+	case JT_THREAD_STACK_MIN & 255:
+		/* Round the compile-time minimum up to the runtime page size. */
+		return (PTHREAD_STACK_MIN + PAGE_SIZE - 1) & -PAGE_SIZE;
 #ifdef __wasilibc_unmodified_upstream // WASI has no semaphores
 	case JT_SEM_VALUE_MAX & 255:
 		return SEM_VALUE_MAX;
