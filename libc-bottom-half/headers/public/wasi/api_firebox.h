@@ -49,6 +49,10 @@ __wasi_errno_t __wasix_itimer_get(uint32_t sig, uint64_t *out);
 __wasi_errno_t __wasix_fd_chmod(__wasi_fd_t fd, uint32_t mode);
 __wasi_errno_t __wasix_path_chmod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode);
 __wasi_errno_t __wasix_path_lchmod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode);
+/* firebox#2E2 — chown(2) family imports (see __wasixlibc_firebox.c). */
+__wasi_errno_t __wasix_fd_chown(__wasi_fd_t fd, uint32_t uid, uint32_t gid);
+__wasi_errno_t __wasix_path_chown(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t uid, uint32_t gid);
+__wasi_errno_t __wasix_path_lchown(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t uid, uint32_t gid);
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode, uint64_t dev);
 
 /* fd_ioctl ASYMMETRY: on wasm32 __wasi_fd_ioctl is part of the committed generation

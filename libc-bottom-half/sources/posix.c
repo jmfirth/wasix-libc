@@ -427,6 +427,82 @@ int lchmod(const char *path, mode_t mode) {
     return fchmodat(dirfd, relative_path, mode, AT_SYMLINK_NOFOLLOW);
 }
 
+// firebox#2E2 — the chown(2) family. These REPLACE the musl upstream
+// unistd/{chown,fchown,fchownat,lchown}.c (removed from the Makefile), which
+// issued a SYS_fchownat the WASIX/Firebox runtime does not provide. They mirror
+// the chmod family above: resolve the guest path to a preopen dirfd + relative
+// path (WASIX has no kernel CWD) and forward to the Firebox WASIX imports, which
+// write the stored owner and enforce the POSIX ownership-change privilege rule
+// in the runtime. A `(uid_t)-1` / `(gid_t)-1` marshals as 0xFFFFFFFF and the
+// host decodes it to the "leave this field unchanged" sentinel.
+int chown(const char *path, uid_t owner, gid_t group) {
+    char *relative_path;
+    int dirfd = find_relpath(path, &relative_path);
+
+    // If we can't find a preopen for it, fail as if we can't find the path.
+    if (dirfd == -1) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    return fchownat(dirfd, relative_path, owner, group, 0);
+}
+
+int fchown(int fd, uid_t owner, gid_t group) {
+    __wasi_errno_t error = __wasix_fd_chown(fd, (uint32_t)owner, (uint32_t)group);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
+int fchownat(int fd, const char *path, uid_t owner, gid_t group, int flag) {
+    // Reject unknown flags per POSIX (mirrors fchmodat). AT_EMPTY_PATH is not
+    // handled here; a chown of an fd itself goes through fchown().
+    if (flag & ~AT_SYMLINK_NOFOLLOW) {
+        errno = EINVAL;
+        return -1;
+    }
+    // For AT_FDCWD and absolute paths, resolve through the preopen map to obtain
+    // a real dirfd + relative path (WASIX has no kernel CWD), exactly as
+    // fchmodat() does.
+    int effective_fd = fd;
+    const char *effective_path = path;
+    if (fd == AT_FDCWD || (path != NULL && path[0] == '/')) {
+        char *relative_path;
+        int dirfd = find_relpath(path, &relative_path);
+        if (dirfd == -1) {
+            errno = ENOENT;
+            return -1;
+        }
+        effective_fd = dirfd;
+        effective_path = relative_path;
+    }
+    size_t path_len = strlen(effective_path);
+    __wasi_errno_t error = (flag & AT_SYMLINK_NOFOLLOW)
+        ? __wasix_path_lchown(effective_fd, effective_path, path_len, (uint32_t)owner, (uint32_t)group)
+        : __wasix_path_chown(effective_fd, effective_path, path_len, (uint32_t)owner, (uint32_t)group);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    return 0;
+}
+
+int lchown(const char *path, uid_t owner, gid_t group) {
+    char *relative_path;
+    int dirfd = find_relpath(path, &relative_path);
+
+    // If we can't find a preopen for it, fail as if we can't find the path.
+    if (dirfd == -1) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    return fchownat(dirfd, relative_path, owner, group, AT_SYMLINK_NOFOLLOW);
+}
+
 DIR *opendir(const char *dirname) {
     char *relative_path;
     int dirfd = find_relpath(dirname, &relative_path);
