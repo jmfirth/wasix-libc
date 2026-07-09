@@ -32,11 +32,15 @@ double scalb(double x, double fn)
 		return r;
 	}
 	if (rint(fn) != fn) {
-		/* firebox #RNS: a non-integer exponent is a domain error. The rint(fn)
-		   probe above already raised FE_INEXACT (fn non-integer) exactly as
-		   hardware does; add FE_INVALID for the 0.0/0.0 nan below (wasm doesn't
-		   flag it), giving the expected INEXACT|INVALID. */
-		feraiseexcept(FE_INVALID);
+		/* firebox #FPH (RC3): a non-integer exponent is a domain error wanting
+		   INEXACT|INVALID. The rint{f}(fn) probe does NOT raise FE_INEXACT here —
+		   the compiler lowers rint{f}() to the f{64,32}.nearest builtin INLINE
+		   (verify: this .o has no `U rint{f}`), bypassing the fenv-raising
+		   math-builtins.o version, so its side effect never fires. Raise BOTH
+		   explicitly (the 0.0/0.0 nan below is silent on wasm too). Supersedes
+		   the #RNS comment that leaned on rint's side effect; see class lesson
+		   math-fix-dead-when-filtered-out-verify-llvm-nm (caller-side variant). */
+		feraiseexcept(FE_INVALID | FE_INEXACT);
 		return (fn-fn)/(fn-fn);
 	}
 	if ( fn > 65000.0) return scalbn(x, 65000);
