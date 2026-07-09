@@ -33,7 +33,10 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
 		errno = EINVAL;
 		return -1;
 	}
-	if (__sched_pid_check(pid) != 0)
+	/* Write path: a foreign-owner pid is denied EPERM before the policy is
+	 * applied, mirroring the kernel's check_same_owner() (firebox#R63). The
+	 * read probe's EPERM-swallow would wrongly allow a cross-uid mutation. */
+	if (__sched_pid_check_write(pid) != 0)
 		return -1;
 	if (__sched_policy_is_realtime(policy)) {
 		errno = EPERM;
