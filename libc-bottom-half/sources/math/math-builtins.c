@@ -15,24 +15,27 @@ double fabs(double x) {
 
 float sqrtf(float x) {
     float y = __builtin_sqrtf(x);
-    /* firebox #FPH (RC1-sqrt): sqrt must raise FE_INEXACT iff the exact square
-       root is not representable, i.e. the residual fmaf(y,y,-x) != 0. The wasm
-       f32.sqrt builtin sets no software-fenv flag, and src/math/sqrtf.c is
-       filter-out'd dead code (see the class lesson
-       math-fix-dead-when-filtered-out-verify-llvm-nm). Guard isfinite(x)&&x>0:
-       x<=0 (incl -0), +inf and nan give an exact/NaN result with no INEXACT,
-       and INVALID for x<0 is a separate concern the #FPH INEXACT row does not
-       cover. The soft-float fmaf leaks its OWN INEXACT, so save the exception
-       flags before the probe and restore them after (fesetexceptflag is a true
-       restore: feclearexcept(~saved)+feraiseexcept(saved)), then raise INEXACT
-       only on a nonzero residual. fmaf(y,y,-x)==0 iff y*y==x exactly iff
-       sqrt(x) was representable. */
-    if (isfinite(x) && x > 0) {
-        fexcept_t saved;
-        fegetexceptflag(&saved, FE_ALL_EXCEPT);
-        float r = fmaf(y, y, -x);
-        fesetexceptflag(&saved, FE_ALL_EXCEPT);
-        if (r != 0)
+    /* firebox #FPH (RC1-sqrt): the wasm f32.sqrt builtin sets no software-fenv
+       flag, and src/math/sqrtf.c is filter-out'd dead code (see the class lesson
+       math-fix-dead-when-filtered-out-verify-llvm-nm), so we raise the IEEE
+       exceptions here. Two cases the musl/Open-POSIX drivers check strictly:
+         - x < 0 (finite): sqrt is domain-invalid -> FE_INVALID (result is NaN).
+         - x > 0 (finite): FE_INEXACT iff the exact root is not representable.
+       Inexactness oracle by WIDENING: f32.sqrt is IEEE correctly-rounded, so
+       y*y == x exactly iff x is a perfect square iff the root was representable.
+       (double)y*(double)y computes that square EXACTLY — a float square is 48
+       significant bits, well inside double's 53, with no rounding, no overflow
+       (max float^2 ~1.2e77 << DBL_MAX) and no underflow — so the product raises
+       no exception of its own (no fenv save/restore needed: f64.mul touches no
+       software flag) and the compare to (double)x (also exact) is a true
+       oracle. This SUPERSEDES the earlier fmaf(y,y,-x) residual probe, which
+       UNDERFLOWED to 0 for tiny/subnormal x (the residual fell below the
+       smallest float subnormal 2^-149) -> false-negative, e.g. it missed
+       sqrtf(0x1p-149). A widened product cannot underflow. */
+    if (isfinite(x)) {
+        if (x < 0)
+            feraiseexcept(FE_INVALID);
+        else if (x > 0 && (double)y * (double)y != (double)x)
             feraiseexcept(FE_INEXACT);
     }
     return y;
@@ -40,15 +43,16 @@ float sqrtf(float x) {
 
 double sqrt(double x) {
     double y = __builtin_sqrt(x);
-    /* firebox #FPH (RC1-sqrt): see sqrtf — raise FE_INEXACT iff the exact sqrt
-       is not representable (residual fma(y,y,-x) != 0), with the soft-float
-       fma's own flags saved/restored around the probe. */
-    if (isfinite(x) && x > 0) {
-        fexcept_t saved;
-        fegetexceptflag(&saved, FE_ALL_EXCEPT);
-        double r = fma(y, y, -x);
-        fesetexceptflag(&saved, FE_ALL_EXCEPT);
-        if (r != 0)
+    /* firebox #FPH (RC1-sqrt): see sqrtf. Same widened-exact-check one tier up:
+       (long double)y*(long double)y is EXACT — a double square is 106 bits,
+       inside binary128's 113 (verified LDBL_MANT_DIG=113 in this libc), no
+       rounding/overflow/underflow — so the quad product is a clean inexactness
+       oracle with no fenv pollution and no underflow blind spot. The compiler-rt
+       soft-quad multiply (__multf3) does not touch the software fenv word. */
+    if (isfinite(x)) {
+        if (x < 0)
+            feraiseexcept(FE_INVALID);
+        else if (x > 0 && (long double)y * (long double)y != (long double)x)
             feraiseexcept(FE_INEXACT);
     }
     return y;
