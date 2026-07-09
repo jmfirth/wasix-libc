@@ -96,4 +96,43 @@ static inline int __sched_pid_check(pid_t pid)
 	return -1;
 }
 
+/*
+ * Faithful write-permission probe for the sched_set*(2) mutators
+ * (sched_setparam / sched_setscheduler). Same pid validation as
+ * __sched_pid_check — EINVAL for a negative pid, pid == 0 is the calling
+ * process, ESRCH for a missing/reaped pid — but a live process we may NOT
+ * signal (kill(pid, 0) fails EPERM) is a permission DENIAL here, not an
+ * existence success. That is the write/read asymmetry the kernel enforces
+ * (firebox#R63): reading another process's policy/parameters needs no
+ * privilege — so the read probe above swallows the EPERM leg — but CHANGING
+ * them requires the caller's credentials match the target's (the kernel's
+ * check_same_owner()), so a cross-owner mutation is refused EPERM. We
+ * therefore surface kill(2)'s EPERM unchanged instead of treating "exists but
+ * not ours" as OK. Open POSIX sched_setparam/26-1 (non-root setparam of the
+ * root-owned pid 1, via the pid1-init harness) asserts exactly this EPERM.
+ *
+ * Returns 0 when the mutation is permitted (self, or a process we may signal);
+ * -1 with errno set (EPERM for a foreign owner, ESRCH for a missing pid,
+ * EINVAL for a negative pid) when it must be denied.
+ *
+ * NOTE (class-sibling, deferred): sched_setaffinity is also a write and shares
+ * this asymmetry, but no conformance test exercises an unprivileged foreign
+ * setaffinity, so affinity.c keeps the read probe until a witness exists —
+ * flipping it blind would be unvalidated blast radius (firebox#R63 follow-up).
+ */
+static inline int __sched_pid_check_write(pid_t pid)
+{
+	if (pid < 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (pid == 0)
+		return 0;
+	if (kill(pid, 0) == 0)
+		return 0;
+	/* errno is EPERM (foreign owner) or ESRCH (missing) — both deny the
+	 * write; surface unchanged (do NOT swallow EPERM like the read probe). */
+	return -1;
+}
+
 #endif

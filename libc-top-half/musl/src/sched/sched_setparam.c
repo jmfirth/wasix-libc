@@ -24,7 +24,9 @@ int sched_setparam(pid_t pid, const struct sched_param *param)
 		errno = EINVAL;
 		return -1;
 	}
-	if (__sched_pid_check(pid) != 0)
+	/* Write path: a foreign-owner pid is denied EPERM, not swallowed as the
+	 * read probe would (firebox#R63 — sched_setparam/26-1). */
+	if (__sched_pid_check_write(pid) != 0)
 		return -1;
 	return 0;
 }
