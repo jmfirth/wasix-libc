@@ -179,16 +179,21 @@ double fma(double x, double y, double z)
 				r = i;
 				r = 2*r - c; /* remove top bit */
 
-				/* raise underflow portably, such that it
-				   cannot be optimized away */
-				{
-					double_t tiny = DBL_MIN/FLT_MIN * r;
-					r += (double)(tiny*tiny) * (r-r);
-				}
+				/* firebox #FPH (RC3): this subnormal result lost bits (rhi<<53
+				   != 0) -> inexact. musl's "raise underflow portably" trick
+				   (tiny*tiny)*(r-r) relies on tiny*tiny underflow-trapping on a
+				   real FPU; it is INERT on wasm's silent f64 mul. Raise
+				   UNDERFLOW|INEXACT explicitly. */
+				feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 			}
 		} else {
 			/* only round once when scaled */
 			d = 10;
+			/* firebox #FPH (RC3): deeper subnormal; the sticky bit
+			   rhi<<(64-d) != 0 means bits were rounded away -> inexact
+			   subnormal -> UNDERFLOW|INEXACT (wasm silent ops raise nothing). */
+			if (rhi << 64-d)
+				feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 			i = ( rhi>>d | !!(rhi<<64-d) ) << d;
 			if (sign)
 				i = -i;

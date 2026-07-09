@@ -80,7 +80,15 @@ float fmaf(float x, float y, float z)
 		   flagless. */
 		if (e < 0x3ff-126 && e >= 0x3ff-149) {
 			float fr = (float)result;
-			if ((double)fr != result)
+			/* firebox #FPH (RC3): the narrowing check `(double)fr != result`
+			   only catches inexactness from result->float, and MISSES the case
+			   the comment above names — fmaf(0x1p-120,0x1p-120,0x1p-149):
+			   result=0x1p-149 is an EXACT float subnormal (narrowing is exact),
+			   but the DOUBLE ADD xy+z rounded away the tiny 0x1p-240 term. Also
+			   fire when the add was inexact, detected by musl's own Dekker
+			   error-free test (the negation of the `exact` clause on line 65):
+			   result==xy+z exactly iff (result-xy==z && result-z==xy). */
+			if ((double)fr != result || result - xy != z || result - z != xy)
 				feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 		}
 #endif
