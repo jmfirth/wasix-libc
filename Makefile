@@ -108,6 +108,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         misc/nftw.c \
 	misc/realpath.c \
         misc/syslog.c \
+        misc/mntent.c \
         mman/shm_open.c \
         errno/strerror.c \
         \
@@ -140,6 +141,8 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
 	    network/inet_ntoa.c \
         network/inet_pton.c \
         network/inet_aton.c \
+        network/inet_addr.c \
+        network/dn_expand.c \
         network/in6addr_any.c \
         network/in6addr_loopback.c \
         network/proto.c \
@@ -221,6 +224,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         stat/mknodat.c \
         legacy/getpagesize.c \
         legacy/getpass.c \
+        legacy/daemon.c \
         thread/thrd_sleep.c \
         wasix/call_dynamic.c \
         wasix/closure_allocate.c \
@@ -527,8 +531,6 @@ MUSL_OMIT_HEADERS += \
     "link.h" "bits/link.h" \
     "scsi/scsi.h" "scsi/scsi_ioctl.h" "scsi/sg.h" \
     "sys/auxv.h" \
-    "mntent.h" \
-    "resolv.h" \
     "pty.h" \
     "ulimit.h" \
     "sys/xattr.h" \
