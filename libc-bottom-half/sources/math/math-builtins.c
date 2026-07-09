@@ -14,11 +14,44 @@ double fabs(double x) {
 }
 
 float sqrtf(float x) {
-    return __builtin_sqrtf(x);
+    float y = __builtin_sqrtf(x);
+    /* firebox #FPH (RC1-sqrt): sqrt must raise FE_INEXACT iff the exact square
+       root is not representable, i.e. the residual fmaf(y,y,-x) != 0. The wasm
+       f32.sqrt builtin sets no software-fenv flag, and src/math/sqrtf.c is
+       filter-out'd dead code (see the class lesson
+       math-fix-dead-when-filtered-out-verify-llvm-nm). Guard isfinite(x)&&x>0:
+       x<=0 (incl -0), +inf and nan give an exact/NaN result with no INEXACT,
+       and INVALID for x<0 is a separate concern the #FPH INEXACT row does not
+       cover. The soft-float fmaf leaks its OWN INEXACT, so save the exception
+       flags before the probe and restore them after (fesetexceptflag is a true
+       restore: feclearexcept(~saved)+feraiseexcept(saved)), then raise INEXACT
+       only on a nonzero residual. fmaf(y,y,-x)==0 iff y*y==x exactly iff
+       sqrt(x) was representable. */
+    if (isfinite(x) && x > 0) {
+        fexcept_t saved;
+        fegetexceptflag(&saved, FE_ALL_EXCEPT);
+        float r = fmaf(y, y, -x);
+        fesetexceptflag(&saved, FE_ALL_EXCEPT);
+        if (r != 0)
+            feraiseexcept(FE_INEXACT);
+    }
+    return y;
 }
 
 double sqrt(double x) {
-    return __builtin_sqrt(x);
+    double y = __builtin_sqrt(x);
+    /* firebox #FPH (RC1-sqrt): see sqrtf — raise FE_INEXACT iff the exact sqrt
+       is not representable (residual fma(y,y,-x) != 0), with the soft-float
+       fma's own flags saved/restored around the probe. */
+    if (isfinite(x) && x > 0) {
+        fexcept_t saved;
+        fegetexceptflag(&saved, FE_ALL_EXCEPT);
+        double r = fma(y, y, -x);
+        fesetexceptflag(&saved, FE_ALL_EXCEPT);
+        if (r != 0)
+            feraiseexcept(FE_INEXACT);
+    }
+    return y;
 }
 
 float copysignf(float x, float y) {
