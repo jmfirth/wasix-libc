@@ -1,7 +1,6 @@
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
-#include <fenv.h>	/* firebox #RNS: software fenv — raise FE_INEXACT explicitly on wasm */
 
 #if FLT_EVAL_METHOD==0
 #define EPS FLT_EPSILON
@@ -20,15 +19,12 @@ float rintf(float x)
 	float_t y;
 
 	if (e >= 0x7f+23)
-		return x;		/* already an integer (or inf/nan): exact */
+		return x;
 	if (s)
 		y = x - toint + toint;
 	else
 		y = x + toint - toint;
 	if (y == 0)
-		y = s ? -0.0f : 0.0f;
-	/* firebox #RNS: raise FE_INEXACT iff rounding changed x (see rint.c). */
-	if (y != x)
-		feraiseexcept(FE_INEXACT);
+		return s ? -0.0f : 0.0f;
 	return y;
 }

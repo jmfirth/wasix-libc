@@ -7,6 +7,7 @@ float scalbnf(float x, int n)
 	union {float f; uint32_t i;} u;
 	union {float f; uint32_t i;} ux = {.f = x};	/* firebox #RNS: original x for the exact-check */
 	float_t y = x;
+	int n0 = n;	/* firebox #FPH: original n (reduction mutates n; exact-check needs the original) */
 
 	if (n > 127) {
 		y *= 0x1p127f;
@@ -50,7 +51,7 @@ float scalbnf(float x, int n)
 			sig |= 0x800000;	/* implicit leading 1 */
 			e_x = ex0 - 150;	/* value = sig * 2^(ex0-127-23) */
 		}
-		int s = -149 - (e_x + n);	/* bits dropped in the denormal range */
+		int s = -149 - (e_x + n0);	/* bits dropped in the denormal range */
 		int inexact;
 		if (s <= 0)
 			inexact = 0;

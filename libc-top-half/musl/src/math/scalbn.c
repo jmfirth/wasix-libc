@@ -7,6 +7,7 @@ double scalbn(double x, int n)
 	union {double f; uint64_t i;} u;
 	union {double f; uint64_t i;} ux = {.f = x};	/* firebox #RNS: original x for the exact-check */
 	double_t y = x;
+	int n0 = n;	/* firebox #FPH: original n; the reduction below mutates n, but the subnormal exact-check needs the ORIGINAL scaling exponent */
 
 	if (n > 1023) {
 		y *= 0x1p1023;
@@ -54,7 +55,7 @@ double scalbn(double x, int n)
 			sig |= 0x10000000000000ULL;	/* implicit leading 1 */
 			e_x = ex0 - 1075;	/* value = sig * 2^(ex0-1023-52) */
 		}
-		int s = -1074 - (e_x + n);	/* bits dropped in the denormal range */
+		int s = -1074 - (e_x + n0);	/* bits dropped in the denormal range */
 		int inexact;
 		if (s <= 0)
 			inexact = 0;		/* result representable without loss */

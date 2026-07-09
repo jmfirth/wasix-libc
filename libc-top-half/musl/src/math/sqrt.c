@@ -1,6 +1,5 @@
 #include <stdint.h>
 #include <math.h>
-#include <fenv.h>	/* firebox #RNS: software fenv — raise FE_INEXACT explicitly on wasm */
 #include "libm.h"
 #include "sqrt_data.h"
 
@@ -154,13 +153,6 @@ double sqrt(double x)
 		tiny |= (d1^d2) & 0x8000000000000000;
 		t = asdouble(tiny);
 		y = eval_as_double(y + t);
-		/* firebox #RNS: the y+t perturbation raises INEXACT on hardware but is
-		   a no-op under wasm software-fenv. d2==0 is the algorithm's own exact
-		   test (a perfect square such as sqrt(4)=2 or sqrt(0x1p-1074)=0x1p-537),
-		   so raise INEXACT explicitly exactly when d2!=0 (genuinely inexact),
-		   never on an exact root. */
-		if (d2 != 0)
-			feraiseexcept(FE_INEXACT);
 	}
 	return y;
 }

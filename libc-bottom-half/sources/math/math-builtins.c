@@ -3,6 +3,7 @@
 // one in libm.
 
 #include <math.h>
+#include <fenv.h>
 
 float fabsf(float x) {
     return __builtin_fabsf(x);
@@ -61,9 +62,22 @@ double nearbyint(double x) {
 }
 
 float rintf(float x) {
-    return __builtin_rintf(x);
+    float y = __builtin_rintf(x);
+    /* firebox #FPH: rint must raise FE_INEXACT iff it changed x (x was not
+       already an integer). The wasm f32.nearest builtin cannot signal, so the
+       fix lives HERE (math-builtins.c is what the Makefile links; the musl
+       src/math/rintf.c is filter-out'd dead code — see the class lesson
+       math-fix-dead-when-filtered-out-verify-llvm-nm). isfinite() guards inf
+       (y==x) and nan (isfinite(nan) is false), so neither signals. */
+    if (isfinite(x) && y != x)
+        feraiseexcept(FE_INEXACT);
+    return y;
 }
 
 double rint(double x) {
-    return __builtin_rint(x);
+    double y = __builtin_rint(x);
+    /* firebox #FPH: see rintf — raise FE_INEXACT iff rounding changed x. */
+    if (isfinite(x) && y != x)
+        feraiseexcept(FE_INEXACT);
+    return y;
 }
