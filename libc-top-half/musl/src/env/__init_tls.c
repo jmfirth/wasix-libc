@@ -93,10 +93,26 @@ void __wasi_init_tp()
 	if (__get_tp())
 		return;
 	// See comments on start_args.pthread_self_ptr in pthread_create.c for how TLS is handled in WASIX threads.
-	void *tp = aligned_alloc(_Alignof(struct pthread), sizeof(struct pthread));
+	/* firebox#VGX: the MAIN thread's struct pthread gets STATIC storage, not
+	 * aligned_alloc. Upstream musl uses a static builtin_tls[] for exactly this;
+	 * the Firebox branch had switched to aligned_alloc, which (a) is a gratuitous
+	 * heap dependency in the pre-main startup path and (b) makes the main-thread
+	 * TP setup the first (and, for a program that never threads, only)
+	 * aligned_alloc call before main runs. A libc-test unit (functional/
+	 * flockfile-list) interposes a fatal `aligned_alloc is unsupported` stub via
+	 * `-Wl,--allow-multiple-definition` + test-object-first link order; that
+	 * stub then binds THIS call and aborts the process at startup, before the
+	 * test's own main. Static storage removes the pre-main aligned_alloc
+	 * entirely. Correct under fork: each forked instance has its own copied
+	 * linear memory, hence its own __fbx_main_tp (and __get_tp() returns the
+	 * inherited non-NULL TP, so the #XGD guard above skips re-init in the child,
+	 * exactly as with the old heap pointer). */
+	static _Alignas(struct pthread) unsigned char __fbx_main_tp[sizeof(struct pthread)];
+	void *tp = __fbx_main_tp;
 	/* Zero-init so fields added by Firebox patches (e.g. blocked_sigmask
 	 * for per-thread sigmask inheritance, see issue #24 patch C) start
-	 * in a known state. aligned_alloc returns uninitialized memory. */
+	 * in a known state. Static storage is already zero at program start; the
+	 * memset is retained as belt-and-suspenders and to document the invariant. */
 	memset(tp, 0, sizeof(struct pthread));
 	__set_tp((uintptr_t)tp);
 	__init_tp(tp);
