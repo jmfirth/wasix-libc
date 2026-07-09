@@ -15,17 +15,25 @@
 
 #define _GNU_SOURCE
 #include <math.h>
+#include <fenv.h>	/* firebox #RNS: software fenv — raise FE_INVALID for invalid scalb ops on wasm */
 
 float scalbf(float x, float fn)
 {
-	if (isnan(x) || isnan(fn)) return x*fn;
+	if (isnan(x) || isnan(fn)) return x*fn;	/* quiet nan propagates, no flag */
 	if (!isfinite(fn)) {
-		if (fn > 0.0f)
-			return x*fn;
-		else
-			return x/(-fn);
+		float r = fn > 0.0f ? x*fn : x/(-fn);
+		/* firebox #RNS: 0*inf or inf/inf is an invalid operation -> nan; wasm's
+		   silent mul/div don't flag it. See scalb.c. */
+		if (isnan(r))
+			feraiseexcept(FE_INVALID);
+		return r;
 	}
-	if (rintf(fn) != fn) return (fn-fn)/(fn-fn);
+	if (rintf(fn) != fn) {
+		/* firebox #RNS: non-integer exponent = domain error; rintf(fn) above
+		   already raised FE_INEXACT, add FE_INVALID for the 0.0/0.0 nan. */
+		feraiseexcept(FE_INVALID);
+		return (fn-fn)/(fn-fn);
+	}
 	if ( fn > 65000.0f) return scalbnf(x, 65000);
 	if (-fn > 65000.0f) return scalbnf(x,-65000);
 	return scalbnf(x,(int)fn);

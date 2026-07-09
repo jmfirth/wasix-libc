@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <float.h>
 #include <math.h>
+#include <fenv.h>	/* firebox #RNS: software fenv — raise FE_INVALID for invalid fma ops on wasm */
 #include "atomic.h"
 
 #define ASUINT64(x) ((union {double f; uint64_t i;}){x}).i
@@ -42,6 +43,21 @@ static void mul(uint64_t *hi, uint64_t *lo, uint64_t x, uint64_t y)
 double fma(double x, double y, double z)
 {
 	#pragma STDC FENV_ACCESS ON
+
+	/* firebox #RNS: the invalid fma operations produce a quiet nan through
+	   wasm's silent f64 mul/add, which never sets a status flag. Raise
+	   FE_INVALID explicitly for 0*inf (either order) and (+-inf)+(-+inf). A
+	   quiet-NaN operand alone does NOT raise INVALID. The inf-inf test uses a
+	   TRUE infinity (an inf operand), not isinf(x*y): a large finite product
+	   like 1e300*1e300 overflows the double x*y to inf but is finite inside fma,
+	   so 1e300*1e300 + (-inf) = -inf is NOT invalid. */
+	if ((x == 0 && isinf(y)) || (isinf(x) && y == 0)) {
+		feraiseexcept(FE_INVALID);
+	} else if (isinf(z) && (isinf(x) || isinf(y)) && !isnan(x) && !isnan(y)
+	           && x != 0 && y != 0
+	           && (signbit(x) ^ signbit(y)) != signbit(z)) {
+		feraiseexcept(FE_INVALID);
+	}
 
 	/* normalize so top 10bits and last bit are 0 */
 	struct num nx, ny, nz;

@@ -126,7 +126,7 @@ float __lgammaf_r(float x, int *signgamp)
 		x = -x;
 		t = sin_pi(x);
 		if (t == 0.0f) /* -integer */
-			return 1.0f/(x-x);
+			{ feraiseexcept(FE_DIVBYZERO); return 1.0f/(x-x); }  /* #RNS: mirror #7CD (lgamma_r.c); wasm has no HW pole flag. flips lgammaf + lgammaf_r */
 		if (t > 0.0f)
 			*signgamp = -1;
 		else

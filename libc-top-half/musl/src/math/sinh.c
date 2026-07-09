@@ -22,10 +22,16 @@ double sinh(double x)
 	if (w < 0x40862e42) {
 		t = expm1(absx);
 		if (w < 0x3ff00000) {
-			if (w < 0x3ff00000 - (26<<20))
-				/* note: inexact and underflow are raised by expm1 */
+			if (w < 0x3ff00000 - (26<<20)) {
 				/* note: this branch avoids spurious underflow */
+				/* firebox #RNS: for a subnormal x, sinh(x)~=x is a tiny
+				   inexact underflow; wasm has no HW fp status word and the
+				   `return x` copy (nor the expm1 above) raises nothing, so
+				   flag it explicitly. Mirror of the sinhf #C36 fix. */
+				if (absx != 0 && absx < 0x1p-1022)
+					feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 				return x;
+			}
 			return h*(2*t - t*t/(t+1));
 		}
 		/* note: |x|>log(0x1p26)+eps could be just h*exp(x) */

@@ -43,6 +43,18 @@ float fmaf(float x, float y, float z)
 	union {double f; uint64_t i;} u;
 	int e;
 
+	/* firebox #RNS: raise FE_INVALID for the invalid ops that wasm's silent
+	   mul/add produce as a quiet nan — 0*inf (either order) and
+	   (+-inf)+(-+inf). A quiet-NaN operand alone does NOT raise INVALID. See
+	   fma.c for the true-infinity rationale. */
+	if ((x == 0 && isinf(y)) || (isinf(x) && y == 0)) {
+		feraiseexcept(FE_INVALID);
+	} else if (isinf(z) && (isinf(x) || isinf(y)) && !isnan(x) && !isnan(y)
+	           && x != 0 && y != 0
+	           && (signbit(x) ^ signbit(y)) != signbit(z)) {
+		feraiseexcept(FE_INVALID);
+	}
+
 	xy = (double)x * y;
 	result = xy + z;
 	u.f = result;
@@ -58,15 +70,18 @@ float fmaf(float x, float y, float z)
 		fmaf(0x1p-120f, 0x1p-120f, 0x1p-149f)
 		*/
 #if defined(FE_INEXACT) && defined(FE_UNDERFLOW)
-		if (e < 0x3ff-126 && e >= 0x3ff-149 && fetestexcept(FE_INEXACT)) {
-			feclearexcept(FE_INEXACT);
-			/* TODO: gcc and clang bug workaround */
-			volatile float vz = z;
-			result = xy + vz;
-			if (fetestexcept(FE_INEXACT))
-				feraiseexcept(FE_UNDERFLOW);
-			else
-				feraiseexcept(FE_INEXACT);
+		/* firebox #RNS: the upstream path relies on the double add xy+z setting
+		   FE_INEXACT, but wasm's software fenv sets no flag for f64 add (and the
+		   add is frequently exact in double anyway, as in the example above), so
+		   it never fires. Detect the underflow directly: in the float-subnormal
+		   magnitude range the narrowing result->float is inexact iff
+		   (double)(float)result != result, and a tiny inexact result is a genuine
+		   UNDERFLOW|INEXACT. An exactly-representable float subnormal stays
+		   flagless. */
+		if (e < 0x3ff-126 && e >= 0x3ff-149) {
+			float fr = (float)result;
+			if ((double)fr != result)
+				feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 		}
 #endif
 		z = result;

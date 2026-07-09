@@ -53,6 +53,13 @@ static long lrint_slow(double x)
 
 long lrint(double x)
 {
+	/* firebox #RNS: raise FE_INVALID when x rounds outside long's range (incl.
+	   nan/inf). wasm's float->int conversion saturates silently instead of
+	   flagging. -(double)LONG_MIN == LONG_MAX+1 (an exact power of two), so the
+	   bound is tight and never fires on an in-range value. */
+	if (isnan(x) || x < (double)LONG_MIN || x >= -(double)LONG_MIN)
+		feraiseexcept(FE_INVALID);
+
 	uint32_t abstop = asuint64(x)>>32 & 0x7fffffff;
 	uint64_t sign = asuint64(x) & (1ULL << 63);
 
@@ -67,6 +74,10 @@ long lrint(double x)
 #else
 long lrint(double x)
 {
+	/* firebox #RNS: see the guarded variant above — raise FE_INVALID for the
+	   out-of-range/nan conversion that wasm truncates silently. */
+	if (isnan(x) || x < (double)LONG_MIN || x >= -(double)LONG_MIN)
+		feraiseexcept(FE_INVALID);
 	return rint(x);
 }
 #endif

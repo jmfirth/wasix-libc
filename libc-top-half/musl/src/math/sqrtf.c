@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <math.h>
+#include <fenv.h>	/* firebox #RNS: software fenv — raise FE_INEXACT explicitly on wasm */
 #include "libm.h"
 #include "sqrt_data.h"
 
@@ -78,6 +79,10 @@ float sqrtf(float x)
 		tiny |= (d1^d2) & 0x80000000;
 		t = asfloat(tiny);
 		y = eval_as_float(y + t);
+		/* firebox #RNS: raise INEXACT explicitly (the y+t perturbation is a
+		   no-op under wasm software-fenv); d2!=0 is the exact test. See sqrt.c. */
+		if (d2 != 0)
+			feraiseexcept(FE_INEXACT);
 	}
 	return y;
 }
