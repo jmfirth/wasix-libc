@@ -153,8 +153,18 @@ static inline double specialcase(double_t tmp, uint64_t sbits, uint64_t ki)
 		/* Fix the sign of 0.  */
 		if (y == 0.0)
 			y = asdouble(sbits & 0x8000000000000000);
-		/* The underflow exception needs to be signaled explicitly.  */
-		fp_force_eval(fp_barrier(0x1p-1022) * 0x1p-1022);
+		/* The underflow exception needs to be signaled explicitly.
+		 * firebox #RNS: musl's fp_force_eval(0x1p-1022 * 0x1p-1022) trick relies
+		 * on the hardware FPU raising FE_UNDERFLOW|FE_INEXACT on the underflowing
+		 * multiply. wasm arithmetic never sets the software fenv (see #7CD), so
+		 * that trick is INERT here — leaving a subnormal-range pow() result with
+		 * no exception raised, which the libc-test pow suite's X-tolerance
+		 * (fabs(y)<0x1p-1022 && (e|INEXACT)==(INEXACT|UNDERFLOW)) then fails.
+		 * Raise explicitly, matching __math_uflow.c (#7CD) and hardware musl,
+		 * which signals underflow for every subnormal-range result reaching this
+		 * site (the pow test is built around exactly that musl behavior;
+		 * native-musl bit-compare: identical 23-line fenv set). */
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 	}
 	y = 0x1p-1022 * y;
 	return eval_as_double(y);

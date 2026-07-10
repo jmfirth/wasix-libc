@@ -98,7 +98,23 @@ static inline float exp2_inline(double_t xd, uint32_t sign_bias)
 	y = C[2] * r + 1;
 	y = z * r2 + y;
 	y = y * s;
-	return eval_as_float(y);
+	float rf = eval_as_float(y);
+	/* firebox #RNS: on hardware the f64->f32 narrowing here raises
+	 * FE_UNDERFLOW|FE_INEXACT when the result is subnormal AND the narrowing
+	 * loses precision (IEEE underflow-after-rounding). wasm's f32.demote_f64
+	 * never sets the software fenv (see #7CD), so powf() left a subnormal result
+	 * with no exception raised. Replicate the hardware exactly — and DATA-
+	 * DEPENDENTLY: raise only when the narrowing is genuinely inexact.
+	 * An EXACT subnormal must NOT raise: e.g. powf(0x1p-149,1)=0x1p-149, where
+	 * ylogx is the integer -149 so r==0 and y == 0x1p-149 exactly. A blanket
+	 * "subnormal => raise" over-raises vs native musl for every such
+	 * exact-power-of-two result (the classic subnormal-underflow-oracle
+	 * unsoundness for the algebraic pow family) — verified by native-musl
+	 * bit-compare, which raises on only the inexact subnormals. Total underflow
+	 * to 0 already signals via __math_uflowf in powf(). */
+	if (rf != 0.0f && fabsf(rf) < 0x1p-126f && (double_t)rf != y)
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
+	return rf;
 }
 
 /* Returns 0 if not int, 1 if odd int, 2 if even int.  The argument is
