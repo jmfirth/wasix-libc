@@ -68,8 +68,19 @@ double fma(double x, double y, double z)
 	if (nx.e >= ZEROINFNAN || ny.e >= ZEROINFNAN)
 		return x*y + z;
 	if (nz.e >= ZEROINFNAN) {
-		if (nz.e > ZEROINFNAN) /* z==0 */
-			return x*y + z;
+		if (nz.e > ZEROINFNAN) { /* z==0; x,y finite nonzero (line 68 filtered) */
+			/* firebox #9EB: the exact product can flush to a signed zero in the
+			   x*y double-multiply with no flag, then (+-0)+(+0) loses the sign and
+			   raises nothing — but a single-rounding fma whose nonzero exact product
+			   underflows to zero owes FE_UNDERFLOW|FE_INEXACT and the product's sign
+			   (fma(-0x1p-1000,0x1p-100,0) must be -0 with INEXACT|UNDERFLOW, not +0). */
+			double r = x*y;
+			if (r == 0) {
+				feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
+				return (signbit(x) ^ signbit(y)) ? -0.0 : 0.0;
+			}
+			return r + z;
+		}
 		return z;
 	}
 

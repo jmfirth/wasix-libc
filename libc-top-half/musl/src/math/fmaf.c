@@ -90,6 +90,15 @@ float fmaf(float x, float y, float z)
 			   result==xy+z exactly iff (result-xy==z && result-z==xy). */
 			if ((double)fr != result || result - xy != z || result - z != xy)
 				feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
+		} else if (e < 0x3ff-149 && result != 0) {
+			/* firebox #9EB: below the smallest float subnormal (2^-149) a nonzero
+			   result narrows to +-0 (total flush) and wasm's f32.demote raises no
+			   software-fenv flag — a genuine total underflow. No value in
+			   (0, 2^-149) is a representable float, so any nonzero result here is
+			   inexact; the sign is already correct (result carries it and the
+			   narrowing preserves it), so only the flag is owed. Same class as the
+			   fma.c z==0 total-underflow path. */
+			feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
 		}
 #endif
 		z = result;
@@ -100,21 +109,32 @@ float fmaf(float x, float y, float z)
 	 * If result is inexact, and exactly halfway between two float values,
 	 * we need to adjust the low-order bit in the direction of the error.
 	 */
-#ifdef FE_TOWARDZERO
-	fesetround(FE_TOWARDZERO);
-#endif
-#ifdef __wasilibc_unmodified_upstream // WASI doesn't need old GCC workarounds
-	volatile double vxy = xy;  /* XXX work around gcc CSE bug */
-#else
-	double vxy = xy;
-#endif
-	double adjusted_result = vxy + z;
-	fesetround(FE_TONEAREST);
-	if (result == adjusted_result) {
-		u.f = adjusted_result;
-		u.i++;
-		adjusted_result = u.f;
+	/* firebox #9EB: FE_TOWARDZERO is undefined on wasm (arch/generic/bits/fenv.h
+	   defines only FE_TONEAREST=0) and the #7CD software fenv's fesetround is inert
+	   for arithmetic, so the upstream halfway correction here was preprocessed out
+	   and the `result == adjusted_result` test was always true — every halfway case
+	   rounded UP, so vectors whose true sum is below the float midpoint came out ~2
+	   ULP high. Recover the exact rounding residual with a Knuth 2Sum instead: xy is
+	   exact (a 48-bit product inside a 53-bit double) and z is exact (a widened
+	   float), so result = fl(xy + z) has a single rounding whose residual `err`
+	   satisfies result + err == xy + z EXACTLY (Knuth 2Sum, not Fast2Sum — z may
+	   exceed xy in magnitude). The residual's sign is exactly what FE_TOWARDZERO was
+	   meant to discover, so no rounding mode is needed. Only normal-float halfways
+	   reach here (the 0x10000000 low-29-bit mask above matches a normal-float
+	   midpoint); subnormal-float halfways miss that mask and narrow in the common
+	   case, so u.i +/- 1 always steps within the halfway mantissa pattern and never
+	   crosses an exponent boundary or zero. */
+	double bs  = result - xy;
+	double as  = result - bs;
+	double err = (xy - as) + (z - bs);   /* result + err == xy + z, exact */
+	if (err != 0) {
+		u.f = result;
+		if (signbit(err) == signbit(result))
+			u.i++;   /* |xy+z| > |result|: step one ULP away from zero */
+		else
+			u.i--;   /* |xy+z| < |result|: step one ULP toward zero */
+		result = u.f;
 	}
-	z = adjusted_result;
+	z = result;   /* narrows double->float; the perturbed value is no longer a tie */
 	return z;
 }
