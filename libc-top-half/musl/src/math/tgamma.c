@@ -177,12 +177,19 @@ double tgamma(double x)
 	r += dy * (gmhalf+0.5) * r / y;
 	z = pow(y, 0.5*z);
 	y = r * z * z;
-	/* firebox #4DN — for x in [172,184) the result overflows to +inf in
-	 * this normal path (pow/mul); wasm does not auto-raise. Negative
-	 * non-integer x is finite here (integers already handled), so
-	 * isinf(y) implies a positive-x overflow: signal OVERFLOW|INEXACT. */
+	/* firebox #4DN — wasm core has no FP status register, so this normal
+	 * path's final `y = r*z*z` neither auto-raises OVERFLOW when it goes
+	 * to +inf (positive x in [172,184)) nor UNDERFLOW when it produces a
+	 * subnormal or flushes to 0 (large negative x, |x| in ~[172,184) via
+	 * the reflection formula). Native musl relies on the hardware to raise
+	 * both; on wasm we detect the result magnitude and raise explicitly.
+	 * Integers are pre-handled and tgamma is never exactly 0 for a finite
+	 * non-integer argument, so a subnormal-or-zero magnitude here is always
+	 * an inexact underflow (libc-test tgamma wants INEXACT|UNDERFLOW). */
 	if (isinf(y))
 		feraiseexcept(FE_OVERFLOW | FE_INEXACT);  /* #4DN */
+	else if (fabs(y) < 0x1p-1022)  /* subnormal or flushed-to-0 → underflow */
+		feraiseexcept(FE_UNDERFLOW | FE_INEXACT);  /* #4DN */
 	return y;
 }
 
