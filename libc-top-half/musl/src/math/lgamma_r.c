@@ -277,6 +277,15 @@ double __lgamma_r(double x, int *signgamp)
 		r =  x*(log(x)-1.0);
 	if (sign)
 		r = nadj - r;
+	/* firebox #4DN — a finite large argument overflows lgamma to +-inf in the
+	 * Stirling path (r = x*(log(x)-1) for x >= 2**58); wasm has no FP status
+	 * register so the f64 multiply does not auto-raise. Inf inputs (returned at
+	 * the ix>=0x7ff00000 guard) and the negative-integer poles (returned with
+	 * FE_DIVBYZERO above) are pre-handled, so isinf(r) here is a genuine
+	 * finite-argument overflow: raise OVERFLOW|INEXACT to match native
+	 * (libc-test lgamma wants INEXACT|OVERFLOW). */
+	if (isinf(r))
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);  /* #4DN */
 	return r;
 }
 
