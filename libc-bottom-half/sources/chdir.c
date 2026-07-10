@@ -127,7 +127,10 @@ static const char *make_absolute(const char *path) {
     int need_slash = __wasilibc_cwd[cwd_len - 1] == '/' ? 0 : 1;
     size_t alloc_len = cwd_len + path_len + 1 + need_slash;
     if (alloc_len > make_absolute_len) {
-        char *tmp = realloc(make_absolute_buf, alloc_len);
+        // firebox #4SF: same malloc-on-NULL class as __wasilibc_find_relpath_alloc below —
+        // make_absolute_buf starts NULL, so the first call would realloc(NULL,n). Not exercised by
+        // flockfile-list (it hits the relpath buffer), but fixed together (Inv-1: fix the class).
+        char *tmp = make_absolute_buf ? realloc(make_absolute_buf, alloc_len) : malloc(alloc_len);
         if (tmp == NULL) {
             __wasilibc_cwd_unlock();
             return NULL;
@@ -181,7 +184,12 @@ int __wasilibc_find_relpath_alloc(
             errno = ERANGE;
             return -1;
         }
-        char *tmp = realloc(*relative_buf, rel_len + 1);
+        // firebox #4SF: realloc(NULL,n) is spec-legal (== malloc(n), C99 7.20.3.4) but a strict
+        // allocator interposer (musl's flockfile-list regression test) rejects the NULL case, and
+        // WASI's mandatory userspace relpath resolution makes this the FIRST allocation on every
+        // path-based open (musl's raw sys_open never allocates here). Use malloc for the initial
+        // fill so the allocation profile matches what portable code — and Linux musl — expects.
+        char *tmp = *relative_buf ? realloc(*relative_buf, rel_len + 1) : malloc(rel_len + 1);
         if (tmp == NULL) {
             errno = ENOMEM;
             return -1;
