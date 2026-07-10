@@ -134,11 +134,21 @@ double tgamma(double x)
 	/* x =< -184: tgamma(x)=+-0 with underflow */
 	if (ix >= 0x40670000) { /* |x| >= 184 */
 		if (sign) {
+			/* firebox #4DN — wasm core has no FP status register, so the
+			 * musl portable underflow trick (FORCE_EVAL of a subnormal
+			 * (float) below) is inert. The result flushes to +-0 from a
+			 * tiny nonzero true value: raise UNDERFLOW|INEXACT explicitly
+			 * to match native (libc-test tgamma wants INEXACT|UNDERFLOW). */
 			FORCE_EVAL((float)(0x1p-126/x));
+			feraiseexcept(FE_UNDERFLOW | FE_INEXACT);  /* #4DN */
 			if (floor(x) * 0.5 == floor(x * 0.5))
 				return 0;
 			return -0.0;
 		}
+		/* firebox #4DN — the multiply below overflows to +inf; wasm
+		 * f64.mul does not auto-raise, so raise OVERFLOW|INEXACT
+		 * explicitly (libc-test tgamma wants INEXACT|OVERFLOW). */
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);  /* #4DN */
 		x *= 0x1p1023;
 		return x;
 	}
@@ -167,6 +177,12 @@ double tgamma(double x)
 	r += dy * (gmhalf+0.5) * r / y;
 	z = pow(y, 0.5*z);
 	y = r * z * z;
+	/* firebox #4DN — for x in [172,184) the result overflows to +inf in
+	 * this normal path (pow/mul); wasm does not auto-raise. Negative
+	 * non-integer x is finite here (integers already handled), so
+	 * isinf(y) implies a positive-x overflow: signal OVERFLOW|INEXACT. */
+	if (isinf(y))
+		feraiseexcept(FE_OVERFLOW | FE_INEXACT);  /* #4DN */
 	return y;
 }
 
