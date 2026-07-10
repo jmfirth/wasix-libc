@@ -570,18 +570,83 @@ static int g_fixed_count;
 // WASIX_SHM_WINDOW_BASE above. `uintptr_t addr` holds the full 64-bit window
 // address on wasm64 (no 32-bit truncation), so the registry is width-agnostic.
 #define WASIX_MMAN_WINDOW_MAX 4096
-static struct { uintptr_t addr; int fd; } g_window_maps[WASIX_MMAN_WINDOW_MAX];
+// firebox#ZBK: the registry now also carries the backing fd's offset + mapped
+// length + a `writeback` discriminator, so a regular-file MAP_SHARED window can be
+// flushed to its VFS file at the msync/munmap sync points (guest-side write-back).
+// A /dev/shm entry registers writeback=0 and keeps the pure inode-pin behaviour
+// (#V12) — its window IS the shared object, there is nothing to flush.
+static struct {
+    uintptr_t addr;
+    int fd;            // held (dup'd) backing fd — inode-pin AND writeback target
+    off_t offset;      // fd offset the mapping starts at (0 in the routed posture)
+    size_t length;     // user-requested mapping length (the writeback extent)
+    int writeback;     // 1 => regular-file MAP_SHARED PROT_WRITE (flush on sync)
+} g_window_maps[WASIX_MMAN_WINDOW_MAX];
 static int g_window_count;
 
-static void wasix_window_register(uintptr_t addr, int fd) {
+static void wasix_window_register(uintptr_t addr, int fd, off_t offset,
+                                  size_t length, int writeback) {
     if (g_window_count < WASIX_MMAN_WINDOW_MAX) {
         g_window_maps[g_window_count].addr = addr;
         g_window_maps[g_window_count].fd = fd;
+        g_window_maps[g_window_count].offset = offset;
+        g_window_maps[g_window_count].length = length;
+        g_window_maps[g_window_count].writeback = writeback;
         g_window_count++;
     } else {
         // Registry full — cannot track the held fd for later close, so don't
         // leak it. The inode-pin is best-effort; drop it rather than leak.
         close(fd);
+    }
+}
+
+// firebox#ZBK: flush a regular-file MAP_SHARED window mapping's live bytes back to
+// its backing VFS file — the guest-side write-back that makes a regular file's
+// MAP_SHARED faithful ("write references shall change the underlying object",
+// mmap/7-1). Called at the SAME sync points the legacy private path uses
+// (msync / munmap), so this is a strict reproduction of that path's file coherence
+// plus the cross-fork window sharing. It is the INVERSE of the shm_created seed:
+// read [0, min(length, cap)) out of the window and pwrite it to the fd. Only fires
+// for entries registered writeback=1 (regular file, PROT_WRITE); a /dev/shm entry
+// (writeback=0) stays the pure no-op the #61X msync/munmap path already is.
+//
+// CRITICAL — symmetric to the seed (see the routing block): the window lives ABOVE
+// the grow-capped memory size (SHM_BASE), so only Cranelift-elided RAW loads reach
+// it. Read the window with a volatile i32.load8 loop (never memcpy → memory.copy,
+// which bounds-TRAPS past memory.size), bounce through a stack buffer BELOW SHM_BASE
+// (bounds-OK), then pwrite from there. `cap` bounds the flush to the caller's
+// requested extent (SIZE_MAX = whole mapping). Best-effort like the seed: a pwrite
+// error leaves the file partially synced rather than failing the sync.
+static void wasix_window_writeback(uintptr_t addr, size_t cap) {
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_window_maps[i].addr == addr) {
+            if (!g_window_maps[i].writeback)
+                return;                          // /dev/shm entry: no file flush
+            const int fd = g_window_maps[i].fd;
+            const off_t base_off = g_window_maps[i].offset;
+            size_t total = g_window_maps[i].length;
+            if (cap < total)
+                total = cap;
+            if (fd < 0)
+                return;
+            volatile unsigned char *win = (volatile unsigned char *)addr;
+            unsigned char wbbuf[512];
+            size_t done = 0;
+            while (done < total) {
+                size_t want = total - done;
+                if (want > sizeof wbbuf) want = sizeof wbbuf;
+                for (size_t k = 0; k < want; k++)
+                    wbbuf[k] = win[done + k];    // raw i32.load8 <- window
+                const ssize_t nw = pwrite(fd, wbbuf, want, base_off + (off_t)done);
+                if (nw < 0) {
+                    if (errno == EINTR) continue;
+                    return;                       // best-effort
+                }
+                if (nw == 0) return;
+                done += (size_t)nw;
+            }
+            return;
+        }
     }
 }
 
@@ -885,28 +950,48 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
-    // firebox#61X (Stage-1 1b-libc): a MAP_SHARED mapping of a /dev/shm object
-    // is a cross-process shared-memory region. Route it to the host shared
-    // window — raw stores/loads are then coherent across processes (fork/16-1)
-    // and musl's named semaphores share their byte region — instead of the
-    // private aligned_alloc+pread emulation below. Gated tightly so the legacy
-    // path keeps every case the window must NOT take over:
-    //   * MAP_SHARED only — a /dev/shm object mmap'd MAP_PRIVATE (e.g.
-    //     fork/16-1's second object) must stay a private copy.
-    //   * /dev/shm objects only (__wasix_is_shm_inode, keyed on the stable
-    //     st_ino) — a regular file's MAP_SHARED needs write-back to its backing
-    //     file, which the anonymous host window does NOT provide; regular files
-    //     keep the legacy path (the separate, still-open #7C5 writeback gap).
+    // firebox#61X (Stage-1 1b-libc) + #ZBK: a MAP_SHARED mapping of a /dev/shm
+    // object OR a regular file is a cross-process shared-memory region. Route it to
+    // the host shared window — raw stores/loads are then coherent across processes
+    // and across fork() (fork/16-1; getpid/1-1; the pthread PROCESS_SHARED
+    // cond+mutex cluster) — instead of the private aligned_alloc+pread emulation
+    // below. Gated tightly so the legacy path keeps every case the window must NOT
+    // take over:
+    //   * MAP_SHARED only — a MAP_PRIVATE mapping (e.g. fork/16-1's second object,
+    //     mmap/7-2/7-3) is copy-on-write and must stay a private copy.
+    //   * regular files AND /dev/shm objects (both are S_ISREG). #ZBK: a regular
+    //     file's MAP_SHARED is ALSO window-routed now — the "write-back to its
+    //     backing file" the anonymous host window does not itself provide is done
+    //     in the GUEST at the msync/munmap sync points (wasix_window_writeback),
+    //     exactly the sync points + pwrite the legacy path already used, so this is
+    //     a strict SUPERSET of the legacy file coherence PLUS cross-fork sharing.
+    //     The `is_regfile && !is_shm` discriminator drives that write-back and the
+    //     regular-file-only re-seed below; a /dev/shm object keeps the #V12
+    //     seed-once + no-flush behaviour byte-for-byte.
     //   * offset 0 only — the host maps the object from its start; a non-zero
     //     offset into a windowed object is the §7.4 segment-sizing follow-up, so
     //     it falls through to the legacy path rather than mis-map.
-    // Any host failure (no window reserved: wasm64 / non-Static heap / the
-    // browser js/v8 backends, the §4-B3 known-gap; or an OS map error) falls
-    // through to the legacy emulation below — never silently wrong.
+    // Any host failure (no window reserved: non-Static heap / the browser js/v8
+    // backends, the §4-B3 known-gap; or an OS map error) falls through to the
+    // legacy emulation below — never silently wrong.
     if ((flags & MAP_SHARED) != 0 && (flags & MAP_ANON) == 0 && fd >= 0 &&
         offset == 0) {
         struct stat shm_st;
-        if (fstat(fd, &shm_st) == 0 && __wasix_is_shm_inode(shm_st.st_ino)) {
+        const int fstat_ok = (fstat(fd, &shm_st) == 0);
+        // A /dev/shm object is also S_ISREG, so the writeback/re-seed discriminator
+        // is `is_regfile && !is_shm` (a plain regular file, not a /dev/shm object).
+        const int is_shm = fstat_ok && __wasix_is_shm_inode(shm_st.st_ino);
+        const int is_regfile = fstat_ok && S_ISREG(shm_st.st_mode);
+        // #ZBK: a regular file routes to the window ONLY when it is WRITABLE (has
+        // PROT_WRITE). A sub-RW-protection regular-file MAP_SHARED (PROT_READ-only
+        // or PROT_NONE — mmap/6-1/6-2/6-3) must keep the legacy aligned_alloc path
+        // so its #SAH host-mprotect enforcement faults a disallowed access — the
+        // shared window is shared host pages and cannot carry a per-mapping sub-RW
+        // protection. A read-only regular file also has nothing to make
+        // cross-fork-coherent (it cannot be written through), so excluding it loses
+        // no coherence. /dev/shm keeps its prot-agnostic #V12 routing unchanged
+        // (no /dev/shm conformance test needs sub-RW enforcement).
+        if (fstat_ok && (is_shm || (is_regfile && (prot & PROT_WRITE) != 0))) {
             uint64_t shm_off = 0;
             uint32_t shm_created = 0;
             // firebox#F4A-partialpage: POSIX mmap(2) maps WHOLE pages — "the
@@ -965,7 +1050,30 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                 // SHM_BASE — bounds-OK), then copy into the window with a volatile
                 // byte-store loop (individual i32.store8, never coalesced into
                 // memory.copy — the one form guaranteed to be Cranelift-elided).
-                if (shm_created) {
+                //
+                // firebox#ZBK: for a REGULAR file, re-seed on EVERY map (not just
+                // shm_created). WHY: the host segment registry persists a regular
+                // file's window for the HOST-process lifetime — it is NOT evicted
+                // when the guest process that created it exits (shm_registry.rs has
+                // no per-process release; only shm_unmap/invalidate evicts, and a
+                // plain regular file never calls it). So a fresh mmap() of the SAME
+                // inode AFTER a prior mapping wrote + unmapped it would otherwise
+                // observe STALE window bytes. Linux instead gives a fresh mmap the
+                // file's current page-cache view, with any partial-page write PAST
+                // EOF re-zeroed (mmap/11-4: a write beyond the file length is NOT
+                // persisted, and a re-map reads it back as zero). Re-preading
+                // [0,length) from the fd AND re-zeroing the rounded tail
+                // [length, shm_map_len) reproduces that. The 12 cross-fork target
+                // rows are UNAFFECTED: they mmap ONCE (the fork child INHERITS the
+                // window pointer, it never re-mmaps), so re-seed == seed-once for
+                // them. The only narrowing vs Linux is that two INDEPENDENT
+                // (non-fork) regular-file MAP_SHARED opens are not live byte-coherent
+                // — identical to the legacy private-copy path today (R1
+                // known-limitation), unexercised by the corpus. A /dev/shm object
+                // keeps the seed-once behaviour byte-for-byte (a later mapper must
+                // inherit the LIVE shared value, never clobber it — #V12).
+                const int reg_reseed = (is_regfile && !is_shm);
+                if (shm_created || reg_reseed) {
                     volatile unsigned char *win =
                         (volatile unsigned char *)(uintptr_t)shm_off;
                     unsigned char seedbuf[512];
@@ -981,11 +1089,45 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                             // is zero-filled) rather than failing the map.
                             break;
                         }
-                        if (nread == 0) break;   // short file — remainder stays zero
+                        if (nread == 0) {
+                            // Short file — the remainder of [done,length) is the
+                            // file's zeros. A FRESH /dev/shm object is already zero
+                            // so this is a no-op there (keeps #V12 byte-identical);
+                            // a regular-file RE-map may have stale bytes here from a
+                            // prior mapping, so clear them explicitly.
+                            if (reg_reseed)
+                                for (size_t z = done; z < length; z++) win[z] = 0;
+                            break;
+                        }
                         for (ssize_t i = 0; i < nread; i++)
                             win[done + (size_t)i] = seedbuf[i];   // raw i32.store8 -> window
                         done += (size_t)nread;
                     }
+                    // firebox#ZBK: re-zero the rounded partial-page tail
+                    // [length, shm_map_len) for a regular file so a re-map cannot
+                    // observe a prior mapping's past-EOF write (mmap/11-4). Skipped
+                    // for /dev/shm — its tail is the fresh OS object's zeros and it
+                    // never re-seeds (re-zeroing would risk clobbering a live tail).
+                    if (reg_reseed) {
+                        for (size_t z = length; z < (size_t)shm_map_len; z++)
+                            win[z] = 0;   // raw i32.store8 -> window
+                    }
+                }
+                // firebox#ZBK: mark st_atime for a regular file, mirroring the
+                // legacy path (mmap/13-1). The seed pread above IS a genuine read
+                // reference to the file's bytes that backs every later in-memory
+                // read of the window, so POSIX's "st_atime shall be marked for
+                // update by the first read reference to the mapped region"
+                // (permitted at map time) is honoured here. atime-only (UTIME_OMIT
+                // on mtime) — a read must never bump st_mtime. Best-effort; a fd
+                // lacking FD_FILESTAT_SET_TIMES still maps. Regular-file only —
+                // /dev/shm objects carry no meaningful atime and have no such test.
+                if (reg_reseed) {
+                    const struct timespec atime_now[2] = {
+                        { .tv_sec = 0, .tv_nsec = UTIME_NOW },   // st_atime -> now
+                        { .tv_sec = 0, .tv_nsec = UTIME_OMIT },  // st_mtime untouched
+                    };
+                    (void)futimens(fd, atime_now);
                 }
                 // firebox#V12 gap #3 (inode-lifetime pinning): dup + HOLD the fd so
                 // the /dev/shm inode stays referenced as long as this window mapping
@@ -1003,7 +1145,18 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                 {
                     const int held = dup(fd);
                     if (held >= 0)
-                        wasix_window_register((uintptr_t)shm_off, held);
+                        // firebox#ZBK: record offset+length + the writeback
+                        // discriminator. writeback fires only for a regular file's
+                        // WRITABLE MAP_SHARED — a /dev/shm entry (is_shm) or a
+                        // read-only regular file registers writeback=0 and keeps the
+                        // pure inode-pin / no-flush behaviour. The read-only gate
+                        // mirrors the legacy msync `(prot & PROT_WRITE)==0 -> no-op`
+                        // rule (a read-only mapping cannot be dirtied → nothing to
+                        // flush, and flushing would needlessly bump the file mtime).
+                        wasix_window_register(
+                            (uintptr_t)shm_off, held, offset, length,
+                            /*writeback=*/(is_regfile && !is_shm &&
+                                           (prot & PROT_WRITE) != 0));
                 }
                 // firebox#9VY-24: count this window mapping toward
                 // vm.max_map_count. Repeated maps of the same inode return the
@@ -1251,6 +1404,12 @@ int munmap(void *addr, size_t length) {
             errno = EINVAL;
             return -1;
         }
+        // firebox#ZBK: flush a regular-file MAP_SHARED window back to its backing
+        // file BEFORE releasing the pin (the release closes the held fd this
+        // write-back pwrites to). Whole-mapping flush (SIZE_MAX cap — a window
+        // munmap unmaps the entire mapping). A /dev/shm entry is a no-op
+        // (writeback=0) — the window IS the shared object, nothing to flush.
+        wasix_window_writeback(wa, (size_t)-1);
         // firebox#V12 gap #3: release the held /dev/shm inode-lifetime pin for
         // this window mapping (see wasix_window_register). A no-op if none held.
         wasix_window_release(wa);
@@ -1403,6 +1562,14 @@ int msync (void *addr, size_t length, int flags) {
             errno = EINVAL;
             return -1;
         }
+        // firebox#ZBK: a regular-file MAP_SHARED window flushes its live bytes to
+        // the backing file on msync (POSIX: MS_SYNC writes the mapping's changes
+        // through to the underlying object). Bound the flush to the caller's
+        // requested `length` (Linux msync flushes the requested range; the entry
+        // caps it to the mapping length). A /dev/shm entry stays the pure no-op
+        // (writeback=0) — the window IS the shared object, there is nothing to
+        // flush, exactly as the #61X path already was.
+        wasix_window_writeback((uintptr_t)addr, length);
         return 0;
     }
     // Header recovery: see munmap() for layout. addr is page-aligned by
