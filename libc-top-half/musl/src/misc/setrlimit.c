@@ -7,6 +7,9 @@
 #include "libc.h"
 #ifndef __wasilibc_unmodified_upstream
 #include <__wasilibc_rlimit.h>
+// firebox#1GJ: __wasix_resource_set_nofile + __WASI_ERRNO_* (api.h pulls in
+// api_firebox.h) — the host wire that makes RLIMIT_NOFILE actually enforced.
+#include <wasi/api.h>
 #endif
 
 #ifdef __wasilibc_unmodified_upstream
@@ -160,6 +163,25 @@ int setrlimit(int resource, const struct rlimit *rlim)
 	if (rlim->rlim_max > cur.rlim_max) {
 		errno = EPERM;
 		return -1;
+	}
+	// firebox#1GJ: RLIMIT_NOFILE is enforced by the host fd table (a newly
+	// allocated fd *number* >= the soft limit fails with EMFILE), not by this
+	// echo table. Route the change to the host BEFORE recording it, so a
+	// host-rejected limit fails without desyncing the echo from what is actually
+	// enforced. The host holds the authoritative NOFILE hard default (4096),
+	// which this table does not (its default is RLIM_INFINITY), so a first-time
+	// unprivileged hard-limit raise past the fd-table ceiling is caught here even
+	// though the RLIM_INFINITY-based check above passed it. Other resources keep
+	// their existing table-only behavior (RLIMIT_DATA/RLIMIT_AS sbrk ceiling).
+	if (resource == RLIMIT_NOFILE) {
+		__wasi_errno_t e = __wasix_resource_set_nofile(rlim->rlim_cur, rlim->rlim_max);
+		if (e != __WASI_ERRNO_SUCCESS) {
+			// The firebox sysroot aliases the POSIX errno macros to the
+			// __WASI_ERRNO_* numbers, so the raw host errno matches <errno.h>
+			// (sched_impl.h relies on the same aliasing).
+			errno = (int)e;
+			return -1;
+		}
 	}
 	rlimits[resource] = *rlim;
 	rlimit_set_mask |= (1u << resource);

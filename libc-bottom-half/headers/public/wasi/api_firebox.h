@@ -111,6 +111,19 @@ __wasi_errno_t __wasix_proc_setgroups(const uint32_t *buf, size_t buf_len);
  * Host: lib/wasix/src/syscalls/wasix/sched_check_owner.rs. */
 __wasi_errno_t __wasix_sched_check_owner(uint32_t pid);
 
+/* firebox#1GJ — host side of setrlimit(RLIMIT_NOFILE, …). Apply the process's
+ * (soft, hard) fd-count limit to the host fd table, which is what actually
+ * enforces it: an fd number allocated at or above `soft` fails with EMFILE.
+ * Returns __WASI_ERRNO_SUCCESS (0) on success, or Linux's unprivileged
+ * setrlimit(2) errnos surfaced verbatim: __WASI_ERRNO_INVAL when soft > hard,
+ * __WASI_ERRNO_PERM for a hard-limit RAISE (the sandbox grants no
+ * CAP_SYS_RESOURCE). The guest setrlimit(RLIMIT_NOFILE) wrapper routes through
+ * this so the enforced limit moves; getrlimit still reads the echoed table.
+ * Both args are 64-bit (rlim_t) regardless of pointer width, so the host takes
+ * i64/i64 → registered identically in wasix_32v1 and wasix_64v1.
+ * Host: lib/wasix/src/syscalls/wasix/resource_set_nofile.rs. */
+__wasi_errno_t __wasix_resource_set_nofile(uint64_t soft, uint64_t hard);
+
 #ifdef __cplusplus
 }
 #endif

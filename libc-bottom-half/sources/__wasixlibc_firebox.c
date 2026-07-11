@@ -203,3 +203,12 @@ __wasi_errno_t __wasix_proc_setgroups(const uint32_t *buf,size_t buf_len){return
  * partial (seteuid) privilege drop (see api_firebox.h / sched_impl.h). */
 int32_t __imported_wasix_fbx_sched_check_owner(int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("sched_check_owner")));
 __wasi_errno_t __wasix_sched_check_owner(uint32_t pid){return (uint16_t)__imported_wasix_fbx_sched_check_owner((int32_t)pid);}
+
+/* firebox#1GJ — setrlimit(RLIMIT_NOFILE) host wire. Applies the (soft, hard)
+ * fd-count limit to the host fd table (which returns EMFILE past the soft limit);
+ * the guest setrlimit.c could previously only echo NOFILE into its BSS table
+ * (firebox#KZ1) with nothing enforcing it. Both args are rlim_t (64-bit on every
+ * width), so the import takes int64_t/int64_t — NOT intptr_t — matching the host's
+ * fixed u64/u64 signature, registered identically in wasix_32v1 and wasix_64v1. */
+int32_t __imported_wasix_fbx_resource_set_nofile(int64_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("resource_set_nofile")));
+__wasi_errno_t __wasix_resource_set_nofile(uint64_t soft,uint64_t hard){return (uint16_t)__imported_wasix_fbx_resource_set_nofile((int64_t)soft,(int64_t)hard);}
