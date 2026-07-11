@@ -193,3 +193,13 @@ int32_t __imported_wasix_fbx_proc_setcred(int32_t,int32_t,int32_t,int32_t) __att
 __wasi_errno_t __wasix_proc_setcred(uint32_t which,uint32_t id_a,uint32_t id_b,uint32_t id_c){return (uint16_t)__imported_wasix_fbx_proc_setcred((int32_t)which,(int32_t)id_a,(int32_t)id_b,(int32_t)id_c);}
 int32_t __imported_wasix_fbx_proc_setgroups(intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_setgroups")));
 __wasi_errno_t __wasix_proc_setgroups(const uint32_t *buf,size_t buf_len){return (uint16_t)__imported_wasix_fbx_proc_setgroups((intptr_t)buf,(intptr_t)buf_len);}
+
+/* firebox#R63 — sched_set*(2) check_same_owner write-permission probe. All-scalar
+ * (pid in, __wasi_errno_t out), host fn NOT generic over MemorySize (like
+ * proc_setcred) → registered identically in wasix_32v1 and wasix_64v1. The guest
+ * sched_setparam/sched_setscheduler wrappers route their permission check through
+ * this rather than kill(pid, 0): sched uses the kernel's EUID-ONLY
+ * check_same_owner, whereas kill(2) is ruid-INCLUSIVE, and the two diverge under a
+ * partial (seteuid) privilege drop (see api_firebox.h / sched_impl.h). */
+int32_t __imported_wasix_fbx_sched_check_owner(int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("sched_check_owner")));
+__wasi_errno_t __wasix_sched_check_owner(uint32_t pid){return (uint16_t)__imported_wasix_fbx_sched_check_owner((int32_t)pid);}

@@ -99,6 +99,18 @@ __wasi_errno_t __wasix_proc_getgroups(uint32_t *buf, size_t buf_len, size_t *ret
 __wasi_errno_t __wasix_proc_setcred(uint32_t which, uint32_t id_a, uint32_t id_b, uint32_t id_c);
 __wasi_errno_t __wasix_proc_setgroups(const uint32_t *buf, size_t buf_len);
 
+/* firebox#R63 — sched_set*(2) write-permission probe. Given a target pid, returns
+ * __WASI_ERRNO_SUCCESS (0) when the CALLER's credentials permit setting that
+ * target's scheduling parameters per Linux check_same_owner (EUID-ONLY: caller
+ * euid == target euid or ruid, or caller euid 0), __WASI_ERRNO_PERM for a foreign
+ * owner, __WASI_ERRNO_SRCH for a missing/reaped pid. pid == 0 (the calling
+ * process) is self → Success. This is the euid-vs-ruid sibling of kill's
+ * ruid-INCLUSIVE rule: the guest sched_set* wrappers MUST route through this, NOT
+ * kill(pid, 0), whose permission model gives the opposite answer under a partial
+ * (seteuid) privilege drop (firebox#R63). The read/existence probe stays on kill.
+ * Host: lib/wasix/src/syscalls/wasix/sched_check_owner.rs. */
+__wasi_errno_t __wasix_sched_check_owner(uint32_t pid);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,6 +26,7 @@
 #include <sched.h>
 #include <errno.h>
 #include <signal.h>
+#include <wasi/api.h> /* firebox#R63 — __wasix_sched_check_owner + __WASI_ERRNO_* */
 
 /* The scheduling policies Linux accepts. SCHED_DEADLINE is intentionally not a
  * settable policy through sched_setscheduler(2) (it needs sched_setattr), so it
@@ -100,19 +101,27 @@ static inline int __sched_pid_check(pid_t pid)
  * Faithful write-permission probe for the sched_set*(2) mutators
  * (sched_setparam / sched_setscheduler). Same pid validation as
  * __sched_pid_check — EINVAL for a negative pid, pid == 0 is the calling
- * process, ESRCH for a missing/reaped pid — but a live process we may NOT
- * signal (kill(pid, 0) fails EPERM) is a permission DENIAL here, not an
- * existence success. That is the write/read asymmetry the kernel enforces
- * (firebox#R63): reading another process's policy/parameters needs no
- * privilege — so the read probe above swallows the EPERM leg — but CHANGING
- * them requires the caller's credentials match the target's (the kernel's
- * check_same_owner()), so a cross-owner mutation is refused EPERM. We
- * therefore surface kill(2)'s EPERM unchanged instead of treating "exists but
- * not ours" as OK. Open POSIX sched_setparam/26-1 (non-root setparam of the
- * root-owned pid 1, via the pid1-init harness) asserts exactly this EPERM.
+ * process, ESRCH for a missing/reaped pid — but the PERMISSION model is the
+ * kernel's check_same_owner(), NOT kill(2)'s. This is the write/read asymmetry
+ * (firebox#R63): reading another process's policy/parameters needs no privilege
+ * (so the read probe above swallows the EPERM leg), but CHANGING them requires
+ * the caller's EFFECTIVE uid to match the target's (check_same_owner is
+ * euid-only), so a cross-owner mutation is refused EPERM.
  *
- * Returns 0 when the mutation is permitted (self, or a process we may signal);
- * -1 with errno set (EPERM for a foreign owner, ESRCH for a missing pid,
+ * Why NOT kill(pid, 0) here (the crux, firebox#R63): kill(2) permission is
+ * ruid-INCLUSIVE (the kernel grants when the sender's real OR effective uid
+ * matches the target), whereas check_same_owner is EUID-ONLY. Under a PARTIAL
+ * privilege drop — seteuid(nobody) while ruid stays 0 (exactly Open POSIX
+ * sched_setparam/26-1) — kill(1, 0) is PERMITTED (the caller's ruid 0 matches
+ * init's ruid 0) but sched_setparam(1, …) must be EPERM (the caller's euid is
+ * now nobody, matching neither of init's uids). A kill-based probe therefore
+ * answers "allowed" exactly when sched must answer "denied". The guest cannot
+ * compare effective uids across processes, so the host performs the whole
+ * check_same_owner comparison (__wasix_sched_check_owner) and returns the errno
+ * — the same host-credential channel #KKM uses for the signal EPERM gate.
+ *
+ * Returns 0 when the mutation is permitted (self, same-owner, or privileged);
+ * -1 with errno set (EPERM for a foreign owner, ESRCH for a missing/reaped pid,
  * EINVAL for a negative pid) when it must be denied.
  *
  * NOTE (class-sibling, deferred): sched_setaffinity is also a write and shares
@@ -127,11 +136,17 @@ static inline int __sched_pid_check_write(pid_t pid)
 		return -1;
 	}
 	if (pid == 0)
+		return 0; /* the calling process — self-set always permitted */
+	/* Host check_same_owner (euid-only) — see the block comment for why this
+	 * is the host import and NOT kill(pid, 0). */
+	__wasi_errno_t e = __wasix_sched_check_owner((uint32_t)pid);
+	if (e == __WASI_ERRNO_SUCCESS)
 		return 0;
-	if (kill(pid, 0) == 0)
-		return 0;
-	/* errno is EPERM (foreign owner) or ESRCH (missing) — both deny the
-	 * write; surface unchanged (do NOT swallow EPERM like the read probe). */
+	/* Host verdict: EPERM (foreign owner) or ESRCH (missing/reaped). The
+	 * firebox sysroot aliases the POSIX errno macros to the __WASI_ERRNO_*
+	 * numbers, so storing the raw host errno matches <errno.h> (kill.c relies
+	 * on the same aliasing). */
+	errno = (int)e;
 	return -1;
 }
 
