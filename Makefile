@@ -109,6 +109,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
 	misc/realpath.c \
         misc/syslog.c \
         misc/mntent.c \
+        misc/wordexp.c \
         mman/shm_open.c \
         errno/strerror.c \
         \
@@ -530,7 +531,6 @@ MUSL_OMIT_HEADERS += \
     "pty.h" \
     "ulimit.h" \
     "sys/xattr.h" \
-    "wordexp.h" \
     "sys/membarrier.h" \
     "sys/signalfd.h" \
     "sys/termios.h" \
