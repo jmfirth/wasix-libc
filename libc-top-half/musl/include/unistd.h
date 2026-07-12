@@ -134,11 +134,20 @@ unsigned sleep(unsigned);
 int pause(void);
 #endif
 
-#if defined(__wasilibc_unmodified_upstream) || !defined(__wasm_exception_handling__)
+/* firebox#FD6: fork/_Fork/_fork_internal are declared in EH builds too.
+ * Upstream 0008d18 hid these behind !__wasm_exception_handling__ ("fork not
+ * supported in EH"), but Firebox implements REAL fork via the proc_fork host
+ * call (the moat) — the symbols are DEFINED and shipped in every EH libc (nm of
+ * the threaded/EH libc.a: `T fork` / `T _fork_internal` / `T _Fork`, routing
+ * through `T __wasi_proc_fork`; ruby & node fork at runtime). The upstream gate
+ * hid only the PROTOTYPE, so EH fork-callers (legacy/daemon.c, un-omitted by
+ * #RNS 3200a5f) hit -Werror implicit-declaration against a symbol that actually
+ * links and works, breaking every from-scratch EH libc rebuild. Un-gate to
+ * match the real Firebox ABI. (vfork keeps its EH setjmp branch below — that
+ * one genuinely differs in EH; fork does not, it is the moat.) */
 pid_t fork(void);
 pid_t _fork_internal(int copy_mem);
 pid_t _Fork(int copy_mem);
-#endif
 int execve(const char *, char *const [], char *const []);
 int execv(const char *, char *const []);
 int execle(const char *, const char *, ...);
