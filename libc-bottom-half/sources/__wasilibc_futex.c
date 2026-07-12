@@ -11,8 +11,23 @@ int __wasilibc_futex_wait_wasix(volatile void *addr, int op, int expected, int64
 
   __wasi_bool_t woken = __WASI_BOOL_FALSE;
   
+  /* firebox#M3T — the timed/untimed split is SIGNED: only a NEGATIVE
+   * max_wait_ns (the -1 "no timespec" sentinel from __wait.c /
+   * __timedwait.c's __futex4_cp) means wait-indefinitely. A ZERO relative
+   * timeout is a legal, common value — musl's __timedwait_cp computes
+   * `rel = abs - now` and produces rel=={0,0} whenever the deadline lands
+   * on the CURRENT clock tick (pthread_cond_timedwait with abs==now: ruby
+   * `sleep 0`, sem_timedwait(&ts=now), any timed wait whose remaining time
+   * rounds to 0ns). On Linux futex(FUTEX_WAIT, ts={0,0}) returns ETIMEDOUT
+   * immediately; the previous `> 0` test collapsed that case into the
+   * INFINITE arm, turning a should-expire-now wait into a permanent park —
+   * the #M3T/#HRF ruby `Thread.new{sleep 0}.join` wedge (~50% per run: the
+   * flip is whether the clock ticked between the caller computing `abs`
+   * and __timedwait_cp re-reading it — ticked → rel<0 → early ETIMEDOUT;
+   * not ticked → rel==0 → this arm). The host handles Some(0) faithfully
+   * (immediate TimedOut), so 0 belongs in the SOME arm. */
   __wasi_option_timestamp_t timeout;
-  if (max_wait_ns > 0) {
+  if (max_wait_ns >= 0) {
     timeout.tag = __WASI_OPTION_SOME;
     timeout.u.some = max_wait_ns;
   } else {
