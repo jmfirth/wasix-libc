@@ -1606,8 +1606,15 @@ int __wasm_sigaction(int sig, int action) {
  * here — alongside the other always-present signal symbols — guarantees the
  * import is present in EVERY program's module so the middleware always has a
  * function-index to call. */
-extern int sigsetjmp();
-extern void siglongjmp();
+/* firebox#FD6: real prototypes, not K&R empty-parens. <setjmp.h> is in scope
+ * here and declares `int sigsetjmp(sigjmp_buf,int)` / `_Noreturn void
+ * siglongjmp(sigjmp_buf,int)`; under clang 22 / C23 an empty `()` means
+ * `(void)`, which CONFLICTS with those real prototypes (-Werror
+ * -Wdeprecated-non-prototype) and breaks every from-scratch EH libc rebuild.
+ * Match the header. (mknodat below keeps `()` — no conflicting prototype is in
+ * scope for it, so it does not error; only address-taken for force-link.) */
+extern int sigsetjmp(sigjmp_buf, int);
+extern _Noreturn void siglongjmp(sigjmp_buf, int);
 extern int mknodat();
 extern int __fbx_signal_poll(void);
 __attribute__((used))
