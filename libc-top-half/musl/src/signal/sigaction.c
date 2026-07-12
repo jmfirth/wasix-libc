@@ -1606,13 +1606,21 @@ int __wasm_sigaction(int sig, int action) {
  * here — alongside the other always-present signal symbols — guarantees the
  * import is present in EVERY program's module so the middleware always has a
  * function-index to call. */
-/* firebox#FD6: real prototypes, not K&R empty-parens. <setjmp.h> is in scope
- * here and declares `int sigsetjmp(sigjmp_buf,int)` / `_Noreturn void
- * siglongjmp(sigjmp_buf,int)`; under clang 22 / C23 an empty `()` means
- * `(void)`, which CONFLICTS with those real prototypes (-Werror
- * -Wdeprecated-non-prototype) and breaks every from-scratch EH libc rebuild.
- * Match the header. (mknodat below keeps `()` — no conflicting prototype is in
+/* firebox#FD6: real prototypes, not K&R empty-parens. Under clang 22 / C23 an
+ * empty `()` means `(void)`, which CONFLICTS with <setjmp.h>'s real prototypes
+ * `int sigsetjmp(sigjmp_buf,int)` / `_Noreturn void siglongjmp(sigjmp_buf,int)`
+ * (-Werror -Wdeprecated-non-prototype) whenever that header is in scope, breaking
+ * every from-scratch EH libc rebuild. So match the header.
+ * firebox#N2R: but the real prototypes reference the `sigjmp_buf` TYPEDEF, which
+ * lives in <setjmp.h> — and sigaction.c only includes <signal.h>. In the EH
+ * variant <setjmp.h> happened to be transitively in scope; in the --pic / static
+ * / --threaded variants it is NOT, so clang K&R-parsed `sigsetjmp(sigjmp_buf,int)`
+ * (sigjmp_buf as an unknown param NAME) and errored "expected identifier" at
+ * `int`, breaking every from-scratch non-EH rebuild. Include <setjmp.h>
+ * explicitly so `sigjmp_buf` is a visible type and the prototypes match the header
+ * in ALL variants. (mknodat below keeps `()` — no conflicting prototype is in
  * scope for it, so it does not error; only address-taken for force-link.) */
+#include <setjmp.h>
 extern int sigsetjmp(sigjmp_buf, int);
 extern _Noreturn void siglongjmp(sigjmp_buf, int);
 extern int mknodat();
