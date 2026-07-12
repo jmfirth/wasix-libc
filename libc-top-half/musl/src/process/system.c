@@ -11,6 +11,8 @@
 #ifdef __wasilibc_unmodified_upstream
 extern char **__environ;
 #else
+#include <wasi/libc-environ.h>	/* __wasilibc_ensure_environ */
+extern char **__wasilibc_environ;
 pid_t waitpid(pid_t pid, int *status, int options);
 #endif
 
@@ -42,9 +44,18 @@ int system(const char *cmd)
 	ret = posix_spawn(&pid, "/bin/sh", 0, &attr,
 		(char *[]){"sh", "-c", (char *)cmd, 0}, __environ);
 #else
-	char* envp = NULL;
+	/*
+	 * firebox #97D (same class as execv): pass the LIVE environ, not an
+	 * empty {NULL} array. The prior `&envp` (envp==NULL) marshalled a
+	 * zero-length env buffer, so /bin/sh saw only the stale parent-boot
+	 * snapshot and dropped post-fork setenv() changes. posix_spawn's
+	 * __posix_spawn combines envp via the same __wasilibc_exec_combine_strings
+	 * path execve/__execvpe use, so an ensured __wasilibc_environ marshals
+	 * correctly (matches upstream musl's __environ pass-through).
+	 */
+	__wasilibc_ensure_environ();
 	ret = posix_spawn(&pid, "/bin/sh", 0, &attr,
-		(char *[]){"sh", "-c", (char *)cmd, 0}, &envp);
+		(char *[]){"sh", "-c", (char *)cmd, 0}, __wasilibc_environ);
 #endif
 	posix_spawnattr_destroy(&attr);
 

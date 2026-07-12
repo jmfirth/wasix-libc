@@ -1,12 +1,10 @@
 #include <unistd.h>
-#include <string.h>
 
 #ifdef __wasilibc_unmodified_upstream
 extern char **__environ;
 #else
-#include <stdlib.h>
-#include <errno.h>
-#include <wasi/api.h>
+#include <wasi/libc-environ.h>	/* __wasilibc_ensure_environ */
+extern char **__wasilibc_environ;
 #endif
 
 int execv(const char *path, char *const argv[])
@@ -15,35 +13,23 @@ int execv(const char *path, char *const argv[])
 	return execve(path, argv, __environ);
 #else
 	/*
-	 * firebox #54: emit NUL between entries (was '\n'), end with double NUL.
-	 * See the long comment in execvp.c for the protocol — this is the
-	 * exact same packing as __wasilibc_exec_combine_strings().
+	 * firebox #97D: execv MUST carry the process environment to the
+	 * exec'd image, exactly as upstream musl's `execve(path, argv,
+	 * __environ)`. The prior firebox body combined only argv and passed
+	 * NULL for the env buffer to __wasi_proc_exec3 — so the host mapped
+	 * NULL -> envs=None -> _prepare_wasi skipped the env update, and the
+	 * child inherited the STALE parent-boot snapshot, dropping every
+	 * post-fork setenv() (e.g. wordexp's fork+execl /bin/sh saw $FOO
+	 * empty). execle worked only because it routed an EXPLICIT envp
+	 * through execve -> __execvpe, which marshals combined_env.
+	 *
+	 * Delegate to execve with the live environ: __execvpe then combines
+	 * __wasilibc_environ into combined_env and carries the __vfork_restore
+	 * asyncify-unwind guard — the single correct exec-marshal path. This
+	 * also deletes the duplicated arg-combine loop (invariant 1: one home
+	 * for the packing protocol, in __wasilibc_exec_combine_strings).
 	 */
-	int combined_len = 0;
-	for (char **argvp = (char **)argv; *argvp != NULL; argvp++) {
-		combined_len += strlen(*argvp) + 1;
-	}
-
-	char *combined_argv = malloc((combined_len + 1));
-	char *combined_argv_p = combined_argv;
-	for (char **argvp = (char **)argv; *argvp != NULL; argvp++) {
-		memcpy(combined_argv_p, *argvp, strlen(*argvp));
-		combined_argv_p += strlen(*argvp);
-		*combined_argv_p = '\0';
-		combined_argv_p++;
-	}
-	*combined_argv_p = 0;
-	
-	int e = __wasi_proc_exec3(path, combined_argv, NULL, 0, NULL);
-#ifdef __wasm_exception_handling__
-	extern _Noreturn void __vfork_restore();
-	if (e == 0) {
-		__vfork_restore();
-	}
-#endif
-
-	// A return from proc_exec automatically means it failed
-	errno = e;
-	return -1;
+	__wasilibc_ensure_environ();
+	return execve(path, argv, __wasilibc_environ);
 #endif
 }
