@@ -15,6 +15,15 @@
 #include <wasi/libc-find-relpath.h>
 #include <wasi/libc.h>
 
+// firebox#QAB: the WebAssembly linear-memory page (64 KiB) — the FIXED unit of
+// `memory.grow` / `memory.size`, NOT the POSIX page size. The assert below bounds
+// a preopen prefix pointer against the total addressable bytes, which is
+// `memory_size` (a count of 64 KiB wasm pages) times this page. It is decoupled
+// from PAGESIZE (the POSIX page, 4096 since #QAB — see <__macro_PAGESIZE.h>):
+// using 4096 here would compute 1/16 of the real addressable extent and spuriously
+// fail the assert for a legitimately-placed preopen.
+#define WASM_PAGE_SIZE ((size_t)0x10000)
+
 /// A name and file descriptor pair.
 typedef struct preopen {
     /// The path prefix associated with the file descriptor.
@@ -50,7 +59,7 @@ static void assert_invariants(void) {
         assert(pre->fd != (__wasi_fd_t)-1);
 #ifdef __wasm__
         assert((uintptr_t)pre->prefix <
-               (__uint128_t)__builtin_wasm_memory_size(0) * PAGESIZE);
+               (__uint128_t)__builtin_wasm_memory_size(0) * WASM_PAGE_SIZE);
 #endif
     }
 }

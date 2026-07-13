@@ -1,11 +1,23 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <__macro_PAGESIZE.h>
+#include <stdint.h>
+
+// firebox#QAB: the WebAssembly linear-memory page — the FIXED 64 KiB granularity
+// of `memory.grow` / `memory.size`, which is NOT the POSIX page size. sbrk grows
+// the heap by calling `__builtin_wasm_memory_grow` (which counts 64 KiB wasm
+// pages) and converts page counts to byte addresses via
+// `memory_size * WASM_PAGE_SIZE`. This is deliberately decoupled from PAGESIZE
+// (the POSIX page, 4096 since #QAB — see <__macro_PAGESIZE.h>): the wasm engine
+// only ever grows memory in 64 KiB units, so using the 4096 POSIX page here would
+// under-count every grow and mis-compute every byte offset by 16×. dlmalloc's own
+// MORECORE granularity is the POSIX page (4096) and is unaffected — sbrk accepts
+// any increment and rounds only the actual memory.grow up to this wasm page.
+#define WASM_PAGE_SIZE ((uintptr_t)0x10000)
 
 // Linker-defined: marks the start of the heap region in linear memory.
 // wasm-ld synthesizes this symbol pointing past the data section. For both
-// growable and fixed-size memory layouts, [&__heap_base, memory_size * PAGESIZE)
+// growable and fixed-size memory layouts, [&__heap_base, memory_size * WASM_PAGE_SIZE)
 // is the addressable region available for malloc to manage.
 extern unsigned char __heap_base;
 
@@ -24,7 +36,7 @@ static unsigned char *brk_ptr = NULL;
 // memory.grow at runtime (e.g. the wasmer dynamic linker reserving
 // per-side-module TLS arenas at dlopen, or side-module memory regions), and
 // those pages are NOT heap. The previous "fits in addressable memory" check
-// (`new_brk <= memory.size * PAGESIZE`) walked brk_ptr straight through such
+// (`new_brk <= memory.size * WASM_PAGE_SIZE`) walked brk_ptr straight through such
 // foreign regions, so dlmalloc chunks overlapped the dynamic linker's TLS
 // arenas — every thread-spawn's TLS-image write then clobbered live heap
 // (the firebox#852/#853 in-guest rustc/icu4x corruption: garbage vtable
@@ -59,7 +71,7 @@ uintptr_t __wasilibc_sbrk_max = (uintptr_t)-1;
 // exceed the owned region. The original 0021 motivation is preserved: for
 // binaries declaring fixed-size shared memory (`(memory N N shared)`),
 // memory.grow always fails, and the initial owned region [&__heap_base,
-// memory.size * PAGESIZE) — captured before anything else can grow — is what
+// memory.size * WASM_PAGE_SIZE) — captured before anything else can grow — is what
 // makes malloc work there at all.
 void *sbrk(intptr_t increment) {
     // Lazy init: first call sets brk to __heap_base and captures the initial
@@ -70,7 +82,7 @@ void *sbrk(intptr_t increment) {
     // heap arena.
     if (brk_ptr == NULL) {
         brk_ptr = &__heap_base;
-        owned_end = __builtin_wasm_memory_size(0) * PAGESIZE;
+        owned_end = __builtin_wasm_memory_size(0) * WASM_PAGE_SIZE;
     }
 
     // sbrk(0) returns the current break pointer.
@@ -89,7 +101,7 @@ void *sbrk(intptr_t increment) {
 
     // Note vs upstream: dlmalloc's sys_alloc (malloc.c:4109-4119) calls sbrk(0)
     // then page-aligns and may call sbrk with a non-page-aligned increment.
-    // The upstream sbrk aborted on non-PAGESIZE increments because its
+    // The upstream sbrk aborted on non-page-aligned increments because its
     // brk-from-memory.grow model required them. Our static-brk model only
     // needs page alignment when actually invoking memory.grow (computed via
     // `pages_needed`), not for the brk_ptr advance itself, so non-page-aligned
@@ -139,19 +151,19 @@ void *sbrk(intptr_t increment) {
     // Need more pages. Grow enough to cover the shortfall past the owned
     // region.
     uintptr_t shortfall = (uintptr_t)new_brk - owned_end;
-    uintptr_t pages_needed = (shortfall + PAGESIZE - 1) / PAGESIZE;
+    uintptr_t pages_needed = (shortfall + WASM_PAGE_SIZE - 1) / WASM_PAGE_SIZE;
     uintptr_t old_pages = __builtin_wasm_memory_grow(0, pages_needed);
     if (old_pages == SIZE_MAX) {
         // Growth failed — fixed-size memory or genuinely out of memory.
         errno = ENOMEM;
         return (void *)-1;
     }
-    uintptr_t grow_base = old_pages * PAGESIZE;
+    uintptr_t grow_base = old_pages * WASM_PAGE_SIZE;
 
     if (grow_base == owned_end) {
         // Contiguous with the owned region (the common case: nobody else grew
         // since our last grow). Extend ownership and advance.
-        owned_end = grow_base + pages_needed * PAGESIZE;
+        owned_end = grow_base + pages_needed * WASM_PAGE_SIZE;
         unsigned char *old_brk = brk_ptr;
         brk_ptr = new_brk;
         return old_brk;
@@ -164,14 +176,14 @@ void *sbrk(intptr_t increment) {
     // tail of the old region `[brk_ptr, owned_end)` is abandoned (at most a
     // page's worth on top of dlmalloc's own request rounding — dlmalloc never
     // assumes it owns memory sbrk didn't return).
-    uintptr_t fresh_have = pages_needed * PAGESIZE;
+    uintptr_t fresh_have = pages_needed * WASM_PAGE_SIZE;
     if ((uintptr_t)increment > fresh_have) {
         // The fresh region must hold the WHOLE increment by itself (the old
         // region's tail can't be combined across the foreign hole). Grow the
         // difference; require contiguity with our fresh region.
-        uintptr_t more = ((uintptr_t)increment - fresh_have + PAGESIZE - 1) / PAGESIZE;
+        uintptr_t more = ((uintptr_t)increment - fresh_have + WASM_PAGE_SIZE - 1) / WASM_PAGE_SIZE;
         uintptr_t op2 = __builtin_wasm_memory_grow(0, more);
-        if (op2 == SIZE_MAX || op2 * PAGESIZE != grow_base + fresh_have) {
+        if (op2 == SIZE_MAX || op2 * WASM_PAGE_SIZE != grow_base + fresh_have) {
             // Out of memory, or yet another foreign grow interleaved between
             // our two grows (pathological). Fail this allocation cleanly —
             // dlmalloc reports OOM / retries; nothing is corrupted. The
@@ -179,7 +191,7 @@ void *sbrk(intptr_t increment) {
             errno = ENOMEM;
             return (void *)-1;
         }
-        fresh_have += more * PAGESIZE;
+        fresh_have += more * WASM_PAGE_SIZE;
     }
     brk_ptr = (unsigned char *)(grow_base + (uintptr_t)increment);
     owned_end = grow_base + fresh_have;

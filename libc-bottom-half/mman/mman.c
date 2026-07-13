@@ -16,10 +16,12 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
-// firebox#7C5: PAGESIZE (the 64 KiB WebAssembly page = the POSIX page size
-// sysconf(_SC_PAGE_SIZE) reports) for the offset-alignment / MAP_FIXED-addr /
+// firebox#7C5/#QAB: PAGESIZE (the POSIX page size sysconf(_SC_PAGE_SIZE) reports,
+// = 4096 since #QAB, matching Linux) for the offset-alignment / MAP_FIXED-addr /
 // partial-page-zero-fill semantics. <limits.h> exposes PAGESIZE on wasm via
-// arch/wasm{32,64}/bits/limits.h → <__macro_PAGESIZE.h>.
+// arch/wasm{32,64}/bits/limits.h → <__macro_PAGESIZE.h>. The 64 KiB WebAssembly
+// linear-memory page is a DISTINCT concept (WASIX_MMAN_HOST_PAGE_SIZE below, and
+// the raw 65536 in the reservation allocator) — see the constants below.
 #include <limits.h>
 // firebox#TTB: the POSIX mmap(2) precondition errnos (EBADF/EACCES/EOVERFLOW)
 // are derived from the file descriptor's WASI rights and the offset/length
@@ -149,26 +151,47 @@ static int wasix_prot_needs_enforcement(int prot) {
 
 #define WASIX_MMAN_PAGE_SIZE ((size_t)4096)
 
-// firebox#7C5: the POSIX *page size* — the granularity POSIX mmap(2) defines
-// `off`/`addr` alignment against and that `sysconf(_SC_PAGE_SIZE)` /
-// `getpagesize()` report — is the WebAssembly linear-memory page, 64 KiB
-// (`<__macro_PAGESIZE.h>`: `#define PAGESIZE 0x10000`). This is DISTINCT from
-// WASIX_MMAN_PAGE_SIZE (4096), which is purely the allocator-side alignment of
-// the header-prefix page (an implementation detail of the malloc-backed
-// emulation, chosen for Blink's x86 page-table packing — see the header note
-// above). The two must not be conflated:
-//   - WASIX_MMAN_SYS_PAGE_SIZE governs POSIX *semantics* — the offset-multiple
-//     EINVAL (mmap/11-1), the MAP_FIXED addr-alignment EINVAL (mmap/9-1), and
-//     the partial-page zero-fill extent past EOF (mmap/11-4/5/6). These are the
-//     values the conformance tests query via sysconf(_SC_PAGE_SIZE) and that a
-//     Linux program sees.
-//   - WASIX_MMAN_PAGE_SIZE governs the *backing allocation* layout only.
-// Blink's wasm64 linear mapping is itself 64 KiB-granular (map.c:
-// FLAG_pagesize = sysconf(_SC_PAGESIZE) = 0x10000, and ReserveVirtual rejects a
-// non-FLAG_pagesize-aligned `virt`), so every MAP_FIXED address Blink hands us
-// is already 64 KiB-aligned — the #796 path passes the new alignment gate by
-// construction and is not regressed.
+// firebox#QAB (was #7C5): the POSIX *page size* — the granularity POSIX mmap(2)
+// defines `off`/`addr` alignment against and that `sysconf(_SC_PAGE_SIZE)` /
+// `getpagesize()` report. Firebox reports 4096, matching real Linux
+// (`<__macro_PAGESIZE.h>`: `#define PAGESIZE 0x1000`). #7C5 historically pinned
+// this to the 64 KiB WebAssembly linear-memory page; that was anti-faithful
+// (Invariant 2) and rejected real programs that mmap() at a 4096-aligned but
+// not-64 KiB-aligned address Linux accepts (e.g. a MAP_FIXED at 0x711000, which
+// the 64 KiB alignment gate below turned into a spurious EINVAL). At the faithful
+// 4096, WASIX_MMAN_SYS_PAGE_SIZE governs POSIX *semantics*:
+//   - the offset-multiple EINVAL (mmap/11-1),
+//   - the MAP_FIXED addr-alignment EINVAL (mmap/9-1),
+//   - the partial-page zero-fill extent past EOF for ordinary RW mappings
+//     (mmap/11-4/5/6).
+// It is DISTINCT from two other page constants that must NOT track it:
+//   - WASIX_MMAN_PAGE_SIZE (4096): the allocator-side alignment of an ordinary
+//     mapping's header-prefix page. A malloc-backing implementation detail — it
+//     numerically equals the POSIX page today, but is a separate concept
+//     (header-prefix layout, not POSIX addr/offset semantics).
+//   - WASIX_MMAN_HOST_PAGE_SIZE (64 KiB): the host-page isolation unit for the
+//     #SAH region::protect enforcement (defined just below).
+// Blink's wasm64 linear mapping hands us only 64 KiB-aligned MAP_FIXED addresses
+// (map.c: ReserveVirtual rejects a non-64 KiB-aligned `virt`). 64 KiB is a
+// multiple of 4096, so LOOSENING the addr-alignment gate from 64 KiB to 4096 is
+// monotonic: every address that passed before still passes (the #796 path is not
+// regressed), while genuinely-illegal 4096-unaligned fixed requests — which a
+// Linux program is also denied — stay rejected.
 #define WASIX_MMAN_SYS_PAGE_SIZE ((size_t)PAGESIZE)
+
+// firebox#SAH/#QAB: the HOST-page-granularity isolation unit — the 64 KiB safe
+// superset of any host OS page (4 KiB Linux / 16 KiB Apple Silicon). This is a
+// HOST-side requirement, NOT a POSIX page size, so it stays 64 KiB regardless of
+// the POSIX page (#QAB decoupled it from PAGESIZE, which is now 4096). A mapping
+// that must ENFORCE a sub-RW protection is backed by host pages belonging to it
+// ALONE: both its header prefix AND its rounded body use this unit so the later
+// host `region::protect` (__wasilibc_mprotect_host) covers only whole host pages
+// of THIS mapping and can never disturb a neighbouring allocation. Rounding the
+// enforced body to 4096 instead would leave the body's tail sharing a host page
+// with the next allocation — a region::protect(PROT_NONE) there would corrupt the
+// neighbour. (Numerically equal to the WebAssembly linear-memory page, but a
+// distinct concept: host-page isolation vs wasm memory.grow granularity.)
+#define WASIX_MMAN_HOST_PAGE_SIZE ((size_t)0x10000)
 
 // firebox#9VY-24: the Linux per-process mapping-count ceiling (vm.max_map_count,
 // default 65530). POSIX mmap(2) mandates [ENOMEM] "if the process exceeds the
@@ -286,12 +309,14 @@ struct map {
     int flags;
     off_t offset;
     size_t length;     // user-requested mapping length (what munmap() must match)
-    size_t body_len;   // allocated user-visible body = round_up(length, sys page)
+    size_t body_len;   // allocated user-visible body = round_up(length, body page):
+                       // the 4096 POSIX page for an ordinary mapping, the 64 KiB
+                       // host page (WASIX_MMAN_HOST_PAGE_SIZE) for an enforced one
     int fd;
     // firebox#SAH: host-mprotect bookkeeping.
     //   prefix         distance from the user addr back to the aligned_alloc base
     //                  (== WASIX_MMAN_PAGE_SIZE for the compact 4 KiB-prefixed
-    //                  legacy layout; == WASIX_MMAN_SYS_PAGE_SIZE / 64 KiB for a
+    //                  legacy layout; == WASIX_MMAN_HOST_PAGE_SIZE / 64 KiB for a
     //                  host-protectable mapping whose body is 64 KiB-isolated so
     //                  region::protect never disturbs a neighbour). The header
     //                  always sits at addr - WASIX_MMAN_PAGE_SIZE either way, so
@@ -834,14 +859,15 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     fixed_req = fixed_req || (flags & MAP_FIXED_NOREPLACE) != 0;
 #endif
     if (fixed_req && addr != NULL && length != 0) {
-        // firebox#7C5: POSIX mmap(2) — "If MAP_FIXED is set ... and addr is not
-        // a multiple of the page size ... mmap() shall fail [EINVAL]"
-        // (mmap/9-1). The page size is the system page (64 KiB), not the 4096
-        // allocator-prefix granularity. Blink's wasm64 linear mapping always
-        // passes 64 KiB-aligned addresses (FLAG_pagesize == 0x10000), so the
-        // #796 path is unaffected — this rejects only the genuinely-illegal
-        // unaligned fixed request a portable program would also be denied on
-        // Linux.
+        // firebox#7C5/#QAB: POSIX mmap(2) — "If MAP_FIXED is set ... and addr is
+        // not a multiple of the page size ... mmap() shall fail [EINVAL]"
+        // (mmap/9-1). The page size is the POSIX system page, 4096 since #QAB
+        // (matching Linux). Blink's wasm64 linear mapping always passes 64 KiB-
+        // aligned addresses (FLAG_pagesize == 0x10000), and 64 KiB is a multiple
+        // of 4096, so loosening this gate from 64 KiB to 4096 is monotonic — every
+        // Blink address still passes (the #796 path is unaffected) while a
+        // genuinely-illegal 4096-unaligned fixed request a portable program would
+        // also be denied on Linux stays rejected.
         if (((uintptr_t)addr & (WASIX_MMAN_SYS_PAGE_SIZE - 1)) != 0) {
             errno = EINVAL;
             return MAP_FAILED;
@@ -892,10 +918,10 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         return MAP_FAILED;
     }
 
-    // firebox#7C5: POSIX mmap(2) — `off` must be a multiple of the page size;
+    // firebox#7C5/#QAB: POSIX mmap(2) — `off` must be a multiple of the page size;
     // otherwise EINVAL (mmap/11-1). Mirrors the musl top-half OFF_MASK check
     // (the unused-on-wasm path) and the Linux do_mmap() `offset & ~PAGE_MASK`
-    // gate, against the *system* page size (64 KiB), which is what
+    // gate, against the POSIX system page size (4096 since #QAB), which is what
     // sysconf(_SC_PAGE_SIZE) reports and the test computes its illegal offset
     // from. ANON mappings ignore offset, so this only gates file-backed maps.
     if ((flags & MAP_ANON) == 0 &&
@@ -994,24 +1020,27 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         if (fstat_ok && (is_shm || (is_regfile && (prot & PROT_WRITE) != 0))) {
             uint64_t shm_off = 0;
             uint32_t shm_created = 0;
-            // firebox#F4A-partialpage: POSIX mmap(2) maps WHOLE pages — "the
+            // firebox#F4A-partialpage/#QAB: POSIX mmap(2) maps WHOLE pages — "the
             // implementation shall include, in any mapping operation, any partial
             // page specified by [pa, pa+len)" and "shall always zero-fill any
             // partial page at the end of an object" (mmap/11-4/5/6). The
-            // window-routed path must therefore back the FULL system page(s) the
-            // mapping touches — round the mapped length up to the 64 KiB WASM
-            // system page, exactly as the legacy aligned_alloc path does via
-            // `body_len` below. Without this, a sub-page mapping (e.g. mmap/11-5's
-            // ftruncate(len=32 KiB) + mmap(32 KiB), where sysconf(_SC_PAGE_SIZE)
-            // == 64 KiB) maps only `length` bytes at the window; a conformant read
-            // of the zero-fill tail [length, PAGESIZE) runs off the mapped OS
-            // object and HeapAccessOutOfBounds-traps. The host's own
-            // `page_round_up` only rounds to the HOST page (4 KiB / 16 KiB), which
-            // is SMALLER than the WASM POSIX page and so does not cover the tail.
-            // The fresh OS object is zero-filled, so the rounded tail reads as zero
-            // (11-5's assertion) for free. `length` is kept for the fd seed below:
-            // only the bytes actually in the object are seeded; the rounded tail
-            // stays the object's zeros.
+            // window-routed path must therefore back the FULL POSIX page(s) the
+            // mapping touches — round the mapped length up to the POSIX system page
+            // (WASIX_MMAN_SYS_PAGE_SIZE, 4096 since #QAB), exactly as the legacy
+            // aligned_alloc path does via `body_len` below. Without this, a sub-page
+            // mapping (a `length` not a multiple of 4096) maps only `length` bytes
+            // at the window; a conformant read of the zero-fill tail
+            // [length, round_up(length, 4096)) runs off the mapped OS object and
+            // HeapAccessOutOfBounds-traps. This window path is NEVER host-protected
+            // (it requires is_shm or a WRITABLE regular file — never a sub-RW
+            // enforced mapping), so the 4096 POSIX page is exactly the right unit:
+            // no host-page isolation is needed here (that is the private
+            // aligned_alloc path's concern). The host's own `page_round_up` rounds
+            // to the host page (>= 4096), a superset of the guest's 4096 round, so
+            // the OS object always covers the guest tail. The fresh OS object is
+            // zero-filled, so the rounded tail reads as zero (11-5's assertion) for
+            // free. `length` is kept for the fd seed below: only the bytes actually
+            // in the object are seeded; the rounded tail stays the object's zeros.
             uint64_t shm_map_len = (uint64_t)length;
             {
                 const uint64_t mask = (uint64_t)(WASIX_MMAN_SYS_PAGE_SIZE - 1);
@@ -1170,20 +1199,41 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
-    // firebox#7C5: POSIX mmap(2) maps WHOLE pages. "The system shall always
+    // firebox#QAB: decide the backing discriminant FIRST — whether the mapping
+    // must ENFORCE a sub-RW protection (missing PROT_WRITE) — because since #QAB it
+    // also selects the page granularity the body is rounded to:
+    //   - An ENFORCED mapping is host-protected via region::protect, which operates
+    //     at HOST-page granularity. Its body must round to the host-page superset
+    //     (WASIX_MMAN_HOST_PAGE_SIZE, 64 KiB) so the protection covers only whole
+    //     host pages of THIS mapping and cannot touch a neighbour. Rounding it to
+    //     the 4096 POSIX page would leave the body's tail sharing a host page with
+    //     the next allocation — an Inv-0 corruption hazard.
+    //   - An ORDINARY read-write mapping only needs the POSIX partial-page
+    //     zero-fill extent (WASIX_MMAN_SYS_PAGE_SIZE, 4096 since #QAB).
+    // NB: an enforced mapping's layout is therefore byte-identical to pre-#QAB
+    // (still 64 KiB body + 64 KiB prefix); only ordinary RW mappings change (body
+    // now rounds to the faithful 4096 POSIX page instead of 64 KiB).
+    const int enforce = wasix_prot_needs_enforcement(prot);
+    const size_t body_page = enforce ? WASIX_MMAN_HOST_PAGE_SIZE
+                                     : WASIX_MMAN_SYS_PAGE_SIZE;
+
+    // firebox#7C5/#QAB: POSIX mmap(2) maps WHOLE pages. "The system shall always
     // zero-fill any partial page at the end of an object" (mmap/11-4/5/6): when
     // `length` is not a multiple of the page size, the bytes from the file/object
     // end up to the end of the last mapped page are accessible and read as zero.
-    // The malloc-backed body must therefore span round_up(length, sys page), not
+    // The malloc-backed body must therefore span round_up(length, body_page), not
     // just `length`, or a conformant program reading those trailing bytes runs
-    // off the end of the allocation (a heap OOB). We record this rounded body
-    // length so munmap()/msync() also operate on the true mapped extent.
+    // off the end of the allocation (a heap OOB). `body_page` is the 4096 POSIX
+    // page for an ordinary mapping; for an enforced mapping it is the 64 KiB host
+    // page, a superset of the POSIX zero-fill extent that additionally guarantees
+    // host-page isolation for region::protect. We record this rounded body length
+    // so munmap()/msync() also operate on the true mapped extent.
     size_t body_len = length;
     {
-        const size_t mask = WASIX_MMAN_SYS_PAGE_SIZE - 1;
+        const size_t mask = body_page - 1;
         if ((body_len & mask) != 0) {
             size_t rounded;
-            if (__builtin_add_overflow(body_len, WASIX_MMAN_SYS_PAGE_SIZE - (body_len & mask),
+            if (__builtin_add_overflow(body_len, body_page - (body_len & mask),
                                        &rounded)) {
                 errno = ENOMEM;
                 return MAP_FAILED;
@@ -1192,17 +1242,16 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
     }
 
-    // firebox#SAH: choose the backing layout by whether the mapping must ENFORCE
-    // a sub-RW protection. An enforceable mapping (missing PROT_WRITE) is backed
-    // by host pages that belong to it ALONE: the body is 64 KiB-isolated (the
-    // safe superset of any host page — 4 KiB Linux / 16 KiB Apple Silicon) so the
-    // later region::protect cannot disturb a neighbour, and the header lives in a
-    // 64 KiB prefix page. An ordinary read-write mapping keeps the compact 4 KiB
+    // firebox#SAH/#QAB: the backing prefix follows the same `enforce` flag. An
+    // enforceable mapping is backed by host pages that belong to it ALONE: the body
+    // is host-page-isolated (WASIX_MMAN_HOST_PAGE_SIZE, the safe superset of any
+    // host page — 4 KiB Linux / 16 KiB Apple Silicon; rounded above) so the later
+    // region::protect cannot disturb a neighbour, and the header lives in a matching
+    // host-page prefix. An ordinary read-write mapping keeps the compact 4 KiB
     // prefix (unchanged from pre-#SAH). EITHER WAY the header sits at
     // addr - WASIX_MMAN_PAGE_SIZE (uniform munmap()/msync() recovery); free()
     // takes addr - prefix.
-    const int enforce = wasix_prot_needs_enforcement(prot);
-    const size_t prefix = enforce ? WASIX_MMAN_SYS_PAGE_SIZE : WASIX_MMAN_PAGE_SIZE;
+    const size_t prefix = enforce ? WASIX_MMAN_HOST_PAGE_SIZE : WASIX_MMAN_PAGE_SIZE;
 
     // Compute allocation size: rounded body plus one full prefix page for the
     // header. Overflow-check before passing to aligned_alloc.
@@ -1344,9 +1393,10 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     // js/v8 where the capability is absent, or an unexpected host error) leaves
     // the body RW — the mapping is never FAILED for lack of enforcement, which is
     // exactly the no-MMU degradation the browser profile declares via
-    // sysconf(_SC_MEMORY_PROTECTION) == -1. `body_len` is 64 KiB-aligned (the
-    // enforce path rounded it above), so the host mprotect covers whole host
-    // pages that back ONLY this mapping.
+    // sysconf(_SC_MEMORY_PROTECTION) == -1. For an enforced mapping `body_len` is
+    // WASIX_MMAN_HOST_PAGE_SIZE-aligned (64 KiB — the `enforce` path rounded it to
+    // the host page above, NOT the 4096 POSIX page), so the host mprotect covers
+    // whole host pages that back ONLY this mapping and never a neighbour.
     if (enforce &&
         __wasilibc_mprotect_host((uintptr_t)addr, body_len, prot) == 0) {
         map->host_protected = 1;
@@ -1481,8 +1531,10 @@ int munmap(void *addr, size_t length) {
     // host-protected mapping left at PROT_READ/PROT_NONE would, once malloc hands
     // those pages to a later allocation, fault a perfectly normal access — so the
     // protection must be lifted before the memory re-enters the allocator.
-    // `body_len` is the 64 KiB-aligned extent that was protected. (No-op for a
-    // legacy RW mapping: host_protected == 0.)
+    // `map->body_len` is the WASIX_MMAN_HOST_PAGE_SIZE-aligned (64 KiB) extent that
+    // was protected — host_protected is only ever set on the enforce path, which
+    // rounds body_len to the host page. (No-op for a legacy RW mapping:
+    // host_protected == 0.)
     if (map->host_protected) {
         __wasilibc_mprotect_host((uintptr_t)addr, map->body_len,
                                  PROT_READ | PROT_WRITE);
@@ -1501,8 +1553,10 @@ int munmap(void *addr, size_t length) {
     // pointer the backing returned — addr - prefix (== the header for a legacy
     // 4 KiB mapping, or the 64 KiB prefix base for a host-protected mapping).
     if (map->backing == WASIX_MMAN_BACKING_RESERVE) {
-        // ext == buf_len == prefix + body_len (both 4 KiB-granular), the exact
-        // extent wasix_res_alloc carved; round_up is identity but kept explicit.
+        // ext == buf_len == prefix + body_len — the exact extent wasix_res_alloc
+        // carved. Both are page-granular (4 KiB for an ordinary mapping, 64 KiB for
+        // an enforced one), hence always a multiple of WASIX_MMAN_PAGE_SIZE, so the
+        // round_up below is identity but kept explicit.
         size_t ext = map->prefix + map->body_len;
         ext = (ext + (WASIX_MMAN_PAGE_SIZE - 1)) & ~(WASIX_MMAN_PAGE_SIZE - 1);
         wasix_res_lock_acquire();
