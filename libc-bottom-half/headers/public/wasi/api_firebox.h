@@ -53,6 +53,14 @@ __wasi_errno_t __wasix_path_lchmod(__wasi_fd_t fd, const char *path, size_t path
 __wasi_errno_t __wasix_fd_chown(__wasi_fd_t fd, uint32_t uid, uint32_t gid);
 __wasi_errno_t __wasix_path_chown(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t uid, uint32_t gid);
 __wasi_errno_t __wasix_path_lchown(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t uid, uint32_t gid);
+/* firebox#5T3 — the owner (st_uid/st_gid) REPORT channel: the READ half of chown.
+ * WASI's __wasi_filestat_t has no uid/gid, so fstat/stat/lstat/fstatat call these
+ * after the standard filestat_get to fill st_uid/st_gid. `owner2` is a
+ * caller-provided uint32_t owner2[2] = {uid, gid} (8 bytes). `flags` is the same
+ * __wasi_lookupflags_t as __wasi_path_filestat_get (SYMLINK_FOLLOW → stat, cleared
+ * → lstat). See __wasixlibc_firebox.c. */
+__wasi_errno_t __wasix_fd_filestat_get_ext(__wasi_fd_t fd, uint32_t *owner2);
+__wasi_errno_t __wasix_path_filestat_get_ext(__wasi_fd_t fd, uint32_t flags, const char *path, size_t path_len, uint32_t *owner2);
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode, uint64_t dev);
 
 /* fd_ioctl ASYMMETRY: on wasm32 __wasi_fd_ioctl is part of the committed generation

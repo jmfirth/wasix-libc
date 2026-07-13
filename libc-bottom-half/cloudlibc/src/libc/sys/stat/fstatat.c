@@ -35,5 +35,17 @@ int __wasilibc_nocwd_fstatat(int fd, const char *restrict path, struct stat *res
     return -1;
   }
   to_public_stat(&internal_stat, buf);
+  // firebox#5T3 — read the owner back through the Firebox report channel
+  // (WASI's __wasi_filestat_t has no uid/gid) so stat/lstat/fstatat reflect a
+  // prior chown/lchown (firebox#2E2). Reuses the SAME (fd, lookup_flags, path)
+  // as the filestat_get above, so the host resolves the identical inode —
+  // lookup_flags selects follow (stat) vs nofollow (lstat). A failure leaves
+  // st_uid/st_gid at 0 (default root owner); the stat itself already succeeded.
+  uint32_t __fbx_owner[2];
+  if (__wasix_path_filestat_get_ext(fd, lookup_flags, path, strlen(path),
+                                    __fbx_owner) == 0) {
+    buf->st_uid = __fbx_owner[0];
+    buf->st_gid = __fbx_owner[1];
+  }
   return 0;
 }

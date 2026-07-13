@@ -53,6 +53,16 @@ int32_t __imported_wasix_fbx_path_chown(int32_t,intptr_t,intptr_t,int32_t,int32_
 __wasi_errno_t __wasix_path_chown(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t uid,uint32_t gid){return (uint16_t)__imported_wasix_fbx_path_chown((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)uid,(int32_t)gid);}
 int32_t __imported_wasix_fbx_path_lchown(int32_t,intptr_t,intptr_t,int32_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_lchown")));
 __wasi_errno_t __wasix_path_lchown(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t uid,uint32_t gid){return (uint16_t)__imported_wasix_fbx_path_lchown((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)uid,(int32_t)gid);}
+/* firebox#5T3 — the owner (st_uid/st_gid) REPORT channel: the READ half of the
+   chown family above. WASI's __wasi_filestat_t omits uid/gid; these return the
+   stored owner into a guest uint32_t owner2[2] = {uid, gid} so the stat wrappers
+   can populate st_uid/st_gid. Pointers + path_len are intptr_t so ONE declaration
+   resolves under both wasix_32v1 and wasix_64v1, exactly like the chmod/chown
+   imports. `flags` is the __wasi_lookupflags_t of the paired filestat_get. */
+int32_t __imported_wasix_fbx_fd_filestat_get_ext(int32_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_filestat_get_ext")));
+__wasi_errno_t __wasix_fd_filestat_get_ext(__wasi_fd_t fd,uint32_t *owner2){return (uint16_t)__imported_wasix_fbx_fd_filestat_get_ext((int32_t)fd,(intptr_t)owner2);}
+int32_t __imported_wasix_fbx_path_filestat_get_ext(int32_t,int32_t,intptr_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_filestat_get_ext")));
+__wasi_errno_t __wasix_path_filestat_get_ext(__wasi_fd_t fd,uint32_t flags,const char *path,size_t path_len,uint32_t *owner2){return (uint16_t)__imported_wasix_fbx_path_filestat_get_ext((int32_t)fd,(int32_t)flags,(intptr_t)path,(intptr_t)path_len,(intptr_t)owner2);}
 int32_t __imported_wasix_fbx_path_mknod(int32_t,intptr_t,intptr_t,int32_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_mknod")));
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t mode,uint64_t dev){return (uint16_t)__imported_wasix_fbx_path_mknod((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)mode,(int64_t)dev);}
 
