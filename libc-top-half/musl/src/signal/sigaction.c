@@ -120,6 +120,34 @@ const uint32_t __fbx_blocked_off = offsetof(struct pthread, blocked_sigmask);
  * still instantiates on an older runtime (the fix is simply dormant). */
 const uint32_t __fbx_pending_off = offsetof(struct pthread, pending_sigs);
 
+/* firebox#2JV — offsetof(struct pthread, sigsuspend_tick), the PER-THREAD futex
+ * word a sigtimedwait/sigwait/sigsuspend waiter parks on (`__timedwait(&self->
+ * sigsuspend_tick, ...)`). Exact mirror of __fbx_pending_off's posture: the
+ * threaded/edge link --export[-if-defined]s it, the host reads the immutable
+ * global (= this const's linear address), then the offset value from the live
+ * MemoryView — so the host carries no struct-layout knowledge, just the field
+ * offset.
+ *
+ * WHY the host needs it: when the host PENDS a directed no-handler blocked
+ * signal into the target's claim surface (__wasm_pending_sigs + the per-thread
+ * pending_sigs) on behalf of a pid-1 tini parked in a bounded
+ * `sigtimedwait(&all, &si, &poll)` (env.rs first_no_handler_default_terminate,
+ * the #2JV target-drain pend — the cross-process + timed shape the sender-side
+ * try_pend_process_directed structurally cannot cover), it must ALSO replicate
+ * the last two steps the guest's own __wasm_pend_signal does after the two
+ * bitmask ORs: `a_inc(&self->sigsuspend_tick)` + `__wake(&self->sigsuspend_tick,
+ * 1, 1)`. Without the tick bump the parked FutexPoller's value-recheck never
+ * fires (the word is unchanged), and without the wake nothing re-drives the
+ * poll — so the pended signal is never claimed and tini hangs. The host resolves
+ * this thread's `struct pthread` base (__fbx_main_pthread / pthread_self_ptr)
+ * and adds this field offset to reach the same futex word, then increments it
+ * and futex-wakes — byte-identical in effect to the guest's own pend.
+ *
+ * Same backward-compat story as __fbx_pending_off: a host predating the read
+ * just ignores it; the guest imports NOTHING new, so wasm built with this libc
+ * still instantiates on an older runtime (the fix is simply dormant). */
+const uint32_t __fbx_sigsuspend_off = offsetof(struct pthread, sigsuspend_tick);
+
 /* firebox#GF1 — per-signal sa_flags, host-readable. Written by __libc_sigaction
  * on every disposition change; read by the FIREBOX RUNTIME to detect
  * SA_NOCLDWAIT on the SIGCHLD disposition. POSIX: a parent whose SIGCHLD action
