@@ -1,4 +1,7 @@
 #include "pthread_impl.h"
+#include <sched.h>	/* firebox#BNJ — sched_get_priority_min(SCHED_FIFO) for the
+			 * prioceiling default clamp below (transitively via
+			 * <pthread.h>, made explicit at the use site). */
 
 int pthread_attr_getdetachstate(const pthread_attr_t *a, int *state)
 {
@@ -149,14 +152,37 @@ int pthread_mutexattr_gettype(const pthread_mutexattr_t *restrict a, int *restri
  * the PI/robust lock logic. WASI models no priority scheduler, so
  * PTHREAD_PRIO_PROTECT has no runtime effect; per POSIX the attribute must still
  * report faithfully what was set. See pthread_mutexattr_setprioceiling.c for the
- * field layout + range validation. (Test 3-1 reads an UNINITIALIZED attr and
- * accepts either 0 or EINVAL — returning the stored field, 0-valued for a zeroed
- * or init'd attr, satisfies the "may fail" clause.) */
+ * field layout + range validation.
+ *
+ * firebox#BNJ — report an UNSET (0) ceiling as the SCHED_FIFO floor, matching
+ * glibc. A freshly pthread_mutexattr_init'd attr has a zeroed ceiling field (0);
+ * glibc's getter clamps that unset default up to sched_get_priority_min(
+ * SCHED_FIFO) rather than reporting a raw 0 — a PRIO_PROTECT ceiling below the
+ * real-time floor is meaningless. Open POSIX pthread_mutexattr_getprioceiling/
+ * 1-1 asserts the default lies in [sched_get_priority_min(SCHED_FIFO),
+ * sched_get_priority_max(SCHED_FIFO)] = [1,99], so it PASSes on glibc but FAILed
+ * here (raw 0 < 1). Matching glibc's clamp fixes it faithfully (dominant-Linux
+ * behavior, the always-more-faithful "musl-vs-glibc optional -> provide the
+ * common-Linux behavior" pattern, not a fabricated value).
+ *
+ * Soundness — the clamp NEVER lies about a user-set value: the companion setter
+ * (#BNJ) now rejects any ceiling outside [min,max] with EINVAL, exactly like
+ * glibc, so a 0 field can ONLY mean unset/init'd (0 < min=1 is un-storable).
+ * Privilege-free (a pure attribute default, no RT grant — unprivileged-semantics
+ * tier, delivered identically on native + browser); ABI-safe (behavioral only,
+ * no new exported symbol — sched_get_priority_min is already exported, Inv-8).
+ * Test 3-1 reads an UNINITIALIZED attr and checks only the RETURN CODE (0 or
+ * EINVAL), never the value, so the clamp leaves its rc=0 -> PASS untouched. */
 #define __MUTEXATTR_PRIOCEILING_SHIFT 8
 #define __MUTEXATTR_PRIOCEILING_MASK  (0xffU << __MUTEXATTR_PRIOCEILING_SHIFT)
 int pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *restrict a, int *restrict prioceiling)
 {
-	*prioceiling = (int)((a->__attr & __MUTEXATTR_PRIOCEILING_MASK) >> __MUTEXATTR_PRIOCEILING_SHIFT);
+	int ceiling = (int)((a->__attr & __MUTEXATTR_PRIOCEILING_MASK) >> __MUTEXATTR_PRIOCEILING_SHIFT);
+	/* firebox#BNJ — an unset (0) field means init'd (the setter EINVALs any
+	 * ceiling < min); report it as the SCHED_FIFO floor, as glibc does. */
+	if (ceiling == 0)
+		ceiling = sched_get_priority_min(SCHED_FIFO);
+	*prioceiling = ceiling;
 	return 0;
 }
 
