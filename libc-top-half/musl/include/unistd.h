@@ -390,10 +390,48 @@ pid_t gettid(void);
 #define _POSIX_BARRIERS         _POSIX_VERSION
 #define _POSIX_SPIN_LOCKS       _POSIX_VERSION
 #define _POSIX_READER_WRITER_LOCKS _POSIX_VERSION
-#ifdef __wasilibc_unmodified_upstream /* WASI has no POSIX async I/O, semaphores, or shared memory */
-#define _POSIX_ASYNCHRONOUS_IO  _POSIX_VERSION
+// firebox#M31 (Suite-1 tail reclassification audit, 2026-07-12:
+// work/tracks/capability-profiles/reports/2026-07-12-suite1-tail-reclassification.md):
+// POSIX semaphores and shared-memory objects are FAITHFULLY IMPLEMENTED on both
+// profiles, so their feature-test macros are honest positives (Invariant 4) and
+// are NOT gated behind __wasilibc_unmodified_upstream. This also coheres the #XE4
+// single-shared-libc discovery mechanism: sysconf(_SC_SEMAPHORES) and
+// sysconf(_SC_SHARED_MEMORY_OBJECTS) already return _POSIX_VERSION unconditionally
+// (src/conf/sysconf.c) — a feature-test macro that disagreed with its own sysconf
+// answer would be an incoherent probe.
+//
+//   _POSIX_SEMAPHORES — futex-backed sem_init/wait/post/trywait/timedwait/
+//   getvalue/destroy (src/thread/sem_*.c, on Firebox's conformance-proven futex
+//   substrate) + #61X/#V12 shm-window-backed named sem_open/sem_close/sem_unlink.
+//   conformance/interfaces/sem_* pass across the board (the only sem_unlink FAILs
+//   are the faithful musl-vs-glibc empty-name/ENAMETOOLONG divergence — #SUN,
+//   ledger not-a-gap). Un-gating flips the five functional/semaphores/* rows
+//   (sem_conpro/sem_lock/sem_philosopher/sem_readerwriter/sem_sleepingbarber),
+//   which self-skip to PTS_UNRESOLVED on `#ifndef _POSIX_SEMAPHORES` despite
+//   #include <unistd.h>.
+//
+//   _POSIX_SHARED_MEMORY_OBJECTS — shm_open/shm_unlink fully backed by the
+//   #F4A/#61X/#V12 host shared-memory window (mmap(MAP_SHARED) on a /dev/shm fd
+//   routes to the host window; cross-process store/load coherent, fork/16-1).
+//   conformance/interfaces/shm_open/* all pass. No conformance row self-skips on
+//   this macro today, so this is a pure sysconf-coherence + honest-probe fix.
 #define _POSIX_SEMAPHORES       _POSIX_VERSION
 #define _POSIX_SHARED_MEMORY_OBJECTS _POSIX_VERSION
+// firebox#M31 — _POSIX_ASYNCHRONOUS_IO is deliberately HELD gated (honest absence,
+// Invariant 4). The base AIO surface works (aio_read/write/fsync/error/return/
+// cancel and the non-signal aio_suspend paths pass), but the option is NOT
+// conformant-complete: SIGEV_SIGNAL completion delivery is unimplemented and TRAPS
+// (rc129) — aio_suspend/4-1,9-1 FAIL [#R4J]; aio over sockets is unresolved [#1N1];
+// aio_write O_APPEND read-back and the eager-completion-vs-suspend race still fail
+// [#FY5]. SIGEV_SIGNAL is core (not extension) POSIX AIO, so defining
+// _POSIX_ASYNCHRONOUS_IO = _POSIX_VERSION would advertise a feature that crashes on
+// a standard notification mode — an Inv-4 honest-absence violation worse than the
+// gate (no conformance row gates on this macro, so holding it costs nothing here).
+// Un-gate once #R4J + #1N1 + #FY5 land and the aio conformance rows go green; at
+// that point also reconcile sysconf(_SC_ASYNCHRONOUS_IO), which today over-reports
+// VER ahead of the header.
+#ifdef __wasilibc_unmodified_upstream /* Firebox AIO not yet conformant-complete — see firebox#M31 above */
+#define _POSIX_ASYNCHRONOUS_IO  _POSIX_VERSION
 #endif
 
 #define _POSIX2_C_BIND          _POSIX_VERSION
