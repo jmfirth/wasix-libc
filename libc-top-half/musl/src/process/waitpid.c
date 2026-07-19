@@ -35,6 +35,38 @@ pid_t waitpid(pid_t pid, int *status, int options)
 		errno = ret;
 		return -1;
 	} else {
+		// Firebox (#72N): POSIX `waitpid(-1, ..., WNOHANG)` on a
+		// LIVE-but-not-ready child MUST return 0 (children exist, none
+		// is reapable yet) — never ECHILD. The wasmer host any-child
+		// NON_BLOCKING arm (proc_join.rs, #2JV) reports this as
+		// `JoinStatusType::Nothing` and leaves the pid slot at
+		// `OPTION_NONE` (only a reap/exit writes a pid). But the
+		// `opid.tag != SOME -> ECHILD` check just below fires FIRST on
+		// that `OPTION_NONE`, SHADOWING the `Nothing + WNOHANG -> 0`
+		// branch further down (which #64 wrote for the specific-pid
+		// case, where opid IS Some) — so the caller got ECHILD and
+		// could not distinguish "children still running, keep waiting"
+		// from "no children left, stop" (the #64 cmake/kwsys papercut
+		// class: a poller abandons a still-running child).
+		//
+		// Hoist the any-child WNOHANG->0 return ABOVE the opid.tag
+		// check. It is guarded on the ORIGINAL request `pid == -1`
+		// (the any-child wait) so it fires ONLY for that case — the
+		// host also emits `Nothing`+`OPTION_NONE` for a specific-pid
+		// wait on a NON-child/absent pid (process is None), and POSIX
+		// mandates ECHILD there, WNOHANG or not; that case has
+		// `pid != -1`, so it correctly falls through to the ECHILD
+		// branch. The specific-pid still-running case (`Nothing` with
+		// opid == Some) is unchanged: it takes the `opid.tag == SOME`
+		// path and hits #64's original `Nothing + WNOHANG -> 0` below.
+		if (pid == -1 && code.tag == __WASI_JOIN_STATUS_TYPE_NOTHING &&
+		    (options & WNOHANG) != 0) {
+			if (status) {
+				*status = 0;
+			}
+			return 0;
+		}
+
 		// Read the PID
 		if (opid.tag == __WASI_OPTION_SOME) {
 			pid = opid.u.some;
