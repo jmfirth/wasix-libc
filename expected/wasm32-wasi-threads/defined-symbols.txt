@@ -527,6 +527,7 @@ __wasilibc_rmdirat
 __wasilibc_set_stack_pointer
 __wasilibc_set_tls_base
 __wasilibc_setjmp
+__wasilibc_sid
 __wasilibc_stat
 __wasilibc_tell
 __wasilibc_tls_align
