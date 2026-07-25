@@ -116,6 +116,8 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         misc/nftw.c \
 	misc/realpath.c \
         misc/syslog.c \
+        misc/mntent.c \
+        misc/wordexp.c \
         mman/shm_open.c \
         errno/strerror.c \
         \
@@ -148,6 +150,8 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
 	    network/inet_ntoa.c \
         network/inet_pton.c \
         network/inet_aton.c \
+        network/inet_addr.c \
+        network/dn_expand.c \
         network/in6addr_any.c \
         network/in6addr_loopback.c \
         network/proto.c \
@@ -187,6 +191,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         time/__secs_to_tm.c \
         time/__year_to_secs.c \
         time/__tz.c \
+        time/timer_create.c \
         fcntl/creat.c \
         dirent/alphasort.c \
         dirent/versionsort.c \
@@ -210,10 +215,6 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         unistd/ualarm.c \
         unistd/ttyname.c \
         unistd/ttyname_r.c \
-        unistd/chown.c \
-        unistd/fchown.c \
-        unistd/fchownat.c \
-        unistd/lchown.c \
         linux/wait3.c \
         linux/wait4.c \
         linux/epoll.c \
@@ -223,6 +224,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         stat/mknodat.c \
         legacy/getpagesize.c \
         legacy/getpass.c \
+        legacy/daemon.c \
         thread/thrd_sleep.c \
         wasix/call_dynamic.c \
         wasix/closure_allocate.c \
@@ -230,6 +232,10 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         wasix/closure_prepare.c \
         wasix/reflection.c \
         wasix/context.c \
+        wasix/flock.c \
+        aio/aio.c \
+        aio/aio_suspend.c \
+        aio/lio_listio.c \
     ) \
     $(filter-out %/procfdname.c %/syscall.c %/syscall_ret.c %/vdso.c %/version.c, \
                  $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/internal/*.c)) \
@@ -246,6 +252,9 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/thread/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/signal/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/process/*.c) \
+    $(filter-out %/sched_yield.c, \
+                 $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/sched/*.c)) \
+    $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/mq/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/env/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/exit/*.c) \
     $(wildcard $(LIBC_TOP_HALF_MUSL_SRC_DIR)/search/*.c) \
@@ -540,12 +549,9 @@ MUSL_OMIT_HEADERS += \
     "link.h" "bits/link.h" \
     "scsi/scsi.h" "scsi/scsi_ioctl.h" "scsi/sg.h" \
     "sys/auxv.h" \
-    "mntent.h" \
-    "resolv.h" \
     "pty.h" \
     "ulimit.h" \
     "sys/xattr.h" \
-    "wordexp.h" \
     "sys/membarrier.h" \
     "sys/signalfd.h" \
     "sys/termios.h" \
@@ -555,8 +561,11 @@ MUSL_OMIT_HEADERS += \
     "netinet/if_ether.h" \
     "netinet/ether.h" \
     "sys/timerfd.h" \
-    "sys/sysmacros.h" \
-    "aio.h"
+    "sys/sysmacros.h"
+# firebox#5DB — aio.h is NO LONGER omitted: POSIX AIO is now provided (musl's
+# thread-backed src/aio/*.c, enabled above). The header ships so aio_read/
+# aio_write/aio_error/aio_return/aio_suspend/aio_cancel/aio_fsync/lio_listio +
+# struct aiocb are visible (closes the build:no-posix-aio conformance class).
 
 ifeq ($(PIC), no)
 MUSL_OMIT_HEADERS += "dlfcn.h"
