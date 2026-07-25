@@ -1,6 +1,7 @@
 _CLOCK_MONOTONIC
 _CLOCK_REALTIME
 _Exit
+_Fork
 _IO_feof_unlocked
 _IO_ferror_unlocked
 _IO_getc
@@ -13,6 +14,7 @@ __SIG_ERR
 __SIG_IGN
 __abort_lock
 __acquire_ptc
+__aio_atfork
 __aio_close
 __asctime_r
 __assert_fail
@@ -584,6 +586,7 @@ __year_to_secs
 _environ
 _exit
 _flushlbf
+_fork_internal
 _initialize
 _pthread_cleanup_pop
 _pthread_cleanup_push
@@ -904,6 +907,7 @@ fnmatch
 fopen
 fopen64
 fopencookie
+fork
 fpathconf
 fprintf
 fpurge

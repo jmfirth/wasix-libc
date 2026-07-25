@@ -13,7 +13,14 @@
 #include "pthread_impl.h"
 #include "aio_impl.h"
 
-#if defined(__wasilibc_unmodified_upstream) || !defined(__wasm_exception_handling__)
+/* firebox#CBP — _Fork() is DEFINED in EH builds too; see the rationale header
+ * in fork.c. Upstream 0008d18 hid this TU behind
+ * `!defined(__wasm_exception_handling__)`, which erased `_Fork` and
+ * `__aio_atfork` from every EH libc. The only host contact below is the
+ * `__wasi_proc_fork` import — nothing here interacts with the EH/unwind model,
+ * and a host that cannot fork answers Errno::Notsup, which this function
+ * propagates as -1/errno (the faithful POSIX failure) rather than the program
+ * failing to link. */
 
 static void dummy(int x) { }
 weak_alias(dummy, __aio_atfork);
@@ -114,5 +121,3 @@ pid_t _Fork(int copy_mem)
 	__restore_sigs(&set);
 	return __syscall_ret(ret);
 }
-
-#endif /* defined(__wasilibc_unmodified_upstream) || !defined(__wasm_exception_handling__) */

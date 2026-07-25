@@ -51,8 +51,41 @@ weak_alias(dummy_0, __tl_lock);
 weak_alias(dummy_0, __tl_unlock);
 #endif
 
-#if defined(__wasilibc_unmodified_upstream) || !defined(__wasm_exception_handling__)
-
+/* firebox#CBP — fork() is DEFINED in EH builds too.
+ *
+ * Upstream 0008d18 ("Disallow fork/vfork in EH configuration, since it's not
+ * supported") wrapped this whole file — and _Fork.c — in
+ * `!defined(__wasm_exception_handling__)`. Every EH variant compiles with
+ * -fwasm-exceptions (Makefile-eh) or gets it via EXTRA_CFLAGS
+ * (scripts/wasix-libc/build.sh --ehpic), and clang predefines
+ * __wasm_exception_handling__ under that flag, so BOTH TUs compiled to EMPTY
+ * objects and `fork` / `_fork_internal` / `_Fork` were absent from every EH
+ * libc.a and from the shipped shared libc.so.
+ *
+ * That is an Invariant-0 hole, not a config choice. Three measured facts:
+ *   1. `daemon()` (legacy/daemon.c) and `wordexp()` (misc/wordexp.c) CALL
+ *      fork(). The libc group links --whole-archive, so both members are pulled
+ *      in unconditionally and every wasixcc guest without its own fork() shim
+ *      FAILED TO LINK (cpython died at configure: "C compiler cannot create
+ *      executables").
+ *   2. The shared libc.so imported `env.fork` — the moat's flagship syscall
+ *      delegated back to whatever thin main happened to define it.
+ *   3. firebox#FD6 already un-gated the PROTOTYPE in unistd.h on the claim that
+ *      the definition shipped in every EH libc. It did not. This closes that
+ *      half.
+ *
+ * Nothing in fork()/_Fork() is EH-sensitive: the guest side is plain C that
+ * reaches the host through the `__wasi_proc_fork` import — no asyncify
+ * intrinsic, no setjmp/longjmp, no unwind interaction. Whether the HOST can
+ * service the fork is a runtime question the host answers at the syscall
+ * boundary (wasmer returns Errno::Notsup for a dynamically-linked module or one
+ * with no exported __stack_pointer, and _Fork propagates it as -1/errno — the
+ * honest POSIX failure). Deleting the SYMBOL at compile time converts that
+ * recoverable runtime absence into an unlinkable program, which is strictly
+ * less faithful and is what broke python.
+ *
+ * vfork KEEPS its EH branch (vfork.c) — that one genuinely differs under EH
+ * (setjmp/longjmp + proc_fork_env), and so does __clone (pthread_impl.h). */
 pid_t fork(void)
 {
 	return _fork_internal(1);
@@ -102,5 +135,3 @@ pid_t _fork_internal(int copy_mem)
 	if (ret<0) errno = errno_save;
 	return ret;
 }
-
-#endif /* defined(__wasilibc_unmodified_upstream) || !defined(__wasm_exception_handling__) */
