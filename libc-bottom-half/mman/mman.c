@@ -40,6 +40,52 @@
 // top-half objects are); getrlimit reaches the same table with no Makefile change.
 #include <sys/resource.h>
 
+// firebox#6ZJ: PIC-THIN errno routing — reach errno through __errno_location()
+// instead of the bare `errno` lvalue, so this object can be linked into a THIN
+// main that dynamically links a shared libc.so.
+//
+// WHY (the defect this closes): scripts/wasix-libc/build.sh compiles the
+// emulated-mman objects with -D__WASILIBC_BUILDING_LIBC, which vetoes the
+// PIC-consumer branch of libc-bottom-half/headers/public/__errno.h. Combined
+// with -ftls-model=local-exec, bare `errno` therefore emits as
+// R_WASM_MEMORY_ADDR_TLS_SLEB — a link-time-constant offset into THE LINKING
+// MODULE'S OWN TLS segment, reached from that module's __tls_base. In a thin
+// main errno is not defined locally at all; it lives in libc.so's TLS and is
+// imported as GOT.mem.errno. wasm-ld has no mechanism to manufacture a TLS
+// offset for a symbol it did not lay out, so it refuses outright:
+//   relocation R_WASM_MEMORY_ADDR_TLS_SLEB cannot be used against
+//   non-TLS symbol `errno`
+// and the archive is simply unlinkable into a thin main. That blocks a thin
+// main from PROVIDEing mmap/munmap back to libc.so's `env` imports.
+//
+// WHY THIS SHAPE and not "just drop -D__WASILIBC_BUILDING_LIBC for mman":
+// dropping the define would flip errno to the non-TLS GOT.mem extern, which is
+// correct ONLY in a thin link. The same object linked into any of the ~20 FAT
+// guests that carry -lwasi-emulated-mman (perl, git, cmake, ninja, ssh, bash,
+// ccache, blink, …) would then reference a different cell than the rest of
+// their statically-linked libc — the #99/#317 errno split-brain class, silent
+// and per-thread. __errno_location() is POLARITY-AGNOSTIC: it is defined and
+// exported by every libc flavor (static, fat-PIC, shared libc.so), it executes
+// INSIDE the libc that owns errno, and it returns the calling thread's own
+// cell by construction. One source, correct in all three linkage polarities.
+//
+// Cost: one indirect call per errno store, all on error paths.
+//
+// The guard keeps this OFF by default, so the ordinary
+// libwasi-emulated-mman.a is byte-identical to what it was before #6ZJ. It is
+// switched ON only by scripts/wasix-libc/build-picthin-mman.sh, which emits the
+// separately-named libwasi-emulated-mman-picthin.a.
+//
+// ⚠️ NEVER LINK BOTH ARCHIVES INTO ONE ARTIFACT. g_fixed_maps/g_fixed_count
+// below are file-static MAP_FIXED registry state; two copies of this object in
+// one module means two divergent registries and a mapping registered in one
+// that the other cannot find.
+#ifdef __FIREBOX_MMAN_PIC_THIN__
+int *__errno_location(void);
+#undef errno
+#define errno (*__errno_location())
+#endif
+
 // firebox#61X: the host shared-memory-window import (defined in
 // libc-bottom-half/sources/__wasixlibc_firebox.c) and the process-local
 // /dev/shm inode set (defined in libc-top-half/musl/src/mman/shm_open.c). A
