@@ -1126,15 +1126,16 @@ void __wasm_signal(int sig) {
 				 * carries no payload). `__fbx_signal_info_fill_si` pulls it via
 				 * the `signal_info_get` import and populates the real si_value/
 				 * si_code/si_pid, so the SA_SIGINFO handler observes the sent
-				 * value instead of a zero (sigqueue/1-1). Falls through to the
-				 * SI_USER default below when the host has no queued value (a
-				 * bare kill()/raise()-delivered RT). */
+				 * value instead of a zero (sigqueue/1-1). When the host has no
+				 * queued value either, an RT dispatch delivers NOTHING (the
+				 * firebox#PNB rule stated at the end of this branch); a non-RT
+				 * signal falls through to the SI_USER default below. */
 				if (on_alt) {
 					__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
 				} else {
 					h3(sig, &si, NULL);
 				}
-			} else {
+			} else if (!__fbx_sig_is_rt(sig)) {
 				memset(&si, 0, sizeof si);
 				si.si_signo = sig;
 				si.si_code = SI_USER;
@@ -1160,6 +1161,41 @@ void __wasm_signal(int sig) {
 					h3(sig, &si, NULL);
 				}
 			}
+			/* firebox#PNB — RT signal, NO record consumed => deliver ZERO.
+			 *
+			 * This is the #VYD spurious-doorbell rule, which the 1-arg RT
+			 * branch below has had since #VYD but this SA_SIGINFO branch did
+			 * not: the host's WasiThread::signal dedups its pending Vec, so a
+			 * second (coalesced) dispatch can land after a prior dispatch
+			 * already drained the ring. Falling through to the SI_USER default
+			 * invoked the handler an EXTRA time per surplus doorbell — Linux
+			 * never over-delivers an RT signal.
+			 *
+			 * Safe because every genuine same-process RT instance is recorded
+			 * in the ring BEFORE its doorbell — sigqueue (SELF arm), kill
+			 * (kill.c self-RT arm), pthread_kill, aio (__aio_notify_signal),
+			 * timer_create, raise of a BLOCKED signal (raise.c #RSQ), and
+			 * raise of an UNBLOCKED signal (__wasm_raise_self pushes exactly
+			 * one record before dispatching) — and every external instance is
+			 * recorded in the host stash, drained by the `fill_si` arm above.
+			 * So "RT dispatch with zero records" is *only* a surplus doorbell.
+			 * Non-RT keeps the SI_USER default (its pending bitmask has no
+			 * depth, so its dispatch carries no record by construction).
+			 *
+			 * Measured (RC-2 probe, wasm32, 2026-07-26): Open POSIX
+			 * lio_listio/{4-1,7-1,15-1} count SIGRTMIN+1 completions and
+			 * assert an exact total. Across 80 instrumented runs the genuine
+			 * SI_ASYNCIO records were correct in EVERY run (7/7, 8/8); the
+			 * only errors were surplus invocations carrying si_code SI_USER —
+			 * this fallback firing on an empty ring.
+			 *
+			 * NOT fixed here, deliberately: the `fill_si` arm above delivers
+			 * the host stash ONCE though `fill_si` is a consuming pop, so N
+			 * coalesced EXTERNAL records may be under-delivered — the mirror
+			 * image of this over-count. That is a HYPOTHESIS with no
+			 * measurement behind it (this probe's records were all
+			 * same-process, i.e. the ring arm), so it is split to firebox#9MS
+			 * rather than shipped unvalidated next to a measured fix. */
 		} else if (__fbx_sig_is_rt(sig)) {
 			/* firebox#VYD — 1-arg RT dispatch delivers RECORDS-ONLY.
 			 *
