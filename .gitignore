@@ -3,3 +3,19 @@
 build
 .vscode
 dist
+
+# Firebox: out-of-repo build products written into the CLONE ROOT.
+#
+# The firebox build clone lives AT scripts/wasix-libc/build, so a script writing
+# to "${SCRIPT_DIR}/build/libcxx-pic-build" lands at <clone>/libcxx-pic-build —
+# the clone's ROOT, not a build/ dir inside it. The bare `build` entry above
+# cannot reach those, so a completed libc build left the tree untracked-dirty
+# and the firebox#HMS currency gate refused every render after the first
+# (correctly: it cannot tell our own output from a stray source drop).
+#
+# Globs, not a list of what exists today: build-libcxx-{pic,ehpic}.sh generate
+# the -build/-out pair per variant, so a NEW variant is covered on arrival.
+# An untracked *source* file still reads dirty — the gate keeps its teeth.
+/libcxx-*-build/
+/libcxx-*-out/
+/picthin/
