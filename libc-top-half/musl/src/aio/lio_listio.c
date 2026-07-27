@@ -151,7 +151,7 @@ int lio_listio(int mode, struct aiocb *restrict const *restrict cbs, int cnt, st
 		pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
 		sigfillset(&set);
 		pthread_sigmask(SIG_BLOCK, &set, &set_old);
-		if (pthread_create(&td, &a, wait_thread, st)) {
+		if (__pthread_create(&td, &a, wait_thread, st)) {
 			free(st);
 			errno = EAGAIN;
 			return -1;

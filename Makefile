@@ -368,6 +368,25 @@ LIBC_TOP_HALF_MUSL_SOURCES += \
     )
 endif
 
+# firebox#5X0: the NOTHREADS variants deliberately build with THREAD_MODEL=posix
+# (wasi-libc's stdio wildcard unconditionally pulls __lockfile.c/flockfile.c,
+# which need _IO_FILE.lock — THREAD_MODEL=single does not compile upstream), so
+# THREAD_MODEL cannot be the discriminator here. The variant states its own fact
+# with -D__FIREBOX_NO_THREADS__ (see scripts/wasix-libc/build.sh, where it is
+# DERIVED from the variant's own CFLAGS rather than hand-listed per variant), and
+# this rule keys off that single marker so a future nothreads variant inherits it.
+#
+# wasi_thread_start.s is the thread-entry trampoline. It is ASSEMBLY, so it
+# cannot gate itself with #ifdef the way pthread_create.c does, and it carries a
+# hard `U __wasm_init_tls` — a global/function that wasm-ld synthesizes ONLY
+# under --shared-memory. On a nothreads `-shared` libc.so link that reference
+# survives as an unsatisfiable `env` import. Its only in-libc caller
+# (__wasi_thread_start_C) is #ifdef'd out on the same marker, so dropping the
+# object leaves nothing dangling.
+ifneq ($(findstring __FIREBOX_NO_THREADS__,$(EXTRA_CFLAGS)),)
+LIBC_TOP_HALF_MUSL_SOURCES := $(filter-out %/wasi_thread_start.s,$(LIBC_TOP_HALF_MUSL_SOURCES))
+endif
+
 MUSL_PRINTSCAN_SOURCES = \
     $(LIBC_TOP_HALF_MUSL_SRC_DIR)/internal/floatscan.c \
     $(LIBC_TOP_HALF_MUSL_SRC_DIR)/stdio/vfprintf.c \

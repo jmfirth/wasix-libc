@@ -373,7 +373,22 @@ pid_t gettid(void);
 #endif
 #define _POSIX_VDISABLE         0
 
-#if defined(__wasilibc_unmodified_upstream) || defined(_REENTRANT)
+/* firebox#S7V: `_REENTRANT` is set by the COMPILER (clang's `-pthread`), so it
+ * describes what the CONSUMER asked for, never what the sysroot can deliver. A
+ * nothreads sysroot therefore advertised `_POSIX_THREADS` to any TU that passed
+ * `-pthread` — and `pthread_create` linked — so autoconf `AX_PTHREAD` / CMake
+ * `FindThreads` concluded "threads available", selected the threaded path, and
+ * the program died at runtime. That is a false success (invariant 0) and a
+ * discovery mechanism that lies (invariant 4).
+ *
+ * `__FIREBOX_NO_THREADS__` is the SYSROOT's own statement of fact: it is
+ * -D'd into the nothreads libc build and baked into that sysroot's installed
+ * <features.h>, so it wins over anything the consumer's command line asserts.
+ * It is paired with the removal of `pthread_create` from the nothreads libc
+ * (firebox#5X0) — the macro half alone would still leave the linkable-symbol
+ * half lying. See scripts/wasix-libc/build.sh's nothreads derivation. */
+#if (defined(__wasilibc_unmodified_upstream) || defined(_REENTRANT)) \
+ && !defined(__FIREBOX_NO_THREADS__)
 #define _POSIX_THREADS          _POSIX_VERSION
 #endif
 #define _POSIX_THREAD_PROCESS_SHARED _POSIX_VERSION

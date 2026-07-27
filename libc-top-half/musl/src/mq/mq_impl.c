@@ -174,7 +174,7 @@ static void mq_deliver_notify(const struct sigevent *sev)
 			ap = &attr;
 		}
 		pthread_t td;
-		if (pthread_create(&td, ap, mq_notify_thread, copy)) {
+		if (__pthread_create(&td, ap, mq_notify_thread, copy)) {
 			free(copy);
 		} else if (ap == &attr) {
 			pthread_attr_destroy(&attr);
