@@ -574,6 +574,35 @@ __wasi_errno_t __wasi_proc_parent(
     return (uint16_t) ret;
 }
 
+/* firebox#HS6/#Y42 — the pgid ABI. `proc_get_pgid` writes guest memory so its
+ * pointer arg is width-dependent (i64 here, i32 in the wasm32 block below);
+ * `proc_set_pgid` is scalar-only and therefore identical in both. */
+int32_t __imported_wasix_64v1_proc_get_pgid(int32_t arg0, int64_t arg1) __attribute__((
+    __import_module__("wasix_64v1"),
+    __import_name__("proc_get_pgid")
+));
+
+__wasi_errno_t __wasi_proc_get_pgid(
+    __wasi_pid_t pid,
+    __wasi_pid_t *retptr0
+){
+    int32_t ret = __imported_wasix_64v1_proc_get_pgid((int32_t) pid, (intptr_t) retptr0);
+    return (uint16_t) ret;
+}
+
+int32_t __imported_wasix_64v1_proc_set_pgid(int32_t arg0, int32_t arg1) __attribute__((
+    __import_module__("wasix_64v1"),
+    __import_name__("proc_set_pgid")
+));
+
+__wasi_errno_t __wasi_proc_set_pgid(
+    __wasi_pid_t pid,
+    __wasi_pid_t pgid
+){
+    int32_t ret = __imported_wasix_64v1_proc_set_pgid((int32_t) pid, (int32_t) pgid);
+    return (uint16_t) ret;
+}
+
 int32_t __imported_wasix_64v1_proc_join(int64_t arg0, int32_t arg1, int64_t arg2) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("proc_join")
@@ -1974,6 +2003,35 @@ __wasi_errno_t __wasi_proc_parent(
     __wasi_pid_t *retptr0
 ){
     int32_t ret = __imported_wasix_32v1_proc_parent((int32_t) pid, (intptr_t) retptr0);
+    return (uint16_t) ret;
+}
+
+/* firebox#HS6/#Y42 — the pgid ABI. `proc_get_pgid` writes guest memory so its
+ * pointer arg is width-dependent (i32 here, i64 in the wasm64 block above);
+ * `proc_set_pgid` is scalar-only and therefore identical in both. */
+int32_t __imported_wasix_32v1_proc_get_pgid(int32_t arg0, int32_t arg1) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("proc_get_pgid")
+));
+
+__wasi_errno_t __wasi_proc_get_pgid(
+    __wasi_pid_t pid,
+    __wasi_pid_t *retptr0
+){
+    int32_t ret = __imported_wasix_32v1_proc_get_pgid((int32_t) pid, (intptr_t) retptr0);
+    return (uint16_t) ret;
+}
+
+int32_t __imported_wasix_32v1_proc_set_pgid(int32_t arg0, int32_t arg1) __attribute__((
+    __import_module__("wasix_32v1"),
+    __import_name__("proc_set_pgid")
+));
+
+__wasi_errno_t __wasi_proc_set_pgid(
+    __wasi_pid_t pid,
+    __wasi_pid_t pgid
+){
+    int32_t ret = __imported_wasix_32v1_proc_set_pgid((int32_t) pid, (int32_t) pgid);
     return (uint16_t) ret;
 }
 

@@ -2,56 +2,56 @@
 #include <errno.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
-#endif
-
-#ifdef __wasilibc_unmodified_upstream
 #else
-extern int __wasilibc_pgrp;
+#include <wasi/api.h>
 #endif
 
 /*
- * firebox#347: WASIX doesn't model process groups in the host runtime;
- * __wasilibc_pgrp is a per-process userspace global with no real
- * scheduling/signal semantics. The upstream stub only accepted the
- * pid == 0 form ("operate on caller"), rejecting every other shape with
- * EINVAL -- including the POSIX-valid forms bash uses after fork:
+ * firebox#Y42 (guest half of the #HS6 pgid ABI) -- setpgid ASKS THE HOST.
  *
- *   setpgid(getpid(), getpid())   // child making itself pg-leader
- *   setpgid(child_pid, child_pid) // parent making child pg-leader
+ * WHAT THIS REPLACES, AND WHY IT HAD TO GO. firebox#347 made this function
+ * return 0 for `pid != 0 && pid != getpid()` while performing no operation at
+ * all, on the stated premise that "without a real process-group table in the
+ * host, we accept all structurally valid forms". That premise was FALSE: the
+ * host has modelled process groups since firebox#1HE (`WasiProcess::pgid`,
+ * defaulted at process creation, inherited across fork, stamped on spawn, and
+ * scanned by `proc_signal` for group delivery). What was missing was only the
+ * guest-facing syscall, which firebox#HS6 added as `proc_set_pgid`. This
+ * wrapper is that call.
  *
- * Both produced "bash: child setpgid: Invalid argument" warnings on
- * every command in `firebox run --entrypoint /bin/bash`.
+ * The false premise is not the only problem with the old shape. A success
+ * returned for an operation that did not happen is FAIL-OPEN, and invariant 0
+ * rules on it directly: "an honest ENOSYS is faithful; a false success never
+ * is -- absence is recoverable, a wrong answer is not". It was measured, not
+ * inferred: `setpgid(999999, 999999)` returned `0` with `errno == 0` for a pid
+ * that does not exist (firebox#E4T false success #2). node/libuv -- which,
+ * unlike bash, TRUSTS the return value -- then operated on a process group
+ * that was never formed, and failed every spawn with exit=71 (firebox#9B8,
+ * three red REQUIRE_ALL gates). That is the signature of a false success: it
+ * helps the caller that ignores the result and breaks the caller that trusts
+ * it.
  *
- * Per POSIX (man 2 setpgid):
- *   - setpgid(0, pgid) and setpgid(getpid(), pgid) are equivalent
- *   - pid == pgid creates a new group with the caller (or child) as leader
- *   - pgid < 0 is EINVAL
- *
- * Without a real process-group table in the host, we accept all
- * structurally valid forms and update the single userspace global only
- * when the request is "operate on the caller" (pid == 0 or pid ==
- * getpid()). Operations on a child pid are accepted as no-ops at this
- * layer (the child's wasilibc_pgrp lives in the child's address space).
- * This is the cheapest POSIX-shaped behavior that silences bash without
- * pretending we have multi-process group semantics we don't have.
+ * There is deliberately NO local rule left here. Every POSIX decision (the
+ * `pid`/`pgid` zero-forms, EINVAL for a negative pgid, ESRCH for a negative
+ * pid or for a target that is neither the caller nor one of its children) is
+ * the host's, because the host is the only layer that can see which pids exist
+ * and who their parents are. Duplicating any of them here would recreate
+ * exactly the guessing this change removes. See `proc_set_pgid.rs` in the
+ * wasmer fork for those rules, and for the two POSIX refusals -- EACCES for a
+ * child that has already exec'd, EPERM for a target in another session --
+ * recorded there as honest gaps rather than approximated.
  */
 int setpgid(pid_t pid, pid_t pgid)
 {
 #ifdef __wasilibc_unmodified_upstream
 	return syscall(SYS_setpgid, pid, pgid);
 #else
-	if (pgid < 0) {
-		errno = EINVAL;
+	__wasi_errno_t error = __wasi_proc_set_pgid((__wasi_pid_t) pid,
+	                                            (__wasi_pid_t) pgid);
+	if (error != 0) {
+		errno = error;
 		return -1;
 	}
-	if (pid == 0 || pid == getpid()) {
-		__wasilibc_pgrp = (pgid == 0) ? getpid() : pgid;
-		return 0;
-	}
-	/* pid != 0 and pid != getpid(): a child or unrelated process.
-	 * We have no host-side process-group table to update for another
-	 * process, but the form is POSIX-valid (e.g. bash setting a child's
-	 * pgid from the parent). Accept as a no-op rather than EINVAL. */
 	return 0;
 #endif
 }

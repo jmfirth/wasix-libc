@@ -4420,6 +4420,49 @@ __wasi_errno_t __wasi_proc_parent(
     __wasi_pid_t *retptr0
 ) __attribute__((__warn_unused_result__));
 /**
+ * firebox#HS6 — returns the POSIX process-GROUP id of a particular process.
+ *
+ * Backed by the host-authoritative `WasiProcess::pgid` that firebox#1HE
+ * already models. It exists because `getpgid.c` / `getpgrp.c` previously had
+ * no host model to ask and answered from a per-process userspace global
+ * (`__wasilibc_pgrp`) that no other process could see.
+ *
+ * `pid == 0` selects the caller. Returns `ESRCH` for a negative pid or a pid
+ * that does not exist — the control plane is the authority on which pids
+ * exist, so that is a measured verdict rather than a guess.
+ */
+__wasi_errno_t __wasi_proc_get_pgid(
+    /**
+     * Handle of the process to get the process-group id for; 0 means the caller
+     */
+    __wasi_pid_t pid,
+    __wasi_pid_t *retptr0
+) __attribute__((__warn_unused_result__));
+/**
+ * firebox#HS6 — sets the POSIX process-GROUP id of a particular process.
+ *
+ * `pid == 0` means the caller; `pgid == 0` means "the target's own pid" (make
+ * the target a group leader). Returns `EINVAL` for a negative pgid, and
+ * `ESRCH` for a negative pid or a target that is neither the caller nor one of
+ * its children — the exact case `setpgid.c` used to answer with a FALSE
+ * SUCCESS (firebox#E4T false success #2; measured as `setpgid(999999,999999)
+ * = 0, errno=0` against the pre-#Y42 sysroot).
+ *
+ * All arguments are scalars — no guest memory is touched — so this import is
+ * width-independent and is registered identically in the host's `Memory32` and
+ * `Memory64` blocks.
+ */
+__wasi_errno_t __wasi_proc_set_pgid(
+    /**
+     * Handle of the process to modify; 0 means the caller
+     */
+    __wasi_pid_t pid,
+    /**
+     * The new process-group id; 0 means the target's own pid
+     */
+    __wasi_pid_t pgid
+) __attribute__((__warn_unused_result__));
+/**
  * Wait for process to exit
  * 
  * Passing none to PID will mean that the call will wait
@@ -9740,6 +9783,49 @@ __wasi_errno_t __wasi_proc_parent(
      */
     __wasi_pid_t pid,
     __wasi_pid_t *retptr0
+) __attribute__((__warn_unused_result__));
+/**
+ * firebox#HS6 — returns the POSIX process-GROUP id of a particular process.
+ *
+ * Backed by the host-authoritative `WasiProcess::pgid` that firebox#1HE
+ * already models. It exists because `getpgid.c` / `getpgrp.c` previously had
+ * no host model to ask and answered from a per-process userspace global
+ * (`__wasilibc_pgrp`) that no other process could see.
+ *
+ * `pid == 0` selects the caller. Returns `ESRCH` for a negative pid or a pid
+ * that does not exist — the control plane is the authority on which pids
+ * exist, so that is a measured verdict rather than a guess.
+ */
+__wasi_errno_t __wasi_proc_get_pgid(
+    /**
+     * Handle of the process to get the process-group id for; 0 means the caller
+     */
+    __wasi_pid_t pid,
+    __wasi_pid_t *retptr0
+) __attribute__((__warn_unused_result__));
+/**
+ * firebox#HS6 — sets the POSIX process-GROUP id of a particular process.
+ *
+ * `pid == 0` means the caller; `pgid == 0` means "the target's own pid" (make
+ * the target a group leader). Returns `EINVAL` for a negative pgid, and
+ * `ESRCH` for a negative pid or a target that is neither the caller nor one of
+ * its children — the exact case `setpgid.c` used to answer with a FALSE
+ * SUCCESS (firebox#E4T false success #2; measured as `setpgid(999999,999999)
+ * = 0, errno=0` against the pre-#Y42 sysroot).
+ *
+ * All arguments are scalars — no guest memory is touched — so this import is
+ * width-independent and is registered identically in the host's `Memory32` and
+ * `Memory64` blocks.
+ */
+__wasi_errno_t __wasi_proc_set_pgid(
+    /**
+     * Handle of the process to modify; 0 means the caller
+     */
+    __wasi_pid_t pid,
+    /**
+     * The new process-group id; 0 means the target's own pid
+     */
+    __wasi_pid_t pgid
 ) __attribute__((__warn_unused_result__));
 /**
  * Wait for process to exit

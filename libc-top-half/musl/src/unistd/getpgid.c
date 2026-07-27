@@ -2,48 +2,43 @@
 #include <errno.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
-#endif
-
-#ifdef __wasilibc_unmodified_upstream
 #else
-extern int __wasilibc_pgrp;
+#include <wasi/api.h>
 #endif
 
 /*
- * firebox#388 (sibling of #347): WASIX has no host-side process-group
- * table; __wasilibc_pgrp is a per-process userspace global. The upstream
- * stub accepted only getpgid(0); every other caller-self shape was
- * rejected EINVAL -- including the POSIX-valid getpgid(getpid()) form
- * that bash and other shells use after fork to query their own pgid
- * without relying on the "0 means self" alias.
+ * firebox#Y42 (guest half of the #HS6 pgid ABI) -- getpgid ASKS THE HOST.
  *
- * Per POSIX (man 2 getpgid):
- *   - getpgid(0) returns the caller's pgid
- *   - getpgid(getpid()) returns the caller's pgid (same as 0)
- *   - getpgid(<unknown pid>) returns -1 with ESRCH
- *   - getpgid(<negative>) returns -1 with EINVAL
+ * firebox#388 answered this from `__wasilibc_pgrp`, a per-process USERSPACE
+ * global that no other process could see. That made two answers wrong in ways
+ * a caller cannot work around:
  *
- * We honor all four. For the unknown-pid case we use ESRCH (POSIX-
- * correct) rather than EINVAL, because EINVAL implies the caller passed
- * a malformed pid -- which is not what's happening; they passed a valid
- * pid we don't know about. This matches the #347 setpgid fix's
- * structurally-honest-error principle.
+ *   - `getpgid(<any other pid>)` was ESRCH unconditionally, even for a live
+ *     child of the caller. That is what blocks the Open POSIX killpg/1-2
+ *     witness before killpg is ever reached ("Could not get pgid of child" --
+ *     firebox#1HE).
+ *   - `getpgid(<negative>)` was EINVAL. POSIX does not list EINVAL for getpgid
+ *     at all, and Linux reaches ESRCH there via a failed pid lookup
+ *     (firebox#E4T).
+ *
+ * The host has had the real model since firebox#1HE; `proc_get_pgid` is the
+ * window onto it. No argument rule is applied here -- `pid == 0`, the negative
+ * pid, and the lookup are all decided host-side, where the answer is measured
+ * rather than guessed. Note the sign survives the cast: `__wasi_pid_t` is
+ * unsigned on the wire and the host recovers the sign by reinterpreting as
+ * i32, so a negative `pid_t` still lands on the ESRCH branch.
  */
 pid_t getpgid(pid_t pid)
 {
 #ifdef __wasilibc_unmodified_upstream
 	return syscall(SYS_getpgid, pid);
 #else
-	if (pid < 0) {
-		errno = EINVAL;
+	__wasi_pid_t pgid = 0;
+	__wasi_errno_t error = __wasi_proc_get_pgid((__wasi_pid_t) pid, &pgid);
+	if (error != 0) {
+		errno = error;
 		return -1;
 	}
-	if (pid == 0 || pid == getpid()) {
-		return __wasilibc_pgrp;
-	}
-	/* pid is positive but != getpid(): a process we don't know about.
-	 * POSIX-correct error here is ESRCH (no such process), not EINVAL. */
-	errno = ESRCH;
-	return -1;
+	return (pid_t) pgid;
 #endif
 }
