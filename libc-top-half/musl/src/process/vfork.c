@@ -1,3 +1,5 @@
+/* firebox#5X0: __FBX_THREAD_LOCAL */
+#include <features.h>
 #define _GNU_SOURCE
 #include <unistd.h>
 
@@ -31,10 +33,10 @@ pid_t vfork(void) {
 // overwritten. The other buffer should not be modified as it contains the
 // jmp_buf that can be used to longjmp back to the parent context after
 // proc_exit or proc_exec
-_Thread_local jmp_buf __vfork_jump[2];
-_Thread_local int __vfork_jump_free_index = 0;
+__FBX_THREAD_LOCAL jmp_buf __vfork_jump[2];
+__FBX_THREAD_LOCAL int __vfork_jump_free_index = 0;
 // The pid of the vforked process
-static _Thread_local pid_t __child_pid;
+static __FBX_THREAD_LOCAL pid_t __child_pid;
 
 // setjmp/longjmp based vfork implementation
 //

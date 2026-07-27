@@ -1,3 +1,5 @@
+/* firebox#5X0: __FBX_THREAD_LOCAL */
+#include <features.h>
 #include <fenv.h>
 
 /* Software floating-point environment for WebAssembly (firebox #7CD).
@@ -17,8 +19,10 @@
  * it works identically on BOTH the native and browser profiles (tier-1, not
  * native-only).
  *
- * The word is per-thread (POSIX requires the fp environment to be thread-local);
- * the -threads variants build with TLS so _Thread_local is available.
+ * The word is per-thread (POSIX requires the fp environment to be thread-local),
+ * so the -threads variants build it with real TLS. __FBX_THREAD_LOCAL degenerates
+ * to plain static storage on the NOTHREADS profile (firebox#5X0), where "per
+ * thread" and "per process" are the same statement.
  *
  * SCOPE / honest residual: this closes the *explicit-raise* cases (INVALID,
  * DIVBYZERO, OVERFLOW, UNDERFLOW from domain/range errors). It does NOT track
@@ -27,7 +31,7 @@
  * modes other than FE_TONEAREST likewise don't exist on wasm (the generic
  * bits/fenv.h defines only FE_TONEAREST), so fegetround() is constant. */
 
-static _Thread_local int __fe_except;
+static __FBX_THREAD_LOCAL int __fe_except;
 
 int feclearexcept(int mask)
 {

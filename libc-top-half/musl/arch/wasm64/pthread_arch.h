@@ -1,10 +1,12 @@
+/* firebox#5X0: __FBX_THREAD_LOCAL */
+#include <features.h>
 /*
  * Thread pointer access for wasm64.
  *
  * WHY this matches arch/wasm32 verbatim (firebox#796):
  * The original wasm64 hand-port read the thread pointer with inline asm
  * `global.get __wasilibc_pthread_self`. But __wasilibc_pthread_self is a
- * _Thread_local DATA variable (defined in src/thread/pthread_self.c), not a
+ * __FBX_THREAD_LOCAL DATA variable (defined in src/thread/pthread_self.c), not a
  * wasm global. lld resolves the R_WASM_GLOBAL_INDEX_LEB reloc against that
  * data symbol by writing its TLS *offset* (e.g. 53752) as the global index,
  * yielding `global.get 53752` against a module with 8 globals → validation
@@ -14,7 +16,7 @@
  * same way on both widths (the compiler emits a __tls_base-relative load),
  * so the wasm32 form is correct and width-agnostic here.
  */
-extern _Thread_local struct __pthread *__wasilibc_pthread_self;
+extern __FBX_THREAD_LOCAL struct __pthread *__wasilibc_pthread_self;
 
 static inline uintptr_t __get_tp() {
   return (uintptr_t)__wasilibc_pthread_self;
