@@ -1642,6 +1642,29 @@ int __wasm_sigaction(int sig, int action) {
 			return -1;
 	}
 
+	/* firebox#9AV — SIGKILL/SIGSTOP have a FIXED disposition that POSIX makes
+	 * unchangeable, so #XCJ's `sigaction(SIGKILL, non-NULL, ...) -> EINVAL`
+	 * guard is correct and stays. But this function is NOT the POSIX API: it is
+	 * the host->guest disposition-RESTORE ABI, replaying a set the parent
+	 * already holds. Replaying "SIGKILL is at its default" is a request for the
+	 * state the guest is already in — a satisfied no-op, not a failed set — so
+	 * report success without routing through __sigaction. Answering -1 here made
+	 * __wasi_init_signals kill the guest before main (exit 71) for every parent
+	 * whose SETSIGDEF set named SIGKILL, which is what libuv's sigfillset() does
+	 * and what tini was hand-patched to avoid one guest at a time.
+	 *
+	 * IGNORE is deliberately NOT excused: an uncatchable signal cannot be
+	 * ignored, that state is unrepresentable, and reporting success for it would
+	 * be a false success (invariant 0). It stays -1/EINVAL — and per the loop in
+	 * __wasi_init_signals a rejected entry no longer terminates the guest. */
+	if (sig == SIGKILL || sig == SIGSTOP) {
+		if (a == SIG_DFL) {
+			return 0;
+		}
+		errno = EINVAL;
+		return -1;
+	}
+
 	struct sigaction sa = { .sa_handler = a, .sa_flags = SA_RESTART };
 	if (__sigaction(sig, &sa, NULL) < 0) {
 		return -1;
@@ -1731,13 +1754,26 @@ void __wasi_init_signals() {
         _Exit(EX_OSERR);
     }
 
+	/* firebox#9AV — a disposition entry we cannot apply must NEVER be fatal.
+	 *
+	 * This loop replays the disposition set inherited from the parent. On Linux
+	 * there is no execve path where inheriting a disposition set can kill the
+	 * child before main: unhandleable entries simply do not take effect. The
+	 * previous `_Exit(EX_OSERR)` gave this host-supplied array veto power over
+	 * whether the guest runs at all — one odd entry and the process died at
+	 * exit 71 with no output, before main, indistinguishable from a crash.
+	 *
+	 * That is the class: the fatal-on-reject shape, not any one rejected signo.
+	 * SIGKILL (the #XCJ interaction that surfaced this) is now a no-op success
+	 * inside __wasm_sigaction, but an entry carrying an unknown disposition
+	 * enum, a reserved RT signo, or an out-of-range signo would land here just
+	 * the same. Skipping leaves that one signal at its default disposition —
+	 * recoverable and observable; _Exit is neither. */
 	for (int i = 0; i < signal_count; ++i) {
 		sigaction_ret = __wasm_sigaction((int)sig_dispositions[i].sig, (int)sig_dispositions[i].disp);
-		if (sigaction_ret == -1) {
-			free(sig_dispositions);
-			_Exit(EX_OSERR);
-		}
+		(void)sigaction_ret;
 	}
+	errno = 0;
 
 	free(sig_dispositions);
 

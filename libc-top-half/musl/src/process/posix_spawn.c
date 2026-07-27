@@ -430,6 +430,21 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 	{
 		for (int sig = 1; sig < _NSIG; sig++)
 		{
+			/* firebox#9AV — never emit SIGKILL/SIGSTOP into the inherited
+			 * disposition array. Their disposition is fixed by POSIX and can
+			 * never be anything but the default, so the entry carries no
+			 * information; it only hands the child a request it cannot honor.
+			 * posix_spawnattr_setsigdefault(sigfillset(...)) is the normal
+			 * idiom (libuv does exactly this), so the malformed entry is the
+			 * common case, not the odd one. Stripping it here is what tini was
+			 * hand-patched to do per-guest (firebox#3T8); doing it in libc means
+			 * no parent needs that workaround.
+			 *
+			 * This is hygiene at the source, NOT the load-bearing fix — the
+			 * child-side guarantee lives in __wasi_init_signals/__wasm_sigaction
+			 * so that a parent we do not own cannot kill its child either. */
+			if (sig == SIGKILL || sig == SIGSTOP)
+				continue;
 			if (sigismember(&attr->__def, sig))
 			{
 				signals[nsignals++] = (__wasi_signal_disposition_t){
