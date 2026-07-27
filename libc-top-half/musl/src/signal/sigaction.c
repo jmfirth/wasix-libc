@@ -180,13 +180,14 @@ static volatile struct k_sigaction __eintr_handler_callbacks[_NSIG];
  * deadlocks under re-entrant __wasm_signal dispatch. See issue #24. */
 volatile int __eintr_handler_lock[1];
 
-/* Process-wide "signals currently blocked by __block_all_sigs" flag.
- * Separate from __eintr_handler_lock so the dispatcher can tell the
- * two apart. Written atomically by __block_all_sigs / __restore_sigs.
- * Read by __wasm_signal to decide whether to dispatch or enqueue. */
-volatile int __wasm_signals_blocked = 0;
-
-/* Process-wide pending-signal bitmask. Bit (sig-1) set means a signal
+/* firebox#35F — the process-wide `__wasm_signals_blocked` flag that used to
+ * live here is GONE. __block_all_sigs/__block_app_sigs now fold into the
+ * calling thread's `struct pthread::blocked_sigmask` (block.c), which is what
+ * POSIX means by a signal mask; a process-wide flag let thread A's block
+ * window swallow thread B's handler (firebox#NHJ). Every gate that read the
+ * flag now reads the per-thread `__wasm_thread_sig_blocked()` alone.
+ *
+ * Process-wide pending-signal bitmask. Bit (sig-1) set means a signal
  * was raised during a blocked window and needs redelivery at
  * __restore_sigs time. Implemented as an array of ints for a_or /
  * a_and_l atomics; musl's sigset_t semantics (bit N-1) mirrored. */
@@ -196,7 +197,10 @@ volatile int __wasm_pending_sigs[__WASM_PENDING_WORDS];
 /* SA_NODEFER in-handler recursion guards: per-signal depth counters.
  * Written only from within __wasm_signal, so no atomic needed — the
  * WASM runtime delivers signals serially to a single thread and we
- * guard re-entrant dispatch via __wasm_signals_blocked. */
+ * guard re-entrant dispatch via the SA_NODEFER check below.
+ * firebox#TW2: this array is itself process-wide and has the same
+ * thread-locality defect firebox#35F fixed for the block mask — thread
+ * A inside a handler makes thread B pend its own. Tracked separately. */
 static int __wasm_in_handler[_NSIG];
 
 /* firebox signal-mask machinery — per-signal "a handler is currently
@@ -664,8 +668,7 @@ volatile int __eintr_valid_flag;
 #ifdef __wasilibc_unmodified_upstream
 #else
 /* Forward declarations for the internal helpers the dispatcher consults.
- * All three are defined in block.c / thread/pthread_sigmask.c. */
-extern volatile int __wasm_signals_blocked;
+ * Defined above / in thread/pthread_sigmask.c. */
 extern volatile int __wasm_pending_sigs[];
 int __wasm_thread_sig_blocked(int sig);
 
@@ -972,16 +975,13 @@ void __wasm_signal(int sig) {
 		}
 	}
 
-	/* Process-wide block (from __block_all_sigs). Enqueue and return.
-	 * __restore_sigs will drain this bitmask. */
-	if (__wasm_signals_blocked) {
-		__wasm_pend_signal(sig);
-		return;
-	}
-
-	/* Per-thread block (from pthread_sigmask). The signal is queued
-	 * into the calling thread's own pending bitmask; pthread_sigmask
-	 * on SIG_UNBLOCK (or SIG_SETMASK) drains and redelivers. */
+	/* Per-thread block — from pthread_sigmask, from a running handler's
+	 * applied sa_mask, or from __block_all_sigs/__block_app_sigs (which
+	 * firebox#35F folded into this same per-thread mask; they used to set a
+	 * PROCESS-WIDE flag checked here, so a sibling thread's block window
+	 * swallowed THIS thread's handler — firebox#NHJ). The signal is queued
+	 * into the calling thread's own pending bitmask; pthread_sigmask on
+	 * SIG_UNBLOCK (or SIG_SETMASK) and __restore_sigs drain and redeliver. */
 	if (__wasm_thread_sig_blocked(sig)) {
 		__wasm_pend_signal(sig);
 		return;
@@ -1324,7 +1324,10 @@ void __wasm_signal(int sig) {
  * does) — NOT __wasi_thread_signal — precisely because a self-target host nudge
  * is deferred, not dispatched. */
 void __wasm_deliver_pending_rt_inline(void) {
-	if (__wasm_signals_blocked) return;
+	/* firebox#35F — the process-wide `__wasm_signals_blocked` early-return
+	 * that stood here is gone; the per-signal `__wasm_thread_sig_blocked(s)`
+	 * test in the loop below is the same predicate, correctly scoped to THIS
+	 * thread, and now also carries __block_all_sigs/__block_app_sigs. */
 	for (int s = __FBX_RTSIG_MIN; s <= __FBX_RTSIG_MAX; s++) {
 		if (__fbx_rtsigq_count(s) <= 0) continue;
 		if (!__fbx_handler_installed(s)) continue;
@@ -1377,10 +1380,11 @@ int __wasm_raise_self(int sig) {
 	if (sig < 1 || sig >= _NSIG) return 0;
 	if (__wasm_in_any_handler() > 0) {
 		/* IN-HANDLER cases (existing, unchanged). */
-		/* Blocked (process-wide or by this thread's mask, which now carries
-		 * the active handler's applied sa_mask): hold pending in-guest so
+		/* Blocked by this thread's mask — which carries the active handler's
+		 * applied sa_mask, any pthread_sigmask block, and (firebox#35F) any
+		 * __block_all_sigs/__block_app_sigs window: hold pending in-guest so
 		 * sigpending() reports it. */
-		if (__wasm_signals_blocked || __wasm_thread_sig_blocked(sig)) {
+		if (__wasm_thread_sig_blocked(sig)) {
 			__wasm_pend_signal(sig);
 			return 1;
 		}
@@ -1425,7 +1429,7 @@ int __wasm_raise_self(int sig) {
 	 * boundary drain that lands raise-race's 100 cross-thread SIGRTMIN+1 kills
 	 * DURING the raise loop (§__wasm_deliver_pending_rt_inline). */
 	if (!__fbx_sig_is_rt(sig)) return 0;
-	if (__wasm_signals_blocked || __wasm_thread_sig_blocked(sig)) return 0;
+	if (__wasm_thread_sig_blocked(sig)) return 0;
 	if (!__fbx_handler_installed(sig)) return 0;
 	if (__wasm_in_handler[sig] > 0) return 0;
 	{
@@ -1438,13 +1442,22 @@ int __wasm_raise_self(int sig) {
 	return 1;
 }
 
-/* Stub export for the runtime's callback_signal("__wasm_signal_blocked").
- * Historically wasix-libc's __block_all_sigs calls __wasi_callback_signal
- * with this name, but no program exported the target. Now that
- * __block_all_sigs sets __wasm_signals_blocked=1 BEFORE calling the
- * callback, and __wasm_signal consults the flag, this export is a
- * compatibility no-op: it exists so the runtime's callback wiring
- * doesn't see "export not found" and doesn't disable dispatch. */
+/* Compatibility-only export. NOTHING IN THIS LIBC CALLS IT ANY MORE.
+ *
+ * firebox#35F removed the `__wasi_callback_signal("__wasm_signal_blocked")`
+ * swap from __block_all_sigs/__block_app_sigs (and the matching swap back
+ * from __restore_sigs). That swap was process-wide — it retargeted the host's
+ * single `inner.signal` slot for the whole instance — so it was the same
+ * thread-locality defect as the flag, in a second guise, with a strictly worse
+ * failure mode: a signal delivered to the blocking thread itself during the
+ * window reached this no-op and was CONSUMED without even being pended.
+ * Keeping __wasm_signal registered and letting the per-thread mask pend is the
+ * faithful behavior.
+ *
+ * The export stays so an OLDER runtime, or an older object linked against this
+ * libc, that still requests this callback name resolves it rather than seeing
+ * "export not found" and setting inner.signal = None (which disables dispatch
+ * process-wide). Delete it only once no shipped runtime requests the name. */
 __attribute__((export_name("__wasm_signal_blocked")))
 void __wasm_signal_blocked(int sig) {
 	(void)sig;

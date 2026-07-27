@@ -28,12 +28,13 @@ int __wasm_raise_self(int sig);
  * sigtimedwait() have accepted all N (Open POSIX sigwait/2-1). The RT-signal
  * FIFO ring (__fbx_rtsigq) is that depth's source of truth; until now it was
  * fed only by sigqueue(). __fbx_rtsigq_push no-ops (returns 0) for a non-RT
- * signal. __wasm_thread_sig_blocked / __wasm_signals_blocked report whether
- * this raise will PEND rather than dispatch. */
+ * signal. __wasm_thread_sig_blocked reports whether this raise will PEND
+ * rather than dispatch — since firebox#35F it is the SINGLE authority, and
+ * carries __block_all_sigs/__block_app_sigs windows too (the process-wide
+ * __wasm_signals_blocked term that used to sit beside it is deleted). */
 extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
 extern int __wasm_thread_sig_blocked(int sig);
-extern volatile int __wasm_signals_blocked;
 #endif
 
 int raise(int sig)
@@ -82,7 +83,7 @@ int raise(int sig)
 	 * never drains. __fbx_rtsigq_push no-ops for a non-RT signal, so standard
 	 * signals are unchanged; the ring is bounded (over-limit push is a silent
 	 * drop == the POSIX SIGQUEUE_MAX ceiling, harmless for the depth query). */
-	if (__wasm_signals_blocked || __wasm_thread_sig_blocked(sig)) {
+	if (__wasm_thread_sig_blocked(sig)) {
 		union sigval sv;
 		memset(&sv, 0, sizeof sv);
 		(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
