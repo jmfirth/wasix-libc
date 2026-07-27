@@ -1,3 +1,5 @@
+/* firebox#5X0: __FBX_THREAD_LOCAL */
+#include <features.h>
 //! POSIX-like functions supporting absolute path arguments, implemented in
 //! terms of `__wasilibc_find_relpath` and `*at`-style functions.
 
@@ -29,8 +31,8 @@ static int find_relpath2(
 // `relative` pointer will point to static data that cannot be reused until
 // `relative` is no longer used.
 static int find_relpath(const char *path, char **relative) {
-    static __thread char *relative_buf = NULL;
-    static __thread size_t relative_buf_len = 0;
+    static __FBX_THREAD_LOCAL char *relative_buf = NULL;
+    static __FBX_THREAD_LOCAL size_t relative_buf_len = 0;
     int fd = find_relpath2(path, &relative_buf, &relative_buf_len);
     // find_relpath2 can update relative_buf, so assign it after the call
     *relative = relative_buf;
@@ -39,8 +41,8 @@ static int find_relpath(const char *path, char **relative) {
 
 // same as `find_relpath`, but uses another set of static variables to cache
 static int find_relpath_alt(const char *path, char **relative) {
-    static __thread char *relative_buf = NULL;
-    static __thread size_t relative_buf_len = 0;
+    static __FBX_THREAD_LOCAL char *relative_buf = NULL;
+    static __FBX_THREAD_LOCAL size_t relative_buf_len = 0;
     int fd = find_relpath2(path, &relative_buf, &relative_buf_len);
     // find_relpath2 can update relative_buf, so assign it after the call
     *relative = relative_buf;

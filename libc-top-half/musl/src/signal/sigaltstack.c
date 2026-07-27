@@ -1,3 +1,5 @@
+/* firebox#5X0: __FBX_THREAD_LOCAL */
+#include <features.h>
 #include <signal.h>
 #include <errno.h>
 #ifdef __wasilibc_unmodified_upstream
@@ -10,10 +12,10 @@
 /* firebox#9PX — per-thread alt-stack state. See firebox_altstack.h for why
  * this lives in TLS rather than in struct pthread. Zero-init => no alt stack,
  * not on alt stack. Read by __wasm_signal's SA_ONSTACK dispatch (sigaction.c). */
-__thread void  *__fbx_altstack_sp    = 0;
-__thread size_t __fbx_altstack_size  = 0;
-__thread int    __fbx_altstack_flags = 0;
-__thread int    __fbx_altstack_depth = 0;
+__FBX_THREAD_LOCAL void  *__fbx_altstack_sp    = 0;
+__FBX_THREAD_LOCAL size_t __fbx_altstack_size  = 0;
+__FBX_THREAD_LOCAL int    __fbx_altstack_flags = 0;
+__FBX_THREAD_LOCAL int    __fbx_altstack_depth = 0;
 #endif
 
 int sigaltstack(const stack_t *restrict ss, stack_t *restrict old)

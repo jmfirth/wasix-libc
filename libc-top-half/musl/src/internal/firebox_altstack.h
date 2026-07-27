@@ -1,3 +1,5 @@
+/* firebox#5X0: __FBX_THREAD_LOCAL */
+#include <features.h>
 #ifndef FIREBOX_ALTSTACK_H
 #define FIREBOX_ALTSTACK_H
 
@@ -32,9 +34,9 @@
  */
 #include <stddef.h>
 
-extern __thread void  *__fbx_altstack_sp;
-extern __thread size_t __fbx_altstack_size;
-extern __thread int    __fbx_altstack_flags;
-extern __thread int    __fbx_altstack_depth;
+extern __FBX_THREAD_LOCAL void  *__fbx_altstack_sp;
+extern __FBX_THREAD_LOCAL size_t __fbx_altstack_size;
+extern __FBX_THREAD_LOCAL int    __fbx_altstack_flags;
+extern __FBX_THREAD_LOCAL int    __fbx_altstack_depth;
 
 #endif

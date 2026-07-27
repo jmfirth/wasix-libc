@@ -1,3 +1,5 @@
+/* firebox#5X0: __FBX_THREAD_LOCAL */
+#include <features.h>
 #ifndef __wasilibc_unmodified_upstream
 #include <setjmp.h>
 #include <signal.h>
@@ -18,9 +20,9 @@
  * pattern that motivated this feature.
  */
 
-static __thread sigset_t __firebox_saved_mask;
-static __thread void *__firebox_saved_env;
-static __thread int __firebox_saved_valid;
+static __FBX_THREAD_LOCAL sigset_t __firebox_saved_mask;
+static __FBX_THREAD_LOCAL void *__firebox_saved_env;
+static __FBX_THREAD_LOCAL int __firebox_saved_valid;
 
 /* Out-of-line recorder. The noinline attribute is load-bearing: if the
  * body were inlined back into sigsetjmp, the resulting non-trivial

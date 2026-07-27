@@ -36,12 +36,18 @@ void __wasilibc_set_stack_pointer(void *val) {
  * to satisfy it (two of them GLOBAL imports, which the wasmer linker rejects
  * outright — see linker.rs `resolve_env_symbol`).
  *
- * There is nothing for them to do on a nothreads module either: with a single
- * thread the `.tdata` segment IS the thread's TLS block, placed in the data
- * image at link time, and the loader sets `__tls_base = memory_base + tdata
- * offset` in place (linker.rs `init_in_place_tls`). No arena, no template copy,
- * no `__wasm_init_tls`. `__wasilibc_get_tls_base` / `__wasilibc_set_tls_base`
- * stay in BOTH variants — the loader still needs to read and write the base. */
+ * There is nothing for them to do on a nothreads module either: libc's own
+ * thread-locals degenerate to plain globals on that profile (see
+ * __FBX_THREAD_LOCAL in features.h), so no TLS block is left to bootstrap.
+ *
+ * `__wasilibc_{get,set}_tls_base` go with them, and NOT merely because they are
+ * unused: `__wasilibc_set_tls_base` is the module's single `global.set
+ * __tls_base`, and wasm-ld emits `__tls_base` IMMUTABLE on a non-shared-memory
+ * link — so its mere presence made the nothreads libc.so fail `wasm-tools
+ * validate` with "global is immutable: cannot modify it with global.set".
+ * That is firebox#3EC's blocker, removed at its root rather than worked around
+ * by trying to make the global mutable (which #3EC showed leaks a wrong,
+ * init=0 __tls_base into every static-fat consumer of the same archive). */
 #ifndef __FIREBOX_NO_THREADS__
 
 void __wasm_init_tls(size_t val);
@@ -78,8 +84,6 @@ unsigned long long __wasilibc_tls_align(void) {
   return (unsigned long long)val;
 }
 
-#endif /* !__FIREBOX_NO_THREADS__ */
-
 void* __wasilibc_get_tls_base(void) {
   void* val;
 #if defined(__wasm64__)
@@ -105,6 +109,8 @@ void __wasilibc_set_tls_base(void *val) {
           "global.set __tls_base" : /* no outputs */ : "r" (val));
 #endif
 }
+
+#endif /* !__FIREBOX_NO_THREADS__ */
 
 int __wasilibc_setjmp(__wasi_stack_snapshot_t * buf) {
   uint64_t ret = 0;
