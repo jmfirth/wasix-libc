@@ -121,12 +121,36 @@ void __restore_sigs(void *set)
 #ifdef __wasilibc_unmodified_upstream
 	__syscall(SYS_rt_sigprocmask, SIG_SETMASK, set, 0, _NSIG/8);
 #else
-	/* Put this thread's mask back, then drain the signals that queued on
-	 * this thread while it held them. Drain must happen AFTER the mask is
-	 * restored so a re-raised signal dispatches instead of re-pending.
-	 * A NULL `set` mirrors rt_sigprocmask(SIG_SETMASK, NULL, ...): no mask
-	 * change (no caller does this today; kept faithful rather than
-	 * reinterpreting it as "clear"). */
+	/* ⚠️ DO NOT DELETE THIS CALL. It is no longer a "swap back" — nothing
+	 * swaps the dispatcher away any more (firebox#35F removed that) — but it
+	 * is LOAD-BEARING as the post-fork RE-ARM, and its absence is silent.
+	 *
+	 * MEASURED (firebox#35F, 2026-07-27): deleting it alongside the swap-away
+	 * flipped `sigkill-unblockable-in-handler-h2f` PASS→FAIL, because a
+	 * forked CHILD then dispatched NO signals at all. The host's
+	 * `inner.signal` / `signal_set` live on the per-instance handles, and a
+	 * `proc_fork` child gets FRESH ones — but the guest-side one-shot guard
+	 * that gates registration (`__eintr_callback_registered` in sigaction.c,
+	 * consulted by both `__wasi_init_signals` and `__libc_sigaction`) is
+	 * ordinary linear memory and is inherited as ALREADY-REGISTERED. So
+	 * neither startup nor a fresh `sigaction()` re-registers in the child;
+	 * `_Fork`'s own `__restore_sigs` (running IN the child, _Fork.c) is the
+	 * only thing that ever armed it. The child's `raise()` then returned
+	 * cleanly with the handler never dispatched — a fail-open.
+	 *
+	 * That the post-fork arm rides on a side effect of the mask-restore path
+	 * is itself a latent defect (the child should re-register explicitly);
+	 * it is filed separately. Until then this call is the arming path, and it
+	 * is idempotent + harmless on every other caller: it installs the CORRECT
+	 * dispatcher, never the no-op stub the swap-away used to install.
+	 *
+	 * Then put this thread's mask back and drain the signals that queued on
+	 * it while it held them. Drain must happen AFTER the mask is restored so
+	 * a re-raised signal dispatches instead of re-pending. A NULL `set`
+	 * mirrors rt_sigprocmask(SIG_SETMASK, NULL, ...): no mask change (no
+	 * caller does this today; kept faithful rather than reinterpreting it as
+	 * "clear"). */
+	__wasi_callback_signal("__wasm_signal");
 	struct pthread *self = __pthread_self();
 	if (self && set) {
 		const unsigned long *saved = (const unsigned long *)set;

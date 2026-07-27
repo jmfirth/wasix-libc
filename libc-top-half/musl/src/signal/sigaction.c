@@ -1442,11 +1442,13 @@ int __wasm_raise_self(int sig) {
 	return 1;
 }
 
-/* Compatibility-only export. NOTHING IN THIS LIBC CALLS IT ANY MORE.
+/* Compatibility-only export. NOTHING IN THIS LIBC REQUESTS IT ANY MORE.
  *
  * firebox#35F removed the `__wasi_callback_signal("__wasm_signal_blocked")`
- * swap from __block_all_sigs/__block_app_sigs (and the matching swap back
- * from __restore_sigs). That swap was process-wide — it retargeted the host's
+ * swap from __block_all_sigs/__block_app_sigs. (`__restore_sigs`'s
+ * `__wasi_callback_signal("__wasm_signal")` STAYS — it is not the matching
+ * swap-back any more but the post-fork re-arm; see the ⚠️ in block.c.) That
+ * swap was process-wide — it retargeted the host's
  * single `inner.signal` slot for the whole instance — so it was the same
  * thread-locality defect as the flag, in a second guise, with a strictly worse
  * failure mode: a signal delivered to the blocking thread itself during the
