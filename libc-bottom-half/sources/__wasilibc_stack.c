@@ -28,6 +28,22 @@ void __wasilibc_set_stack_pointer(void *val) {
 #endif
 }
 
+/* firebox#5X0: `__wasm_init_tls` / `__tls_size` / `__tls_align` are synthesized
+ * by wasm-ld ONLY under `--shared-memory`. The nothreads variants link without
+ * it, so these three helpers turn into UNDEFINED references — and because the
+ * shared `libc.so` is linked `--whole-archive --unresolved-symbols=import-dynamic`,
+ * every one of them became an `env.*` IMPORT on a module that has no importer
+ * to satisfy it (two of them GLOBAL imports, which the wasmer linker rejects
+ * outright — see linker.rs `resolve_env_symbol`).
+ *
+ * There is nothing for them to do on a nothreads module either: with a single
+ * thread the `.tdata` segment IS the thread's TLS block, placed in the data
+ * image at link time, and the loader sets `__tls_base = memory_base + tdata
+ * offset` in place (linker.rs `init_in_place_tls`). No arena, no template copy,
+ * no `__wasm_init_tls`. `__wasilibc_get_tls_base` / `__wasilibc_set_tls_base`
+ * stay in BOTH variants — the loader still needs to read and write the base. */
+#ifndef __FIREBOX_NO_THREADS__
+
 void __wasm_init_tls(size_t val);
 
 void __wasilibc_init_tls(void *val) {
@@ -61,6 +77,8 @@ unsigned long long __wasilibc_tls_align(void) {
 #endif
   return (unsigned long long)val;
 }
+
+#endif /* !__FIREBOX_NO_THREADS__ */
 
 void* __wasilibc_get_tls_base(void) {
   void* val;

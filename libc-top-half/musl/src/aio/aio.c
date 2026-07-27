@@ -403,7 +403,7 @@ static int submit(struct aiocb *cb, int op)
 	sigfillset(&allmask);
 	pthread_sigmask(SIG_BLOCK, &allmask, &origmask);
 	cb->__err = EINPROGRESS;
-	if (pthread_create(&td, &a, io_thread_func, &args)) {
+	if (__pthread_create(&td, &a, io_thread_func, &args)) {
 		pthread_mutex_lock(&q->lock);
 		__aio_unref_queue(q);
 		cb->__err = errno = EAGAIN;

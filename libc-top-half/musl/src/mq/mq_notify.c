@@ -7,6 +7,7 @@
 #include "syscall.h"
 #ifndef __wasilibc_unmodified_upstream
 #include "mq_impl.h" /* firebox#KS9 */
+#include "pthread_impl.h" /* firebox#S7V: __pthread_create */
 #endif
 
 #ifdef __wasilibc_unmodified_upstream
@@ -58,7 +59,7 @@ int mq_notify(mqd_t mqd, const struct sigevent *sev)
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 	pthread_barrier_init(&args.barrier, 0, 2);
 
-	if (pthread_create(&td, &attr, start, &args)) {
+	if (__pthread_create(&td, &attr, start, &args)) {
 		__syscall(SYS_close, s);
 		errno = EAGAIN;
 		return -1;

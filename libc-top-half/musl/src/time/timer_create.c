@@ -106,7 +106,7 @@ int timer_create(clockid_t clk, struct sigevent *restrict evp, timer_t *restrict
 		__block_app_sigs(&set);
 #endif
 		__syscall(SYS_rt_sigprocmask, SIG_BLOCK, SIGTIMER_SET, 0, _NSIG/8);
-		r = pthread_create(&td, &attr, start, &args);
+		r = __pthread_create(&td, &attr, start, &args);
 #ifdef __wasilibc_unmodified_upstream
 		__restore_sigs(&set);
 #endif
@@ -364,7 +364,7 @@ static void fbx_deliver(const struct fbx_deliver *d)
 		*arg = *d;
 		pthread_attr_init(&a);
 		pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-		if (pthread_create(&th, &a, fbx_notify_trampoline, arg) != 0)
+		if (__pthread_create(&th, &a, fbx_notify_trampoline, arg) != 0)
 			free(arg);
 		pthread_attr_destroy(&a);
 		return;
@@ -498,7 +498,7 @@ static int fbx_ensure_manager_locked(void)
 		pthread_t mt;
 		pthread_attr_init(&a);
 		pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-		int r = pthread_create(&mt, &a, fbx_timer_manager, 0);
+		int r = __pthread_create(&mt, &a, fbx_timer_manager, 0);
 		pthread_attr_destroy(&a);
 		if (r != 0) return -1;
 		g_mgr_started = 1;

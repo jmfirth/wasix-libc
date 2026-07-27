@@ -314,6 +314,15 @@ hidden void __pthread_tsd_run_dtors();
 hidden void __pthread_key_delete_synccall(void (*)(void *), void *);
 hidden int __pthread_key_delete_impl(pthread_key_t);
 
+/* firebox#S7V: every IN-LIBC thread spawn goes through the namespace-safe
+ * `__pthread_create`, never the public `pthread_create` (which the nothreads
+ * profile deliberately does not define — it is the build-system thread-
+ * discovery probe). This is also musl's own convention; thrd_create.c already
+ * used it. NOT `hidden`: the threaded profile still weak-aliases the public
+ * name onto it and exports both. */
+int __pthread_create(pthread_t *__restrict, const pthread_attr_t *__restrict,
+                     void *(*)(void *), void *__restrict);
+
 extern hidden volatile size_t __pthread_tsd_size;
 extern hidden void *__pthread_tsd_main[];
 extern hidden volatile int __eintr_valid_flag;

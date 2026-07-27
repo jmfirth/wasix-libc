@@ -126,7 +126,16 @@ long sysconf(int name)
 		[_SC_2_SW_DEV] = -1,
 		[_SC_2_LOCALEDEF] = -1,
 		[_SC_IOV_MAX] = IOV_MAX,
+		/* firebox#S7V: the nothreads profile has no thread creation, so
+		 * sysconf(_SC_THREADS) must return -1 — the POSIX answer for an
+		 * unsupported optional feature. Kept in lockstep with unistd.h's
+		 * _POSIX_THREADS gate; a sysconf that disagreed with its own
+		 * feature-test macro is the #XE4/#M31 incoherence class. */
+#ifdef __FIREBOX_NO_THREADS__
+		[_SC_THREADS] = -1,
+#else
 		[_SC_THREADS] = VER,
+#endif
 		[_SC_THREAD_SAFE_FUNCTIONS] = VER,
 		[_SC_GETGR_R_SIZE_MAX] = -1,
 		[_SC_GETPW_R_SIZE_MAX] = -1,

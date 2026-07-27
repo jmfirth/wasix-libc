@@ -351,6 +351,7 @@ static int start_c11(void *p)
 }
 #else
 
+#ifndef __FIREBOX_NO_THREADS__
 /*
  * We want to ensure wasi_thread_start is linked whenever
  * pthread_create is used. The following reference is to ensure that.
@@ -359,9 +360,11 @@ static int start_c11(void *p)
  */
 void wasi_thread_start(int tid, void *p);
 hidden void *__dummy_reference = wasi_thread_start;
+#endif
 
 extern void __set_tp(uintptr_t p);
 
+#ifndef __FIREBOX_NO_THREADS__
 hidden void __wasi_thread_start_C(int tid, void *p)
 {
 	struct start_args *args = p;
@@ -400,6 +403,7 @@ hidden void __wasi_thread_start_C(int tid, void *p)
 	// Execute the user's start function.
 	__pthread_exit(args->start_func(args->start_arg));
 }
+#endif /* !__FIREBOX_NO_THREADS__ */
 #endif
 
 #ifdef __wasilibc_unmodified_upstream
@@ -432,6 +436,32 @@ static void init_file_lock(FILE *f)
 	if (f && f->lock<0) f->lock = 0;
 }
 
+#ifdef __FIREBOX_NO_THREADS__
+/*
+ * firebox#5X0 / firebox#S7V — the nothreads profile has no thread creation.
+ *
+ * WHY THE TU IS KEPT AND ONLY THIS FUNCTION IS REPLACED: pthread_create.o also
+ * owns pthread_exit, __do_cleanup_push/pop, __pthread_tsd_size/__pthread_tsd_main
+ * and the __std{in,out,err}_used weak file locks, all of which a single-threaded
+ * program still needs. Dropping the whole object would have taken those with it.
+ *
+ * WHY THE INTERNAL SYMBOL SURVIVES BUT THE PUBLIC ONE DOES NOT: five in-libc
+ * callers (aio, lio_listio, mq_impl, mq_notify, timer_create, thrd_create) ask
+ * for a thread and already handle refusal — they get ENOSYS here and degrade
+ * honestly. But the PUBLIC `pthread_create` is deliberately absent: it is the
+ * symbol autoconf's AX_PTHREAD and CMake's FindThreads LINK against to decide
+ * whether threads exist. Defining it — even as a stub that returns ENOSYS —
+ * would make that probe succeed again and put the build system back on the
+ * threaded path, which is precisely the fail-open #S7V exists to close.
+ * The `weak_alias(__pthread_create, pthread_create)` at the bottom of this file
+ * is gated out for the same reason.
+ */
+int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict attrp, void *(*entry)(void *), void *restrict arg)
+{
+	(void)res; (void)attrp; (void)entry; (void)arg;
+	return ENOSYS;
+}
+#else
 int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict attrp, void *(*entry)(void *), void *restrict arg)
 {
 	int ret, c11 = (attrp == __ATTRP_C11_THREAD);
@@ -731,6 +761,11 @@ fail:
 	__release_ptc();
 	return EAGAIN;
 }
+#endif /* __FIREBOX_NO_THREADS__ */
 
 weak_alias(__pthread_exit, pthread_exit);
+#ifndef __FIREBOX_NO_THREADS__
+/* firebox#S7V: see the __FIREBOX_NO_THREADS__ branch above — the public name is
+ * the build-system thread-discovery probe and must NOT exist on this profile. */
 weak_alias(__pthread_create, pthread_create);
+#endif
