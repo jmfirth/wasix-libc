@@ -194,6 +194,26 @@ volatile int __eintr_handler_lock[1];
 #define __WASM_PENDING_WORDS ((_NSIG + 31) / 32)
 volatile int __wasm_pending_sigs[__WASM_PENDING_WORDS];
 
+/* firebox#8YM EXPERIMENT — libc-authored disposition exports.
+ *
+ * The seven disposition symbols above are the host's ONLY window onto a
+ * signal's real disposition. Until now every consumer had to pass
+ * `-Wl,--export-if-defined=<sym>` on its own link line, which means a user
+ * running `cmake . && make` inside `firebox run` passes nothing and silently
+ * gets unfaithful default-signal semantics.
+ *
+ * `.export_name <sym>, <name>` sets WASM_SYMBOL_EXPORTED on the DATA symbol in
+ * this object's linking section, so wasm-ld exports it with NO command-line
+ * flag. sigaction.o is universally linked (crt1 -> __wasi_init_signals), so
+ * every program that links this libc carries the surface. */
+__asm__(".export_name __fbx_handler_set, __fbx_handler_set");
+__asm__(".export_name __fbx_main_pthread, __fbx_main_pthread");
+__asm__(".export_name __fbx_blocked_off, __fbx_blocked_off");
+__asm__(".export_name __wasm_pending_sigs, __wasm_pending_sigs");
+__asm__(".export_name __fbx_pending_off, __fbx_pending_off");
+__asm__(".export_name __fbx_sigsuspend_off, __fbx_sigsuspend_off");
+__asm__(".export_name __fbx_sa_flags, __fbx_sa_flags");
+
 /* SA_NODEFER in-handler recursion guards: per-signal depth counters.
  * Written only from within __wasm_signal, so no atomic needed — the
  * WASM runtime delivers signals serially to a single thread and we
