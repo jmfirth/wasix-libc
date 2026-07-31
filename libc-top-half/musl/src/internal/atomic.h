@@ -243,6 +243,22 @@ static inline void a_or_l(volatile void *p, long v)
 }
 #endif
 
+/* firebox#Q14 — the missing counterpart of a_or_l. A `long`-width bitmask set
+ * with a_or_l can only be cleared symmetrically with a matching width-dispatched
+ * atomic AND; open-coding `*p &= ~bit` is a read-modify-write that races with a
+ * concurrent a_or_l on a neighbouring bit in the same word and can resurrect it.
+ * Added because __fbx_handler_set (signal/sigaction.c) needs to clear the bit
+ * when a disposition is reset to SIG_DFL/SIG_IGN and no long-width atomic AND
+ * existed. Exact mirror of a_or_l's width dispatch. */
+#ifndef a_and_l
+#define a_and_l a_and_l
+static inline void a_and_l(volatile void *p, long v)
+{
+	if (sizeof(long) == sizeof(int)) a_and(p, v);
+	else a_and_64(p, v);
+}
+#endif
+
 #ifndef a_crash
 #define a_crash a_crash
 static inline void a_crash()

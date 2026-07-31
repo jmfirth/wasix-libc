@@ -1511,6 +1511,40 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 			if (!(sa->sa_flags & SA_RESTART)) {
 				a_store(&__eintr_valid_flag, 1);
 			}
+		} else {
+			/* firebox#Q14 — SYMMETRIC MAINTENANCE. Resetting the disposition to
+			 * SIG_DFL or SIG_IGN must CLEAR the mirror bit, or __fbx_handler_set
+			 * keeps claiming "a real handler is installed" forever after the
+			 * first handler is uninstalled. The set above is the only write this
+			 * array ever had; without this arm it is a set-only accumulator whose
+			 * declared contract (see __fbx_handler_installed, "records the bit
+			 * ONLY for a real handler") is true on install and false ever after.
+			 *
+			 * MEASURED consequence of the stale bit (2026-07-31 witness, task
+			 * README §repro): the host's guest_handler_installed returns
+			 * Some(true), which bypasses the pid-1 unkillable-init suppression,
+			 * so a `signal(h); signal(SIG_DFL); raise()` sequence KILLS pid 1
+			 * (exit 127 via the guest's abort-based default-action chain) where
+			 * Linux-as-pid-1 survives. Controls that never set the bit agree with
+			 * Linux on every arm, so this write is the sole difference.
+			 *
+			 * a_and_l, not `&= ~bit`: the set side is a_or_l, and a plain
+			 * read-modify-write here would race a concurrent a_or_l for a
+			 * DIFFERENT signal sharing this word and could resurrect its bit.
+			 *
+			 * ⚠️ The range guard is NOT redundant. This whole block runs BEFORE
+			 * the EINVAL validation below (`sig-1U >= _NSIG-1` … at the `r =
+			 * EINVAL` arm), so `sig` is still unvalidated here. The set arm above
+			 * is reachable only with a real handler, but SIG_DFL/SIG_IGN is the
+			 * disposition a caller is most likely to pass for an arbitrary signo,
+			 * so without this guard the fix would turn an out-of-range
+			 * `__libc_sigaction(9999, {SIG_DFL})` — which previously wrote
+			 * nothing — into an out-of-bounds atomic AND. Same bound the reader
+			 * (__fbx_handler_installed) already applies. */
+			if (sig >= 1 && sig < _NSIG) {
+				a_and_l(__fbx_handler_set+(sig-1)/(8*sizeof(long)),
+					~(1UL<<(sig-1)%(8*sizeof(long))));
+			}
 		}
 		ksa.handler = sa->sa_handler;
 		ksa.flags = sa->sa_flags | SA_RESTORER;
