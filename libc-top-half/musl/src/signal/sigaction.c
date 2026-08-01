@@ -222,6 +222,56 @@ static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 #define __WASM_PENDING_WORDS ((_NSIG + 31) / 32)
 volatile int __wasm_pending_sigs[__WASM_PENDING_WORDS];
 
+/* firebox#8YM — the disposition surface is authored BY THE LIBC, not by each
+ * consumer's link line.
+ *
+ * The seven symbols below are the host's ONLY window onto a signal's real
+ * disposition: the guest installs one generic __wasm_signal dispatcher at libc
+ * init, so from outside the module "SIG_DFL, no handler" and "user handler
+ * installed" are indistinguishable. The host reads the truth out of these
+ * objects' linear addresses via a non-executing MemoryView read.
+ *
+ * Until #8YM that surface existed only when a consumer passed
+ * `-Wl,--export-if-defined=<sym>` for each symbol on its OWN link line. A user
+ * who runs `git clone X && cd X && cmake . && make` inside `firebox run`
+ * passes no such flag, so guest_handler_installed() returned None, the host
+ * declined to terminate, and the program silently got UNFAITHFUL default
+ * signal semantics. That is invariant 0: the faithful fix lives in the
+ * substrate or invisibly in the toolchain we ship, NEVER on the user's command
+ * line — and the correct denominator is every link that uses this libc, not
+ * every build script somebody remembered to edit.
+ *
+ * `.export_name <sym>, <name>` sets WASM_SYMBOL_EXPORTED on the DATA symbol in
+ * this object's linking-section entry, so wasm-ld exports it with no
+ * command-line flag at all. sigaction.o is universally linked (crt1 calls
+ * __wasi_init_signals below), so every program that links this libc carries
+ * the surface. The export is an immutable global holding the symbol's linear
+ * address — the exact shape the host already reads — so there is no new
+ * import, no ABI change, and an older host simply ignores the extra exports.
+ * Because it is a STATIC property of the module, a fork child that never
+ * reruns CRT init still carries it.
+ *
+ * ⚠️ THE SET IS DEFINED IN BASH, AND THIS IS ITS SECOND HOME. The one home is
+ * `scripts/lib/fbx-disposition-exports.sh:FBX_DISPOSITION_SYMBOLS` in the
+ * firebox repo; a C translation unit in this fork cannot source it. These
+ * lines were GENERATED from that variable, not retyped. Adding a symbol there
+ * requires adding it here — `scripts/check-disposition-exports.sh` measures
+ * the artifact and fails closed if you don't, which is what keeps the two
+ * homes honest.
+ *
+ * ⚠️ DO NOT DELETE THESE BECAUSE A MEASUREMENT SHOWS THEM REDUNDANT. The
+ * `libc.so` link line currently passes `--export-all`, which masks the
+ * directive there (measured: identical export count with and without). The
+ * directive is what makes the property survive anyone tightening that flag,
+ * and what makes it true of a libc.so built by any other recipe. */
+__asm__(".export_name __fbx_handler_set, __fbx_handler_set");
+__asm__(".export_name __fbx_main_pthread, __fbx_main_pthread");
+__asm__(".export_name __fbx_blocked_off, __fbx_blocked_off");
+__asm__(".export_name __wasm_pending_sigs, __wasm_pending_sigs");
+__asm__(".export_name __fbx_pending_off, __fbx_pending_off");
+__asm__(".export_name __fbx_sigsuspend_off, __fbx_sigsuspend_off");
+__asm__(".export_name __fbx_sa_flags, __fbx_sa_flags");
+
 /* SA_NODEFER in-handler recursion guards: per-signal depth counters.
  * Written only from within __wasm_signal, so no atomic needed — the
  * WASM runtime delivers signals serially to a single thread and we
