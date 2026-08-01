@@ -180,6 +180,34 @@ static volatile struct k_sigaction __eintr_handler_callbacks[_NSIG];
  * deadlocks under re-entrant __wasm_signal dispatch. See issue #24. */
 volatile int __eintr_handler_lock[1];
 
+/* Replace one signal action and its host-readable mirrors as one serialized
+ * maintenance operation.
+ *
+ * Contract:
+ * - The caller has validated sig and knows the operation will not be rejected.
+ * - The caller holds __eintr_handler_lock; this helper must not acquire it.
+ * - This helper alone writes __eintr_handler_callbacks[sig] and maintains both
+ *   __fbx_handler_set and __fbx_sa_flags so the guest-side state cannot drift.
+ * - No code outside this helper may assign __eintr_handler_callbacks[sig] or
+ *   __eintr_handler_callbacks[sig].handler.
+ */
+static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
+	unsigned long user_flags)
+{
+	unsigned long *word = __fbx_handler_set+(sig-1)/(8*sizeof(long));
+	unsigned long bit = 1UL<<(sig-1)%(8*sizeof(long));
+
+	/* The host reads these separate objects without this lock, so it can still
+	 * observe the stores between states. Keep them adjacent; closing that
+	 * residual window is deliberately left to the separate seqlock task. */
+	__eintr_handler_callbacks[sig] = *ksa;
+	if (ksa->handler != SIG_DFL && ksa->handler != SIG_IGN)
+		a_or_l(word, bit);
+	else
+		a_and_l(word, ~bit);
+	__fbx_sa_flags[sig] = (uint32_t)user_flags;
+}
+
 /* firebox#35F — the process-wide `__wasm_signals_blocked` flag that used to
  * live here is GONE. __block_all_sigs/__block_app_sigs now fold into the
  * calling thread's `struct pthread::blocked_sigmask` (block.c), which is what
@@ -992,7 +1020,8 @@ void __wasm_signal(int sig) {
 	/* SA_RESETHAND: reset handler to SIG_DFL atomically with snapshot,
 	 * so a concurrent sigaction() on another thread sees the reset. */
 	if (ksa.handler != 0 && (ksa.flags & SA_RESETHAND)) {
-		__eintr_handler_callbacks[sig].handler = 0;
+		const struct k_sigaction ksa_default = { .handler = SIG_DFL };
+		__fbx_replace_action_locked(sig, &ksa_default, 0);
 	}
 	UNLOCK(__eintr_handler_lock);
 
@@ -1469,6 +1498,13 @@ void __wasm_signal_blocked(int sig) {
 int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigaction *restrict old)
 {
 	struct k_sigaction ksa, ksa_old;
+#ifndef __wasilibc_unmodified_upstream
+	/* Reject before callback registration, state changes, or sig-based indexing.
+	 * A pure SIGKILL/SIGSTOP query remains valid; only replacement is forbidden. */
+	if (sig-32U < 3 || sig-1U >= _NSIG-1 ||
+	    (sa && (sig == SIGKILL || sig == SIGSTOP)))
+		return __syscall_ret(EINVAL);
+#endif
 	if (sa) {
 #ifdef __wasilibc_unmodified_upstream
 		/* Native: SIG_IGN is the in-band sentinel (void(*)(int))1 and
@@ -1489,9 +1525,6 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		 * class_lesson_wasm_fnptr_is_table_index_not_address. */
 		if (sa->sa_handler != SIG_DFL && sa->sa_handler != SIG_IGN) {
 #endif
-			a_or_l(__fbx_handler_set+(sig-1)/(8*sizeof(long)),
-				1UL<<(sig-1)%(8*sizeof(long)));
-
 			/* If pthread_create has not yet been called,
 			 * implementation-internal signals might not
 			 * yet have been unblocked. They must be
@@ -1511,40 +1544,6 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 			if (!(sa->sa_flags & SA_RESTART)) {
 				a_store(&__eintr_valid_flag, 1);
 			}
-		} else {
-			/* firebox#Q14 — SYMMETRIC MAINTENANCE. Resetting the disposition to
-			 * SIG_DFL or SIG_IGN must CLEAR the mirror bit, or __fbx_handler_set
-			 * keeps claiming "a real handler is installed" forever after the
-			 * first handler is uninstalled. The set above is the only write this
-			 * array ever had; without this arm it is a set-only accumulator whose
-			 * declared contract (see __fbx_handler_installed, "records the bit
-			 * ONLY for a real handler") is true on install and false ever after.
-			 *
-			 * MEASURED consequence of the stale bit (2026-07-31 witness, task
-			 * README §repro): the host's guest_handler_installed returns
-			 * Some(true), which bypasses the pid-1 unkillable-init suppression,
-			 * so a `signal(h); signal(SIG_DFL); raise()` sequence KILLS pid 1
-			 * (exit 127 via the guest's abort-based default-action chain) where
-			 * Linux-as-pid-1 survives. Controls that never set the bit agree with
-			 * Linux on every arm, so this write is the sole difference.
-			 *
-			 * a_and_l, not `&= ~bit`: the set side is a_or_l, and a plain
-			 * read-modify-write here would race a concurrent a_or_l for a
-			 * DIFFERENT signal sharing this word and could resurrect its bit.
-			 *
-			 * ⚠️ The range guard is NOT redundant. This whole block runs BEFORE
-			 * the EINVAL validation below (`sig-1U >= _NSIG-1` … at the `r =
-			 * EINVAL` arm), so `sig` is still unvalidated here. The set arm above
-			 * is reachable only with a real handler, but SIG_DFL/SIG_IGN is the
-			 * disposition a caller is most likely to pass for an arbitrary signo,
-			 * so without this guard the fix would turn an out-of-range
-			 * `__libc_sigaction(9999, {SIG_DFL})` — which previously wrote
-			 * nothing — into an out-of-bounds atomic AND. Same bound the reader
-			 * (__fbx_handler_installed) already applies. */
-			if (sig >= 1 && sig < _NSIG) {
-				a_and_l(__fbx_handler_set+(sig-1)/(8*sizeof(long)),
-					~(1UL<<(sig-1)%(8*sizeof(long))));
-			}
 		}
 		ksa.handler = sa->sa_handler;
 		ksa.flags = sa->sa_flags | SA_RESTORER;
@@ -1558,29 +1557,11 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		__wasi_callback_signal("__wasm_signal");
 	}
 	int r = 0;
-	/* firebox#XCJ — reject out-of-range signos AND an attempt to change the
-	 * disposition of the uncatchable SIGKILL/SIGSTOP (sa != NULL). This mirrors
-	 * the user-facing check in __sigaction_inner; keeping it here too means a
-	 * direct __libc_sigaction caller (bypassing __sigaction_inner) is also
-	 * EINVAL-guarded. POSIX: SIGKILL/SIGSTOP dispositions cannot be set. */
-	if (sig-32U < 3 || sig-1U >= _NSIG-1 ||
-	    (sa && (sig == SIGKILL || sig == SIGSTOP))) {
-		r = EINVAL;
-	} else {
-		LOCK(__eintr_handler_lock);
-		ksa_old = __eintr_handler_callbacks[sig];
-		if (sa) {
-			__eintr_handler_callbacks[sig] = ksa;
-			/* firebox#GF1 — publish the new sa_flags for the host's
-			 * SA_NOCLDWAIT reap decision (see __fbx_sa_flags decl). Record the
-			 * user-supplied sa->sa_flags, not ksa.flags (which OR-adds
-			 * SA_RESTORER); SA_NOCLDWAIT lives in the low bits either way, but
-			 * the raw value is what a SA_* query means. */
-			__fbx_sa_flags[sig] = (uint32_t)sa->sa_flags;
-		}
-		UNLOCK(__eintr_handler_lock);
-		r = 0;
-	}
+	LOCK(__eintr_handler_lock);
+	ksa_old = __eintr_handler_callbacks[sig];
+	if (sa)
+		__fbx_replace_action_locked(sig, &ksa, sa->sa_flags);
+	UNLOCK(__eintr_handler_lock);
 #endif
 	if (old && !r) {
 		old->sa_handler = ksa_old.handler;
