@@ -592,8 +592,86 @@ static void core_handler(int sig) {
     abort();
 }
 
-_Noreturn
+/* firebox#AQH — SIGNAL_UNKILLABLE for the SIG_DFL "terminate" default action.
+ *
+ * WHEN THIS FUNCTION RUNS AT ALL. Only when the host could not PROVE our
+ * disposition. The host applies the default action itself whenever it can read
+ * the `__fbx_handler_set` mirror (wasmer `env.rs::first_no_handler_default_
+ * terminate`); an unprovable disposition returns `None` there and is
+ * deliberately LEFT ALONE, because reading "unknown" as "no handler" would
+ * convert an absence into a kill. The signal then falls through to the
+ * cooperative `__wasm_signal` dispatch, which lands here — and at this point
+ * the guest is the only party that still knows the disposition is SIG_DFL.
+ *
+ * THE DEFECT, MEASURED 2026-08-05. Arm A3 vs A4 of #AQH's in-process harness:
+ * the same guest (no handler, blocks forever), the same sysroot, the same link,
+ * with the seven disposition exports stripped from an otherwise BYTE-IDENTICAL
+ * module — so exactly one axis varies. Signal delivered through the shipped
+ * `StopHandle` channel; the known-positive (identical guest WITH a handler)
+ * exits 77 on both postures, so delivery is proven on the noexport posture too
+ * and A3's outcome is a real measurement rather than a dead channel.
+ *
+ *   A4  exports present  ->  ForceKilled / 137   pid 1 SURVIVED the SIGTERM
+ *   A3  exports absent   ->  ExitedOnSignal / 127 + a stderr line   pid 1 DIED
+ *
+ * Reproduced through the real CLI, `firebox run <prog>` on the same 2x2:
+ * noexport pid-1 gave rc=127 and `Program recieved termination signal:
+ * Terminated`, where the export arm survived to its own `_exit(66)`.
+ *
+ * pid 1 is `SIGNAL_UNKILLABLE`: the kernel drops a SIG_DFL fatal-default signal
+ * aimed at the namespace child-reaper before delivery ("Attempted to kill
+ * init!"), and only an out-of-namespace FORCED kill breaks through. The host
+ * encodes exactly that rule (`WasiProcess::reaper_suppresses_default_signal`)
+ * and A4 shows it working. Losing the rule because a SYMBOL was unreadable is
+ * invariant 4's silent divergence, between two artifacts of the same program.
+ *
+ * WHY `getpid() == 1` IS THE RULE HERE AND NOT A LOOKALIKE. #AQH's own C5
+ * correction objected that the guest cannot see namespace child-reaper
+ * identity or force/ancestor origin, so a guest-side pid test would implement
+ * a lookalike. Checked, and it holds on this substrate:
+ *   - IDENTITY: the host stamps `SIGNAL_UNKILLABLE` at `pid == 1` and only
+ *     there (`control_plane.rs::new_process`, never inherited by a fork child)
+ *     — the same test, on the same numbering the guest reads back. Under
+ *     `firebox run --init` the injected tini is pid 1 and the user program is
+ *     pid 2, and `getpid()` reports 2, so the role still tracks. The one
+ *     divergence would be a nested `unshare(CLONE_NEWPID)` init, and no
+ *     nested-ns syscall exists yet (process.rs, the 3T8 (c) test says so).
+ *   - FORCE: an ancestor `firebox stop`/`kill` does not come through here at
+ *     all — `force_terminate_from_ancestor` flips the finished-status atomic
+ *     directly. MEASURED: with this fix in place A3 reaps as ForceKilled/137,
+ *     so ignoring here does NOT make pid 1 unstoppable.
+ *   - DISPOSITION: this function is reached only for SIG_DFL by construction,
+ *     which is the very fact the host was missing.
+ *
+ * WHAT IS DELIBERATELY NOT CHANGED — the pid >= 2 arm, byte for byte.
+ * MEASURED 2026-07-30 on this task (`reports/witness-aqh/`, 20/20): at pid >= 2
+ * a fork child raising with SIG_DFL is observed by its parent as
+ * `WIFSIGNALED=1, WTERMSIG == the signal raised` — FAITHFUL, in both export
+ * postures. Which layer supplies that status is UNATTRIBUTED (this task's C1),
+ * and `abort()` is documented to race its own `_Exit`, so any edit below this
+ * line — including deleting the `fprintf`, which would make the `abort()`
+ * happen sooner — perturbs an unattributed race that currently lands right.
+ * Replacing it with a "faithful" `_Exit(128 + sig)` would be a REGRESSION: the
+ * number would match but the process would become `WIFEXITED`, where the
+ * measurement says a parent sees `WIFSIGNALED`. The pid-1 return happens
+ * FIRST, so pid 1 never reaches the `fprintf` either — the spurious line is
+ * gone at the persona measured here, and survives at pid >= 2 as a separate,
+ * separately-tracked inv-0 defect.
+ *
+ * WHY NOT `__wasi_proc_raise(sig)` — the "hand the signal back to the host"
+ * shape an earlier #AQH design proposed, guarded by a one-shot latch. It is
+ * provably useless, not merely risky: this function is reached ONLY on the
+ * declining-probe posture, so a raise re-enters the same drain, declines
+ * again, and dispatches straight back here. The latch would fire on the first
+ * re-entry every single time and fall through to whatever follows it — so the
+ * design buys nothing over doing that thing directly. On the posture where the
+ * host CAN claim the signal, this function is never reached at all.
+ */
 static void terminate_handler(int sig) {
+    /* Re-read the pid rather than caching it: `fork()` changes it, and a
+     * cached 1 in a child would make an ordinary process unkillable. */
+    if (getpid() == 1)
+        return;
     fprintf(stderr, "Program recieved termination signal: %s\n", strsignal(sig));
     abort();
 }
