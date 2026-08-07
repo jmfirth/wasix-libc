@@ -856,6 +856,41 @@ static inline void __wasm_pend_signal(int sig) {
 	__wake(&self->sigsuspend_tick, 1, 1);
 }
 
+/* firebox#6D9 — pend a signal that is being ACCEPTED by THIS thread's sigwait
+ * (it is a member of self->sigwait_set) into the PER-THREAD claim surface
+ * ONLY — deliberately NOT into the process-wide __wasm_pending_sigs[].
+ *
+ * WHY (the sigwait/6-2 double-observe): a thread-directed pthread_kill to a
+ * sigwaiting thread is dispatched to that thread's own __wasm_signal, which
+ * pends the signal. The plain __wasm_pend_signal ALSO ORs the bit into the
+ * process-wide __wasm_pending_sigs[]. That process-wide bit is claimable by
+ * the PROCESS-DIRECTED arm of __sigtw_claim (sigtimedwait.c) running on ANY
+ * OTHER sigwaiter — so between the target's pend and its own claim-clear, a
+ * non-target thread can steal the signal (n_awaken==2 / last_awaken!=target,
+ * flipping sigwait/6-2's two asserts). Linux never leaks a thread-directed
+ * signal into the process shared-pending queue where a sibling's sigwait can
+ * dequeue it (task->pending vs task->signal->shared_pending): this restores
+ * that separation. Only the target's per-thread arm can claim it, so exactly
+ * one thread — the addressed one — wakes.
+ *
+ * The process-wide arm of __sigtw_claim remains the single-consumer surface
+ * for genuinely PROCESS-directed signals, which are pended into
+ * __wasm_pending_sigs by the host diversion (WasiEnv::try_pend_process_directed
+ * / pend_signal_processwide) — NOT by this guest per-thread dispatch — so
+ * sigwait/6-1 (kill(getpid())) is untouched.
+ *
+ * Still bumps+wakes sigsuspend_tick (the target's park is on its own tick), so
+ * the addressed thread re-scans and claims from its per-thread bitmask. */
+static inline void __wasm_pend_signal_selfonly(int sig) {
+	struct pthread *self = __pthread_self();
+	if (!self) return;
+	int word = (sig - 1) / 32;
+	int bit = (sig - 1) % 32;
+	a_or((volatile int *)&self->pending_sigs[word], 1 << bit);
+	a_inc(&self->sigsuspend_tick);
+	__wake(&self->sigsuspend_tick, 1, 1);
+}
+
 /* firebox signal-mask machinery — apply a handler's sa_mask (plus the
  * handled signal itself unless SA_NODEFER) to the calling thread's
  * blocked_sigmask for the duration of the handler call, then restore.
@@ -1125,7 +1160,8 @@ void __wasm_signal(int sig) {
 			int word = (sig - 1) / 32;
 			int bit = 1 << ((sig - 1) % 32);
 			if (self->sigwait_set[word] & bit) {
-				__wasm_pend_signal(sig);
+				/* firebox#6D9 — per-thread ONLY (no process-wide leak). */
+				__wasm_pend_signal_selfonly(sig);
 				return;
 			}
 		}
