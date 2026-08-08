@@ -222,6 +222,72 @@ static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 #define __WASM_PENDING_WORDS ((_NSIG + 31) / 32)
 volatile int __wasm_pending_sigs[__WASM_PENDING_WORDS];
 
+/* firebox#R3M — WHICH signal's SIG_DFL default action is terminating this
+ * process. 0 == "no default-action polyfill has run", i.e. any process exit
+ * you observe is the program's OWN exit.
+ *
+ * ── THE DEFECT THIS EXISTS TO KILL ────────────────────────────────────────
+ * The SIG_DFL default-action polyfill below terminates via abort() ->
+ * _Exit(127) (musl/src/exit/abort.c). The host recognised that termination by
+ * the exit code alone (`code.raw() == 127` in wasmer's env.rs), so a USER
+ * handler that legitimately ends the process with `_exit(127)` was
+ * INDISTINGUISHABLE from the polyfill and was reported to the parent as
+ * WIFSIGNALED/WTERMSIG=SIGABRT. Linux reports WIFEXITED/WEXITSTATUS=127.
+ * MEASURED 2026-08-08, deterministic 4/4; `_exit(126)` from the same handler
+ * came back byte-correct, which is what proves the hole is the sentinel VALUE
+ * and not handler exits in general.
+ *
+ * The exit code provably cannot carry the discriminator: the polyfill's
+ * `_Exit(127)` and a user handler's `_exit(127)` are the same 8 bits. So the
+ * guest — the only party that KNOWS a default action ran — declares it.
+ *
+ * ── WHY A DATA GLOBAL AND NOT A NEW IMPORT ────────────────────────────────
+ * Same mechanism as the seven #8YM disposition symbols: `.export_name` makes
+ * wasm-ld emit an immutable global holding this object's LINEAR ADDRESS, and
+ * the host reads the 4 bytes straight from the live MemoryView. No new import,
+ * so invariant 8's ABI surface (the wasix/WASI import namespace) is untouched
+ * and a module built with this libc still instantiates on an older runtime —
+ * the fix is simply dormant there. `int` (not `long`) fixes the width at 4
+ * bytes on BOTH wasm32 and wasm64, so the host needs no pointer-width
+ * knowledge, exactly like __fbx_sa_flags.
+ *
+ * ── FIRST-WINS IS LOAD-BEARING, NOT AN OPTIMISATION ───────────────────────
+ * terminate_handler(SIGTERM) calls abort(), which raises SIGABRT, whose own
+ * SIG_DFL default action is core_handler — so a LAST-wins store would
+ * overwrite SIGTERM with SIGABRT and report the wrong WTERMSIG for every
+ * plain default-action termination. The `a_cas(.., 0, sig)` records the
+ * OUTERMOST default action, which is the one that killed the process; the
+ * nested SIGABRT that abort() manufactures declines. A user handler that
+ * calls abort() DIRECTLY leaves the field 0 until core_handler(SIGABRT)
+ * claims it, so that case still reports SIGABRT — which is what Linux does
+ * and what firebox#B7D designed.
+ *
+ * ⚠️ NOT RESET ANYWHERE, ON PURPOSE. Every writer is on a path that ends in
+ * _Exit; a non-zero value means "this process is dying of that signal" and it
+ * has no later reader to mislead. A reset would open a window where the
+ * polyfill has run and the field reads 0 — the exact false success this
+ * removes. */
+volatile int __fbx_terminating_sig;
+
+/* Record the OUTERMOST default action. See __fbx_terminating_sig above for why
+ * this is a CAS against 0 and not a store.
+ *
+ * ⚠️ NOT static, and abort() is the reason — MEASURED 2026-08-08. The obvious
+ * design puts every writer in this file (core_handler/terminate_handler) and
+ * assumes abort() is covered because it raises SIGABRT, whose default action IS
+ * core_handler. IT IS NOT COVERED. A user handler calling abort() is already
+ * inside __wasm_signal dispatch, and the host REFUSES a nested dispatch
+ * (firebox#912), so the raise never delivers and abort() falls straight through
+ * to _Exit(127) with core_handler never entered. Measured as an arm-3
+ * REGRESSION on #R3M's own litmus: a handler that aborts reported WIFEXITED=127
+ * where Linux (and firebox#B7D) say WIFSIGNALED/SIGABRT. abort() therefore
+ * declares for itself; see libc-top-half/musl/src/exit/abort.c. */
+__attribute__((__visibility__("hidden")))
+void __fbx_note_terminating(int sig)
+{
+	a_cas((volatile int *)&__fbx_terminating_sig, 0, sig);
+}
+
 /* firebox#8YM — the disposition surface is authored BY THE LIBC, not by each
  * consumer's link line.
  *
@@ -271,6 +337,21 @@ __asm__(".export_name __wasm_pending_sigs, __wasm_pending_sigs");
 __asm__(".export_name __fbx_pending_off, __fbx_pending_off");
 __asm__(".export_name __fbx_sigsuspend_off, __fbx_sigsuspend_off");
 __asm__(".export_name __fbx_sa_flags, __fbx_sa_flags");
+
+/* firebox#R3M — the eighth exported symbol, and DELIBERATELY NOT a member of
+ * FBX_DISPOSITION_SYMBOLS. That set is the LINK-FLAG list graded fleet-wide by
+ * `scripts/check-disposition-exports.sh`; adding a symbol to it declares every
+ * one of the 88 already-built artifacts newly defective and owes 88 ledger
+ * rows for a flag that is a NO-OP on this libc anyway (the `.export_name`
+ * directive is what exports these, measured on #R3M's own witness: flagged and
+ * unflagged links are byte-identical). It has its own paired list —
+ * FBX_TERMINATION_SYMBOLS in scripts/lib/fbx-disposition-exports.sh, pinned to
+ * the host's FBX_TERMINATION_ADDR_GLOBALS by
+ * scripts/check-disposition-host-parity.sh's second axis — so the #5KY
+ * two-lists-that-nobody-compares defect is not reintroduced. It joins the
+ * fleet census at #154 Phase 1, when the fleet is rebuilt and the rows would
+ * be `ok` rather than debt. */
+__asm__(".export_name __fbx_terminating_sig, __fbx_terminating_sig");
 
 /* SA_NODEFER in-handler recursion guards: per-signal depth counters.
  * Written only from within __wasm_signal, so no atomic needed — the
@@ -588,6 +669,11 @@ void __get_handler_set(sigset_t *set)
 
 _Noreturn
 static void core_handler(int sig) {
+    /* firebox#R3M — declare WHICH default action is killing this process,
+     * before the abort() that manufactures the 127. First-wins, so an abort()
+     * that terminate_handler already attributed to its own signal is not
+     * relabelled SIGABRT here. See __fbx_terminating_sig. */
+    __fbx_note_terminating(sig);
     fprintf(stderr, "Program recieved fatal signal: %s\n", strsignal(sig));
     abort();
 }
@@ -672,6 +758,17 @@ static void terminate_handler(int sig) {
      * cached 1 in a child would make an ordinary process unkillable. */
     if (getpid() == 1)
         return;
+    /* firebox#R3M — declare WHICH default action is killing this process.
+     * Placed AFTER the pid-1 return so an unkillable init never claims a
+     * termination it survived, and BEFORE the fprintf so it is recorded even
+     * if stderr is a wedged fd.
+     *
+     * ⚠️ The AQH note above warns that edits here perturb an unattributed
+     * race by making the abort() happen SOONER. This makes it happen very
+     * slightly LATER (one uncontended a_cas), which is the safe direction —
+     * and the pid>=2 `default` arm of #R3M's witness is a frozen control that
+     * measures exactly that outcome. */
+    __fbx_note_terminating(sig);
     fprintf(stderr, "Program recieved termination signal: %s\n", strsignal(sig));
     abort();
 }

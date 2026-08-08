@@ -10,8 +10,24 @@
 #include "lock.h"
 #include "ksigaction.h"
 
+/* firebox#R3M — declare to the host that THIS process is dying of SIGABRT's
+ * default action, so the `_Exit(127)` below is read as a signal death and not
+ * as a program that happened to exit 127. First-wins (see sigaction.c), so an
+ * outer terminate_handler(SIGTERM) that called us keeps its own attribution and
+ * is not relabelled SIGABRT.
+ *
+ * WHY HERE AND NOT ONLY IN core_handler. MEASURED 2026-08-08: when abort() is
+ * called from inside a user signal handler, the raise(SIGABRT) below never
+ * delivers — the host refuses a nested __wasm_signal dispatch (firebox#912) —
+ * so core_handler is never entered and every SIGABRT-in-a-handler termination
+ * would go unattributed. This is the one place every abort() path passes
+ * through. */
+__attribute__((__visibility__("hidden")))
+void __fbx_note_terminating(int sig);
+
 _Noreturn void abort(void)
 {
+	__fbx_note_terminating(SIGABRT);
 	raise(SIGABRT);
 
 	/* If there was a SIGABRT handler installed and it returned, or if
