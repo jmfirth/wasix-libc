@@ -170,6 +170,27 @@ const uint32_t __fbx_sigsuspend_off = offsetof(struct pthread, sigsuspend_tick);
  * built with this libc still instantiates on an older runtime (fix simply dormant). */
 volatile uint32_t __fbx_sa_flags[_NSIG];
 
+/* firebox#HBE — SEQLOCK GENERATION for the three objects above. EVEN = settled,
+ * ODD = __fbx_replace_action_locked is mid-write. The host samples this before
+ * and after reading the mirror and reports CANNOT-MEASURE (None) on ODD or on a
+ * mismatch, instead of returning a value that was never logically true.
+ *
+ * WHY a counter and not a safer store order: MEASURED, no store order is safe in
+ * BOTH roles. A false POSITIVE (bit set, no real handler) kills a PID-1 reaper
+ * that Linux keeps alive (#Q14); a false NEGATIVE (bit clear, handler exists)
+ * terminates a process that HAS a handler. The harm inverts with the process's
+ * role, so the only correct answer is to make the torn read DETECTABLE.
+ *
+ * `volatile` for the same reason as __fbx_sa_flags: the only reader is the host
+ * and it is invisible to the compiler, so without it LTO may drop the bumps.
+ * `uint32_t` fixes the width at 4 bytes on BOTH wasm32 and wasm64 so the host
+ * reads it without pointer-width knowledge.
+ *
+ * Backward-compatible in both directions: a host predating this ignores the
+ * extra export (fix dormant, no regression), and the guest imports nothing new,
+ * so a module built with this libc still instantiates on an older runtime. */
+volatile uint32_t __fbx_disposition_gen;
+
 #ifdef __wasilibc_unmodified_upstream
 #else
 static volatile int __eintr_callback_registered = 0;
@@ -197,15 +218,46 @@ static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 	unsigned long *word = __fbx_handler_set+(sig-1)/(8*sizeof(long));
 	unsigned long bit = 1UL<<(sig-1)%(8*sizeof(long));
 
-	/* The host reads these separate objects without this lock, so it can still
-	 * observe the stores between states. Keep them adjacent; closing that
-	 * residual window is deliberately left to the separate seqlock task. */
+	/* firebox#HBE — SEQLOCK WRITE SIDE. The host reads these three separate
+	 * objects WITHOUT __eintr_handler_lock (it cannot take a guest lock), so
+	 * keeping the stores adjacent was never enough: a host read can still land
+	 * between them and observe a state that never logically existed.
+	 *
+	 * ODD generation = "a write is in progress, do not believe what you read".
+	 * The host samples this before and after its read and treats ODD-or-changed
+	 * as CANNOT-MEASURE (None), which is the value its consumers already handle
+	 * — see env.rs guest_handler_installed and its "Only terminate when we can
+	 * PROVE no handler is installed" caller.
+	 *
+	 * ⚠️ BOTH barriers are load-bearing and neither is redundant. Without the
+	 * first, a store may HOIST above the odd-bump and be visible while the
+	 * counter still reads even; without the second, a store may SINK below the
+	 * even-bump and be missing after the counter says settled. Either way the
+	 * protocol still compiles, still looks right, and detects nothing — a
+	 * decorative seqlock is worse than none, because it reads as protection.
+	 *
+	 * ⚠️ Why this helper and only this helper: firebox#YXE/#SCZ (79191a6) made
+	 * it the SOLE writer of all three objects, and its contract above says so.
+	 * That consolidation is what makes this a bracket instead of an audit — if
+	 * a second writer is ever added, it MUST bracket too or the counter lies.
+	 *
+	 * MEASURED (firebox#NTV, 2026-08-11): the window is not theoretical. The
+	 * commit that created this sole-writer site moved libc-test
+	 * regression/raise-race from 0-of-9 FAIL to 4-of-4 FAIL on wasm32 while
+	 * changing no logic that test executes — i.e. it widened exactly this
+	 * window. Fisher exact one-sided p = 0.0014. */
+	__fbx_disposition_gen++;
+	a_barrier();
+
 	__eintr_handler_callbacks[sig] = *ksa;
 	if (ksa->handler != SIG_DFL && ksa->handler != SIG_IGN)
 		a_or_l(word, bit);
 	else
 		a_and_l(word, ~bit);
 	__fbx_sa_flags[sig] = (uint32_t)user_flags;
+
+	a_barrier();
+	__fbx_disposition_gen++;
 }
 
 /* firebox#35F — the process-wide `__wasm_signals_blocked` flag that used to
@@ -352,6 +404,27 @@ __asm__(".export_name __fbx_sa_flags, __fbx_sa_flags");
  * fleet census at #154 Phase 1, when the fleet is rebuilt and the rows would
  * be `ok` rather than debt. */
 __asm__(".export_name __fbx_terminating_sig, __fbx_terminating_sig");
+
+/* firebox#HBE — the NINTH exported symbol, and like #R3M's eighth it is
+ * DELIBERATELY NOT a member of FBX_DISPOSITION_SYMBOLS, for the identical
+ * reason: that set is the LINK-FLAG list graded fleet-wide by
+ * `scripts/check-disposition-exports.sh`, so adding a member declares every
+ * already-built artifact newly defective and owes a ledger row each — for a
+ * flag that is a NO-OP on this libc, since `.export_name` is what actually
+ * exports these.
+ *
+ * It has its own paired list, `FBX_SEQLOCK_SYMBOLS` in
+ * scripts/lib/fbx-disposition-exports.sh, pinned to the host's
+ * FBX_SEQLOCK_ADDR_GLOBALS by axis 4 of
+ * scripts/check-disposition-host-parity.sh — so the #5KY
+ * two-lists-that-nobody-compares defect is not reintroduced.
+ *
+ * ⛔ THAT AXIS IS REQUIRED, NOT OPTIONAL, and this symbol is the one where
+ * skipping it is worst. If the host resolves __fbx_handler_set but silently
+ * fails to resolve THIS, the seqlock either never fires (silently unprotected)
+ * or always fires (every read None, so the host never terminates on a real
+ * SIG_DFL). Both failure modes are silent, and they are OPPOSITE. */
+__asm__(".export_name __fbx_disposition_gen, __fbx_disposition_gen");
 
 /* SA_NODEFER in-handler recursion guards: per-signal depth counters.
  * Written only from within __wasm_signal, so no atomic needed — the
