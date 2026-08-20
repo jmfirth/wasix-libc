@@ -1,6 +1,7 @@
 #include <wasi/api.h>
 #include <sys/epoll.h>
 #include <signal.h>
+#include <pthread.h>   /* firebox#B28 — pthread_sigmask, for epoll_pwait */
 #include <errno.h>
 
 int epoll_create(int size)
@@ -54,7 +55,29 @@ int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
 
 int epoll_pwait(int fd, struct epoll_event *ev, int cnt, int to, const sigset_t *sigs)
 {
-    (void)sigs;
+    /* firebox#B28 — APPLY THE CALLER'S SIGMASK AROUND THE WAIT.
+     *
+     * Second carrier of pselect's fail-open. `(void)sigs;` accepted the
+     * argument and discarded it, so `epoll_pwait`'s entire reason to exist over
+     * `epoll_wait` — atomically unblocking a signal for the duration of the
+     * wait, so the canonical "block SIGCHLD, test a flag, then wait" pattern
+     * has no race window — silently did nothing. There is no error and no
+     * symptom at the call site: the broken state is indistinguishable from the
+     * working one, which is why an explicit `(void)` cast survived here.
+     * Invariant 3 admits no deferral for a fail-open; invariant 1 says fix the
+     * class, and this is the same class as pselect.c.
+     *
+     * Same save/set/wait/restore shape as pselect.c — see that file for the
+     * measurement and the pthread_sigmask drain semantics that make a signal
+     * pending outside the wait get dispatched as soon as the mask is
+     * installed. */
+    sigset_t saved_mask;
+    int mask_applied = 0;
+    if (sigs != NULL) {
+        if (pthread_sigmask(SIG_SETMASK, sigs, &saved_mask) == 0) {
+            mask_applied = 1;
+        }
+    }
     __wasi_size_t ret_val;
     struct __wasi_epoll_event_t ev2[64];
     __wasi_timestamp_t timeout;
@@ -68,6 +91,13 @@ int epoll_pwait(int fd, struct epoll_event *ev, int cnt, int to, const sigset_t 
         cnt = 64;
     }
     int error = __wasi_epoll_wait(fd, &ev2[0], cnt, timeout, &ret_val);
+    /* firebox#B28 — restore before touching errno below: pthread_sigmask's
+     * SIG_SETMASK drain can dispatch a handler, and a handler may clobber
+     * errno. Placed here so EVERY return path below is covered by one
+     * restore. */
+    if (mask_applied) {
+        pthread_sigmask(SIG_SETMASK, &saved_mask, NULL);
+    }
     if (error == 0)
     {
         cnt = ret_val;
