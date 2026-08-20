@@ -63,25 +63,41 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     };
   }
 
+  // firebox#B28 — WAIT INDEFINITELY when nothing else was subscribed.
+  //
+  // Second carrier of the same class as pselect.c: `poll(NULL, 0, -1)` (and any
+  // poll whose every pollfd has a negative fd, with an infinite timeout)
+  // produces zero subscriptions, `__wasi_poll_oneoff` refuses an empty list
+  // with `EINVAL`, and this code relabelled it `ENOTSUP` and returned -1 at
+  // once. Linux blocks until a signal arrives. Invariant 1 — fix the class, not
+  // the symptom: pselect and poll are one defect in two files.
+  //
+  // A CLOCK subscription with timeout 0 is the ABI's own encoding of an
+  // indefinite wait (see the note in pselect.c for the measurement); the
+  // runtime interrupts it with `EINTR` when a signal handler runs. Note the
+  // asymmetry with the caller-supplied timeout above, which maps `0` to `1`
+  // precisely BECAUSE 0 means infinite — the two encodings are consistent.
+  if (nsubscriptions == 0) {
+    __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
+    *subscription = (__wasi_subscription_t){
+        .u.tag = __WASI_EVENTTYPE_CLOCK,
+        .u.u.clock.id = __WASI_CLOCKID_MONOTONIC,
+        .u.u.clock.timeout = 0,  // 0 == wait indefinitely (firebox#B28)
+    };
+  }
+
   // Execute poll().
   __wasi_size_t nevents;
   __wasi_event_t events[nsubscriptions];
   __wasi_errno_t error =
       __wasi_poll_oneoff(subscriptions, events, nsubscriptions, &nevents);
   if (error != 0) {
-    // WASI's poll requires at least one subscription, or else it returns
-    // `EINVAL`. Since a `poll` with nothing to wait for is valid in POSIX,
-    // return `ENOTSUP` to indicate that we don't support that case.
-    //
-    // Wasm has no signal handling, so if none of the user-provided `pollfd`
-    // elements, nor the timeout, led us to producing even one subscription
-    // to wait for, there would be no way for the poll to wake up. WASI
-    // returns `EINVAL` in this case, but for users of `poll`, `ENOTSUP` is
-    // more likely to be understood.
-    if (nsubscriptions == 0)
-      errno = ENOTSUP;
-    else
-      errno = error;
+    // `nsubscriptions` is now never 0, so the host's empty-list `EINVAL` is
+    // unreachable from here and there is nothing left to relabel. Report what
+    // the runtime reported — in particular `EINTR`, which is how an indefinite
+    // wait ends when a signal handler runs (signal(7): poll is never
+    // restarted).
+    errno = error;
     return -1;
   }
 
