@@ -343,9 +343,14 @@ static void *io_thread_func(void *ctx)
 		at.seq_waiting = 1;
 		for (;;) {
 			if (at.cancelled) break;
-			/* A cancelled write will never write, so it must not order
-			 * anyone behind it. */
-			for (p=at.next; p && (p->op!=LIO_WRITE || p->cancelled); p=p->next);
+			/* NOTE (firebox#VBY): deliberately NOT skipping entries with
+			 * `cancelled` set. It looked necessary and is not: a marked
+			 * worker breaks out, and its cleanup() unlinks it and broadcasts
+			 * this same cv, so anyone waiting behind it re-scans and
+			 * proceeds. The only cost is one extra wake/rescan round-trip,
+			 * and the alternative is a real semantic change to write
+			 * ordering for no liveness gain. */
+			for (p=at.next; p && p->op!=LIO_WRITE; p=p->next);
 			if (!p) break;
 			pthread_cond_wait(&q->cond, &q->lock);
 		}
@@ -486,6 +491,7 @@ int aio_cancel(int fd, struct aiocb *cb)
 {
 	sigset_t allmask, origmask;
 	int ret = AIO_ALLDONE;
+	int bcast = 0;
 	struct aio_thread *p;
 	struct aio_queue *q;
 
@@ -522,33 +528,31 @@ int aio_cancel(int fd, struct aiocb *cb)
 				 * q->lock, which we are holding and will keep holding inside
 				 * __wait. The cleanup that would release us can never run.
 				 *
-				 * Since no I/O has begun, we can simply publish the
-				 * completion ourselves and let the worker skip to cleanup.
-				 * We do the COMPLETION half only; cleanup() still does the
-				 * LIST half (unlink, broadcast, __aio_unref_queue) exactly
-				 * once. Splitting it that way is deliberate:
-				 * __aio_unref_queue RELEASES q->lock on every path and may
-				 * free the queue, so a canceller that called it would drop
-				 * the lock in the middle of its own walk.
+				 * So we neither cancel it nor wait for it. We only MARK it;
+				 * the broadcast after the loop releases it, and it completes
+				 * itself through the ordinary cleanup() path with the
+				 * ECANCELED/-1 that at.err/at.ret already hold.
 				 *
-				 * Every store below is idempotent against the cleanup() that
-				 * follows, which is what makes the split safe:
-				 *   cb->__ret  re-assigned to the same -1
-				 *   running    already 0, so cleanup's a_swap is not <0 and
-				 *              it issues no wake
-				 *   cb->__err  already ECANCELED, so cleanup's a_swap yields
-				 *              a redundant (harmless) futex wake
-				 *   __aio_fut  already 0, so cleanup's a_swap yields no wake
+				 * ⛔ WE MUST NOT PUBLISH THE COMPLETION OURSELVES, AND THIS
+				 * IS THE WHOLE REASON THIS BRANCH IS THREE LINES INSTEAD OF
+				 * TEN. cleanup() is ordered so that everything it reads or
+				 * writes through `cb` happens BEFORE it publishes
+				 * cb->__err — because POSIX lets the application free or
+				 * reuse the aiocb the moment aio_error() stops returning
+				 * EINPROGRESS. A canceller that published cb->__err here
+				 * would leave the worker to afterwards read cb->aio_sigevent
+				 * (an indirect call through a pointer out of possibly-freed
+				 * memory) and write cb->__ret and cb->__err again — landing
+				 * on a RESUBMITTED request and reporting it complete. The
+				 * worker is the only party that knows cb is still live.
 				 *
-				 * AS-safety is preserved: this path takes no lock, allocates
-				 * nothing, and only does atomics plus futex wakes. */
+				 * Consequence, and it matches the existing path rather than
+				 * weakening it: aio_cancel may return before cb->__err is
+				 * published. The pthread_cancel branch below already has
+				 * that window, because __wait is released by cleanup()'s
+				 * `running` store, which precedes its `__err` store. */
 				p->cancelled = 1;
-				p->cb->__ret = p->ret;
-				a_store(&p->running, 0);
-				if (a_swap(&p->cb->__err, p->err) != EINPROGRESS)
-					__wake(&p->cb->__err, -1, 1);
-				if (a_swap(&__aio_fut, 0))
-					__wake(&__aio_fut, -1, 1);
+				bcast = 1;
 				ret = AIO_CANCELED;
 			} else {
 				/* Parked in the I/O itself (or runnable). It holds no lock we
@@ -561,10 +565,25 @@ int aio_cancel(int fd, struct aiocb *cb)
 		}
 	}
 
-	/* firebox#VBY — release the workers we completed in place. They cannot
-	 * observe this until we drop q->lock below, which is exactly the ordering
-	 * that makes it safe to have written to their stack-resident `at`. */
-	pthread_cond_broadcast(&q->cond);
+	/* firebox#VBY — release the workers we marked. They cannot observe this
+	 * until we drop q->lock below, which is the ordering that makes it safe
+	 * to have written to their stack-resident `at`.
+	 *
+	 * ⚠️ THIS BROADCAST DOES TAKE A LOCK AND CAN BLOCK — do not describe it
+	 * as lock-free. __private_cond_signal takes c->_c_lock and waits out any
+	 * LEAVING-state waiter. It is nonetheless AS-safe here for two specific
+	 * reasons: every holder of c->_c_lock runs with all signals blocked (the
+	 * workers permanently, and we via the sigfillset above), so a handler
+	 * cannot interrupt a holder on this thread; and cleanup() already
+	 * broadcasts this same cv under the identical discipline, so this is not
+	 * a new class. The non-obvious part is that it cannot deadlock against
+	 * the q->lock we are holding: a LEAVING waiter decrements node.notify
+	 * BEFORE the `relock` label, so the wait inside __private_cond_signal
+	 * never needs q->lock.
+	 *
+	 * Guarded because __aio_close cancels on every close() of an fd with a
+	 * live queue, and an unconditional broadcast makes that a wake storm. */
+	if (bcast) pthread_cond_broadcast(&q->cond);
 
 	pthread_mutex_unlock(&q->lock);
 done:
