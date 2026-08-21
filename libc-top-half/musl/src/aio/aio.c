@@ -255,11 +255,27 @@ static void cleanup(void *ctx)
 	 * Types 1-3 are notified via atomics/futexes, mainly for AS-safety
 	 * considerations. Type 4 is notified later via a cond var. */
 
+	/* firebox#VBY v4 — PUBLISH THE COMPLETION BEFORE RELEASING THE CANCELLER.
+	 * Upstream does these two in the opposite order, which means
+	 * aio_cancel's __wait(&p->running,...) is released ONE LINE BEFORE
+	 * cb->__err becomes visible — so even the ordinary pthread_cancel path
+	 * can return AIO_CANCELED over a request still reading EINPROGRESS. That
+	 * is not cosmetic: Open POSIX's shared cleanup_aio() issues a BLOCKING
+	 * read() for every request still reading EINPROGRESS, so the application
+	 * blocks forever on data that will never be written.
+	 *
+	 * Safe with respect to the aiocb handoff contract, and the analysis is
+	 * the whole reason this is only a reorder: everything this function
+	 * reads or writes through `cb` happens at or above this point (`sev` is
+	 * copied at the top, cb->__ret just above), so once __err is published
+	 * the application may free or reuse the aiocb and we never touch it
+	 * again. Publishing EARLIER also NARROWS the pre-existing window in
+	 * which the app could free cb before our own __err store. */
 	cb->__ret = at->ret;
-	if (a_swap(&at->running, 0) < 0)
-		__wake(&at->running, -1, 1);
 	if (a_swap(&cb->__err, at->err) != EINPROGRESS)
 		__wake(&cb->__err, -1, 1);
+	if (a_swap(&at->running, 0) < 0)
+		__wake(&at->running, -1, 1);
 
 	/* firebox#VBY — release aio_cancel's settle-wait, and do it HERE:
 	 * strictly after the cb->__err publish above, so a canceller that observes
@@ -572,10 +588,33 @@ int aio_cancel(int fd, struct aiocb *cb)
 				 * published. The pthread_cancel branch below already has
 				 * that window, because __wait is released by cleanup()'s
 				 * `running` store, which precedes its `__err` store. */
-				p->cancelled = 1;
-				a_inc(&q->cancel_pending);
+				/* ⛔ firebox#VBY v4 — THE INCREMENT IS GUARDED AND THE
+				 * WAIT IS NOT. Do not "simplify" this by moving
+				 * `drain = 1` inside the if.
+				 *
+				 * a_cas RETURNS THE OLD VALUE, not a success flag
+				 * (`internal/atomic.h:20-27`), so the branch above is
+				 * taken for old==1 (we won the transition) AND for
+				 * old==-1 (another canceller already took it). Upstream
+				 * can do that safely because the body it guards —
+				 * pthread_cancel + __wait — is IDEMPOTENT. A counter
+				 * increment is not: two cancellers would push twice and
+				 * cleanup() pops once, so cancel_pending would never
+				 * reach 0 and BOTH would wait forever, with all signals
+				 * blocked, one of them inside close(). __aio_close
+				 * supplies that second canceller for free.
+				 *
+				 * p->cancelled is only written here, under q->lock, so
+				 * it is the exact "did I win" flag a_cas did not give
+				 * us. The wait stays unconditional because a second
+				 * canceller must still not return AIO_CANCELED over an
+				 * unsettled request. */
+				if (!p->cancelled) {
+					p->cancelled = 1;
+					a_inc(&q->cancel_pending);
+					bcast = 1;
+				}
 				drain = 1;
-				bcast = 1;
 				ret = AIO_CANCELED;
 			} else {
 				/* Parked in the I/O itself (or runnable). It holds no lock we
@@ -633,13 +672,32 @@ int aio_cancel(int fd, struct aiocb *cb)
 	 * marked path widens it to a full wake-and-unwind, which is what makes it
 	 * observable, so this closes it for the path we introduced.
 	 *
-	 * The counter is per-QUEUE, so we may also wait out a concurrent canceller's
-	 * marks. That over-waits by a bounded amount and cannot hang: every marked
-	 * worker is already runnable. */
+	 * ⚠️ THE COUNTER IS A LEVEL, NOT A GENERATION, AND THIS WAIT IS THEREFORE
+	 * NOT BOUNDED. An earlier version of this comment claimed the over-wait was
+	 * "bounded" and "cannot hang"; that is FALSE and is corrected rather than
+	 * deleted, because the next reader would otherwise re-derive it. We wait for
+	 * the level to reach 0, and a concurrent canceller on the same fd can raise
+	 * it again for a request we know nothing about, so a steady stream of
+	 * submit+cancel on one fd can extend this wait indefinitely.
+	 *
+	 * Accepted deliberately, for a reason that is about the FUNCTION and not
+	 * about this patch: aio_cancel is ALREADY an unbounded-wait call upstream —
+	 * the pthread_cancel branch above __waits for an in-flight worker with no
+	 * timeout, and that worker may be inside an arbitrarily slow read(). So this
+	 * does not change aio_cancel's liveness class. Each individual marked worker
+	 * is runnable and settles; it is only the AGGREGATE that can be kept
+	 * nonzero. If this ever bites, the fix is a per-canceller epoch (wait on a
+	 * count of the nodes THIS call marked), not a timeout. */
 	if (drain) {
 		int v;
 		while ((v = q->cancel_pending))
 			__wait(&q->cancel_pending, 0, v, 1);
+		/* firebox#VBY v4 — the loop's load of cancel_pending is a PLAIN
+		 * volatile read; volatile is not an acquire and orders nothing
+		 * against a later read of cb->__err. Make the ordering real here
+		 * rather than claiming it: aio_error() has its own a_barrier(),
+		 * but a caller reading cb->__err directly has none. */
+		a_barrier();
 		pthread_mutex_lock(&q->lock);
 		__aio_unref_queue(q);	/* releases q->lock; may free q */
 	}
