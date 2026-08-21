@@ -134,6 +134,14 @@ struct aio_thread {
 
 struct aio_queue {
 	int fd, seekable, append, ref, init;
+	/* firebox#VBY — count of workers this queue has had MARKED cancelled by
+	 * aio_cancel and that have not yet published their completion. It lives on
+	 * the QUEUE, not on the request, for one reason: a canceller must wait for
+	 * the settle WITHOUT holding q->lock (holding it is the deadlock), and the
+	 * request's `at` is a stack local of io_thread_func that dies the moment
+	 * the worker unwinds. The queue is refcounted, so a canceller can hold it
+	 * alive across an unlocked wait; a request cannot be held alive at all. */
+	volatile int cancel_pending;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct aio_thread *head;
@@ -252,6 +260,17 @@ static void cleanup(void *ctx)
 		__wake(&at->running, -1, 1);
 	if (a_swap(&cb->__err, at->err) != EINPROGRESS)
 		__wake(&cb->__err, -1, 1);
+
+	/* firebox#VBY — release aio_cancel's settle-wait, and do it HERE:
+	 * strictly after the cb->__err publish above, so a canceller that observes
+	 * the drain is guaranteed to have our ECANCELED visible to aio_error().
+	 * That ordering is the entire point of the counter — without it the
+	 * canceller returns AIO_CANCELED over a request still reading
+	 * EINPROGRESS, which Open POSIX aio_cancel/2-1 and /6-1 detect. */
+	if (at->cancelled) {
+		a_dec(&q->cancel_pending);
+		__wake(&q->cancel_pending, -1, 1);
+	}
 	if (a_swap(&__aio_fut, 0))
 		__wake(&__aio_fut, -1, 1);
 
@@ -359,9 +378,10 @@ static void *io_thread_func(void *ctx)
 
 	pthread_mutex_unlock(&q->lock);
 
-	/* firebox#VBY — aio_cancel already published our completion; our I/O was
-	 * never started, so skip it and let cleanup() do the list half exactly
-	 * once. at.ret/at.err still hold -1/ECANCELED. */
+	/* firebox#VBY — aio_cancel MARKED us (it does not publish anything; see
+	 * the cancel path). Our I/O was never started, so skip straight to
+	 * cleanup(), which publishes the -1/ECANCELED that at.ret/at.err already
+	 * hold and then drains q->cancel_pending to release the canceller. */
 	if (at.cancelled)
 		goto done;
 
@@ -492,6 +512,7 @@ int aio_cancel(int fd, struct aiocb *cb)
 	sigset_t allmask, origmask;
 	int ret = AIO_ALLDONE;
 	int bcast = 0;
+	int drain = 0;
 	struct aio_thread *p;
 	struct aio_queue *q;
 
@@ -552,6 +573,8 @@ int aio_cancel(int fd, struct aiocb *cb)
 				 * that window, because __wait is released by cleanup()'s
 				 * `running` store, which precedes its `__err` store. */
 				p->cancelled = 1;
+				a_inc(&q->cancel_pending);
+				drain = 1;
 				bcast = 1;
 				ret = AIO_CANCELED;
 			} else {
@@ -585,7 +608,41 @@ int aio_cancel(int fd, struct aiocb *cb)
 	 * live queue, and an unconditional broadcast makes that a wake storm. */
 	if (bcast) pthread_cond_broadcast(&q->cond);
 
+	/* firebox#VBY — hold the queue alive across the unlocked wait below.
+	 * __aio_get_queue took NO reference; q->lock is the only thing keeping q
+	 * from being freed under us, and we are about to drop it. This mirrors
+	 * submit()'s q->ref++ before its own unlock. */
+	if (drain) q->ref++;
+
 	pthread_mutex_unlock(&q->lock);
+
+	/* firebox#VBY — WAIT FOR THE MARKED WORKERS TO SETTLE, WITH NO LOCK HELD.
+	 *
+	 * Why this is not the deadlock we just fixed: the wait that deadlocks is a
+	 * wait held OVER q->lock, because a marked worker needs that same lock to
+	 * leave pthread_cond_wait and unwind. Here we have already released it, so
+	 * every marked worker can run to completion without anything from us.
+	 *
+	 * Why we must wait at all: POSIX callers read aio_error() immediately after
+	 * AIO_CANCELED and expect ECANCELED. Returning early is not merely a wrong
+	 * value — Open POSIX's shared cleanup_aio() issues a BLOCKING read() on the
+	 * peer socket for every request still reading EINPROGRESS, so an unsettled
+	 * cancel makes the application block forever on data that will never be
+	 * written (aio_cancel/4-1). Upstream has a hairline version of this window
+	 * (cleanup() wakes `running` one line before it publishes cb->__err); the
+	 * marked path widens it to a full wake-and-unwind, which is what makes it
+	 * observable, so this closes it for the path we introduced.
+	 *
+	 * The counter is per-QUEUE, so we may also wait out a concurrent canceller's
+	 * marks. That over-waits by a bounded amount and cannot hang: every marked
+	 * worker is already runnable. */
+	if (drain) {
+		int v;
+		while ((v = q->cancel_pending))
+			__wait(&q->cancel_pending, 0, v, 1);
+		pthread_mutex_lock(&q->lock);
+		__aio_unref_queue(q);	/* releases q->lock; may free q */
+	}
 done:
 	pthread_sigmask(SIG_SETMASK, &origmask, 0);
 	return ret;
