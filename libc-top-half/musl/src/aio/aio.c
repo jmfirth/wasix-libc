@@ -118,6 +118,16 @@ struct aio_thread {
 	struct aio_thread *next, *prev;
 	struct aio_queue *q;
 	volatile int running;
+	/* firebox#VBY — set by aio_cancel, under q->lock, on a worker it has
+	 * completed IN PLACE because that worker was parked in the sequencing
+	 * wait below and had therefore not started its I/O. The worker observes
+	 * it on wake and skips straight to its cleanup. */
+	volatile int cancelled;
+	/* firebox#VBY — true exactly while this worker is inside the sequencing
+	 * wait. aio_cancel reads it under q->lock to decide which of the two
+	 * cancel paths a target needs. Safe to read there because a worker that
+	 * is NOT in the wait holds q->lock, so aio_cancel cannot be running. */
+	volatile int seq_waiting;
 	int err, op;
 	ssize_t ret;
 };
@@ -298,7 +308,13 @@ static void *io_thread_func(void *ctx)
 
 	at.op = op;
 	at.running = 1;
+	at.cancelled = 0;
+	at.seq_waiting = 0;
 	at.ret = -1;
+	/* NOTE (firebox#VBY): at.err is ECANCELED and at.ret is -1 from here
+	 * until the I/O completes and overwrites them. That is what makes the
+	 * cancelled path below correct WITHOUT setting anything: a worker that
+	 * skips its I/O already carries exactly the result POSIX requires. */
 	at.err = ECANCELED;
 	at.q = q;
 	at.td = __pthread_self();
@@ -318,14 +334,31 @@ static void *io_thread_func(void *ctx)
 
 	/* Wait for sequenced operations. */
 	if (op!=LIO_READ && (op!=LIO_WRITE || q->append)) {
+		/* firebox#VBY — announce that we are parked HERE rather than in a
+		 * syscall. aio_cancel cannot cancel us out of this wait: POSIX makes
+		 * a thread cancelled out of pthread_cond_wait re-acquire the mutex
+		 * before it may unwind, and the mutex it needs is q->lock, which
+		 * aio_cancel is holding while it waits for us. That is a deadlock,
+		 * and it is why this flag exists. */
+		at.seq_waiting = 1;
 		for (;;) {
-			for (p=at.next; p && p->op!=LIO_WRITE; p=p->next);
+			if (at.cancelled) break;
+			/* A cancelled write will never write, so it must not order
+			 * anyone behind it. */
+			for (p=at.next; p && (p->op!=LIO_WRITE || p->cancelled); p=p->next);
 			if (!p) break;
 			pthread_cond_wait(&q->cond, &q->lock);
 		}
+		at.seq_waiting = 0;
 	}
 
 	pthread_mutex_unlock(&q->lock);
+
+	/* firebox#VBY — aio_cancel already published our completion; our I/O was
+	 * never started, so skip it and let cleanup() do the list half exactly
+	 * once. at.ret/at.err still hold -1/ECANCELED. */
+	if (at.cancelled)
+		goto done;
 
 	switch (op) {
 	case LIO_WRITE:
@@ -343,7 +376,8 @@ static void *io_thread_func(void *ctx)
 	}
 	at.ret = ret;
 	at.err = ret<0 ? errno : 0;
-	
+
+done:
 	pthread_cleanup_pop(1);
 
 	return 0;
@@ -474,11 +508,63 @@ int aio_cancel(int fd, struct aiocb *cb)
 		if (cb && cb != p->cb) continue;
 		/* Transition target from running to running-with-waiters */
 		if (a_cas(&p->running, 1, -1)) {
-			pthread_cancel(p->td);
-			__wait(&p->running, 0, -1, 1);
-			if (p->err == ECANCELED) ret = AIO_CANCELED;
+			if (p->seq_waiting) {
+				/* firebox#VBY — THE DEADLOCK CASE, AND WHY IT NEEDS ITS
+				 * OWN PATH RATHER THAN A LONGER WAIT.
+				 *
+				 * This target is parked in the sequencing pthread_cond_wait
+				 * above, holding nothing, waiting for an older write. It has
+				 * NOT started its I/O. Cancelling it the ordinary way cannot
+				 * work: a thread cancelled out of pthread_cond_wait must
+				 * re-acquire the mutex before it may run its cleanup handlers
+				 * (POSIX; musl does this unconditionally at the `relock`
+				 * label in pthread_cond_timedwait.c), and that mutex is
+				 * q->lock, which we are holding and will keep holding inside
+				 * __wait. The cleanup that would release us can never run.
+				 *
+				 * Since no I/O has begun, we can simply publish the
+				 * completion ourselves and let the worker skip to cleanup.
+				 * We do the COMPLETION half only; cleanup() still does the
+				 * LIST half (unlink, broadcast, __aio_unref_queue) exactly
+				 * once. Splitting it that way is deliberate:
+				 * __aio_unref_queue RELEASES q->lock on every path and may
+				 * free the queue, so a canceller that called it would drop
+				 * the lock in the middle of its own walk.
+				 *
+				 * Every store below is idempotent against the cleanup() that
+				 * follows, which is what makes the split safe:
+				 *   cb->__ret  re-assigned to the same -1
+				 *   running    already 0, so cleanup's a_swap is not <0 and
+				 *              it issues no wake
+				 *   cb->__err  already ECANCELED, so cleanup's a_swap yields
+				 *              a redundant (harmless) futex wake
+				 *   __aio_fut  already 0, so cleanup's a_swap yields no wake
+				 *
+				 * AS-safety is preserved: this path takes no lock, allocates
+				 * nothing, and only does atomics plus futex wakes. */
+				p->cancelled = 1;
+				p->cb->__ret = p->ret;
+				a_store(&p->running, 0);
+				if (a_swap(&p->cb->__err, p->err) != EINPROGRESS)
+					__wake(&p->cb->__err, -1, 1);
+				if (a_swap(&__aio_fut, 0))
+					__wake(&__aio_fut, -1, 1);
+				ret = AIO_CANCELED;
+			} else {
+				/* Parked in the I/O itself (or runnable). It holds no lock we
+				 * need, and its cleanup() reaches the `running` store before
+				 * it asks for q->lock, so this handshake completes. */
+				pthread_cancel(p->td);
+				__wait(&p->running, 0, -1, 1);
+				if (p->err == ECANCELED) ret = AIO_CANCELED;
+			}
 		}
 	}
+
+	/* firebox#VBY — release the workers we completed in place. They cannot
+	 * observe this until we drop q->lock below, which is exactly the ordering
+	 * that makes it safe to have written to their stack-resident `at`. */
+	pthread_cond_broadcast(&q->cond);
 
 	pthread_mutex_unlock(&q->lock);
 done:
