@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <common/cancel.h>
 #include <common/time.h>
 #include <pthread.h>
 
@@ -157,6 +158,10 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
   // Execute poll().
   __wasi_size_t nevents;
   __wasi_event_t events[nsubscriptions];
+  // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
+  // already-pending cancel BEFORE parking in the host await.
+  __cloudlibc_testcancel();
+
   __wasi_errno_t error =
       __wasi_poll_oneoff(subscriptions, events, nsubscriptions, &nevents);
 
@@ -167,6 +172,11 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
   }
 
   if (error != 0) {
+    // firebox#TWX — a cancel that arrived while we were parked. Keyed on
+    // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED
+    // call never discards what it already consumed. Never returns if a cancel
+    // is pending and enabled.
+    __cloudlibc_testcancel_if_intr(error);
     // `nsubscriptions` is now never 0 (see the indefinite-wait block above), so
     // the host's empty-list `EINVAL` is unreachable from here and there is no
     // longer any case to relabel. Report what the runtime reported — in

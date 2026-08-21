@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <common/cancel.h>
 #include <common/net.h>
 
 #include <sys/socket.h>
@@ -24,9 +25,18 @@ int accept4(int socket, struct sockaddr *restrict addr, socklen_t *restrict addr
   }
 
   __wasi_addr_port_t peer_addr;
+  // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
+  // already-pending cancel BEFORE parking in the host await.
+  __cloudlibc_testcancel();
+
   __wasi_errno_t error = __wasi_sock_accept_v2(socket, (flags & SOCK_NONBLOCK) ? __WASI_FDFLAGS_NONBLOCK : 0, &ret, &peer_addr);
 
   if (error != 0) {
+    // firebox#TWX — a cancel that arrived while we were parked. Keyed on
+    // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED
+    // call never discards what it already consumed. Never returns if a cancel
+    // is pending and enabled.
+    __cloudlibc_testcancel_if_intr(error);
     errno = error;
     return -1;
   }

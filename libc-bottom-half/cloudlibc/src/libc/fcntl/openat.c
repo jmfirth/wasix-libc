@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <common/cancel.h>
 #include <assert.h>
 #include <wasi/api.h>
 #include <wasi/libc.h>
@@ -71,11 +72,20 @@ int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
   __wasi_rights_t fs_rights_base = max & fsb_cur.fs_rights_inheriting;
   __wasi_rights_t fs_rights_inheriting = fsb_cur.fs_rights_inheriting;
   __wasi_fd_t newfd;
+  // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
+  // already-pending cancel BEFORE parking in the host await.
+  __cloudlibc_testcancel();
+
   error = __wasi_path_open2(fd, lookup_flags, path,
                                  (oflag >> 12) & 0xfff,
                                  fs_rights_base, fs_rights_inheriting, fs_flags,
                                  fd_flags, &newfd);
   if (error != 0) {
+    // firebox#TWX — a cancel that arrived while we were parked. Keyed on
+    // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED
+    // call never discards what it already consumed. Never returns if a cancel
+    // is pending and enabled.
+    __cloudlibc_testcancel_if_intr(error);
     errno = error;
     return -1;
   }

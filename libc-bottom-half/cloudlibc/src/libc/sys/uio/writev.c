@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <common/cancel.h>
 #include <sys/uio.h>
 
 #include <assert.h>
@@ -29,10 +30,19 @@ ssize_t writev(int fildes, const struct iovec *iov, int iovcnt) {
     errno = EINVAL;
     return -1;
   }
+  // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
+  // already-pending cancel BEFORE parking in the host await.
+  __cloudlibc_testcancel();
+
   __wasi_size_t bytes_written;
   __wasi_errno_t error = __wasi_fd_write(
       fildes, (const __wasi_ciovec_t *)iov, iovcnt, &bytes_written);
   if (error != 0) {
+    // firebox#TWX — a cancel that arrived while we were parked. Keyed on
+    // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED
+    // call never discards what it already consumed. Never returns if a cancel
+    // is pending and enabled.
+    __cloudlibc_testcancel_if_intr(error);
     errno = error;
     return -1;
   }

@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <common/cancel.h>
 #include <errno.h>
 #include <sys/socket.h>
 
@@ -25,11 +26,20 @@ ssize_t recv(int socket, void *restrict buffer, size_t length, int flags) {
   // Perform system call.
   __wasi_size_t ro_datalen;
   __wasi_roflags_t ro_flags;
+  // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
+  // already-pending cancel BEFORE parking in the host await.
+  __cloudlibc_testcancel();
+
   __wasi_errno_t error = __wasi_sock_recv(socket,
                                           ri_data, ri_data_len, ri_flags,
                                           &ro_datalen,
                                           &ro_flags);
   if (error != 0) {
+    // firebox#TWX — a cancel that arrived while we were parked. Keyed on
+    // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED
+    // call never discards what it already consumed. Never returns if a cancel
+    // is pending and enabled.
+    __cloudlibc_testcancel_if_intr(error);
     errno = error;
     return -1;
   }
