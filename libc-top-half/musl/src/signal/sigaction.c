@@ -433,7 +433,35 @@ __asm__(".export_name __fbx_disposition_gen, __fbx_disposition_gen");
  * firebox#TW2: this array is itself process-wide and has the same
  * thread-locality defect firebox#35F fixed for the block mask — thread
  * A inside a handler makes thread B pend its own. Tracked separately. */
-static int __wasm_in_handler[_NSIG];
+/* firebox#TW2 — __FBX_THREAD_LOCAL, not process-wide.
+ *
+ * This array records "is THIS thread currently running the handler for sig",
+ * and all five accesses below want the calling thread's copy:
+ *   :1365 the recursion gate that decides pend-vs-dispatch
+ *   :1369 / :1638 the enter/leave pair
+ *   :1697 __wasm_deliver_pending_rt_inline's skip
+ *   :1797 __wasm_raise_self's skip
+ * At file scope, thread A inside a handler made thread B PEND its own signal
+ * instead of running it. On Linux the equivalent state is `current->blocked`,
+ * restored by sigreturn and invisible to every other task, so B's handler runs
+ * immediately. Ours failed OPEN and SILENT: B's select() returns EINTR with no
+ * handler having run, indistinguishable from a handler that ran and did
+ * nothing, and the guest gets blamed. Invariant 0.
+ *
+ * The old justification -- "the WASM runtime delivers signals serially to a
+ * single thread" -- is the error: delivery is serial PER THREAD, not per
+ * process, and every gate upstream of :1365 is already per-thread post-#35F.
+ *
+ * Same class and same fix shape as #35F (block mask) and #VYD, which moved
+ * in_handler_depth into `struct pthread`. TLS is sufficient here and strictly
+ * cheaper: no host reader exists (no .export_name, no Rust reader), so this
+ * needs no __fbx_*_off export and no check-disposition-host-parity row.
+ * Invariant 4 holds by construction -- _NSIG is 65 at both widths and TLS DATA
+ * reads identically at both (arch/wasm64/pthread_arch.h, the resolved #796
+ * finding); direct precedent is __fbx_altstack_depth in this same dispatch
+ * path. Under __FIREBOX_NO_THREADS__ the macro degenerates to plain static,
+ * where per-thread and per-process are the same statement. */
+static __FBX_THREAD_LOCAL int __wasm_in_handler[_NSIG];
 
 /* firebox signal-mask machinery — per-signal "a handler is currently
  * executing on SOME thread for this signal, and it was installed with
