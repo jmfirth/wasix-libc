@@ -97,6 +97,36 @@ static inline void to_public_stat(const __wasi_filestat_t *in,
       }
     }
   }
+
+  // firebox#WJK — HAND THE dev FIELD BACK once the mode has been taken out.
+  //
+  // The block above is the ONLY legitimate reader of the WASIX mode-in-dev
+  // channel. Everything downstream sees `st_dev` as POSIX defines it: "device
+  // ID of the device containing this file". Leaving the runtime's encoded mode
+  // there made st_dev VARY BY PERMISSION, so two files in one directory with
+  // modes 0644 and 0755 reported different devices and looked like they were on
+  // different filesystems -- and `chmod` CHANGED a file's st_dev, which cannot
+  // happen on any real system.
+  //
+  // That is not theoretical: five consumers in this very libc compare st_dev.
+  //   misc/nftw.c:51           FTW_MOUNT -- the `find -xdev` mechanism, PRUNES
+  //   misc/nftw.c:81           (dev,ino) directory-cycle detection
+  //   misc/get_current_dir_name.c:12   getcwd identity check
+  //   unistd/ttyname_r.c:30    tty identity check
+  //   ipc/ftok.c:9             IPC key derivation
+  // Each is an EQUALITY test between two stats, so a single constant makes all
+  // five correct for a single-filesystem view, where today they are correct
+  // only when the two files happen to share a mode.
+  //
+  // The constant is a WAYPOINT, not the destination: firebox composes genuinely
+  // distinct backing filesystems (virtual-fs mount_fs/overlay_fs -- host_fs,
+  // mem_fs, webc_volume_fs), so the honest end state is a per-mount device id.
+  // Until that exists, claiming "one filesystem" is strictly more truthful than
+  // claiming "one filesystem per permission bit pattern". Tracked as #WJK (C).
+  //
+  // Note this runs AFTER the extraction above and reads `in->dev`, never
+  // `out->st_dev`, so the ordering is not fragile.
+  out->st_dev = 1;
 }
 
 // firebox(#QQZ/#NGG): `noinline` is load-bearing, NOT a style choice.
