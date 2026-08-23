@@ -26,7 +26,7 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
   // conditions, such as out-of-band data on TCP sockets.  Return zero
   // entries rather than failing — callers like curl pass errorfds to
   // every select() call by convention, and ENOSYS breaks the API.
-  if (errorfds != NULL && errorfds->__nfds > 0) {
+  if (errorfds != NULL) {
     FD_ZERO(errorfds);
   }
 
@@ -38,15 +38,28 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
   if (writefds == NULL)
     writefds = &empty;
 
-  // Determine the maximum number of events.
-  size_t maxevents = readfds->__nfds + writefds->__nfds + 1;
+  // #D7S: fd_set is the POSIX BITMASK, so the sets are walked BY FD NUMBER over
+  // [0, nfds) rather than over a stored fd list. POSIX examines only descriptors
+  // below nfds; FD_SETSIZE bounds the array itself.
+  const int fdlimit = nfds < FD_SETSIZE ? nfds : FD_SETSIZE;
+
+  // Determine the maximum number of events. Counted first rather than derived
+  // from a bound: sizing the VLA at 2*FD_SETSIZE+1 would put ~98KB on the stack
+  // for every select() call regardless of how few fds were actually set.
+  size_t nset = 0;
+  for (int fd = 0; fd < fdlimit; ++fd) {
+    if (FD_ISSET(fd, readfds))
+      ++nset;
+    if (FD_ISSET(fd, writefds))
+      ++nset;
+  }
+  size_t maxevents = nset + 1;
   __wasi_subscription_t subscriptions[maxevents];
   size_t nsubscriptions = 0;
 
   // Convert the readfds set.
-  for (size_t i = 0; i < readfds->__nfds; ++i) {
-    int fd = readfds->__fds[i];
-    if (fd < nfds) {
+  for (int fd = 0; fd < fdlimit; ++fd) {
+    if (FD_ISSET(fd, readfds)) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
       *subscription = (__wasi_subscription_t){
           .userdata = (uintptr_t)(intptr_t)fd,
@@ -57,9 +70,8 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
   }
 
   // Convert the writefds set.
-  for (size_t i = 0; i < writefds->__nfds; ++i) {
-    int fd = writefds->__fds[i];
-    if (fd < nfds) {
+  for (int fd = 0; fd < fdlimit; ++fd) {
+    if (FD_ISSET(fd, writefds)) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
       *subscription = (__wasi_subscription_t){
           .userdata = (uintptr_t)(intptr_t)fd,
@@ -198,17 +210,31 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
   }
 
   // Build result sets from poll_oneoff events.
+  //
+  // #D7S: the return value is a COUNT OF READY DESCRIPTORS and must be counted,
+  // not read back out of the sets — under the old list layout it was
+  // `readfds->__nfds + writefds->__nfds`, which a caller building the set as a
+  // raw bit vector saw as garbage (a one-fd pipe set measured n=15). A descriptor
+  // ready for both reading and writing counts TWICE, which is what POSIX
+  // specifies: the return is the number of bits set across all result sets, not
+  // the number of distinct descriptors.
   FD_ZERO(readfds);
   FD_ZERO(writefds);
+  int nready = 0;
   for (size_t i = 0; i < nevents; ++i) {
     const __wasi_event_t *event = &events[i];
+    int fd = (int)(intptr_t)event->userdata;
     if (event->type == __WASI_EVENTTYPE_FD_READ) {
-      int fd = (int)(intptr_t)event->userdata;
-      readfds->__fds[readfds->__nfds++] = fd;
+      if (!FD_ISSET(fd, readfds)) {
+        FD_SET(fd, readfds);
+        ++nready;
+      }
     } else if (event->type == __WASI_EVENTTYPE_FD_WRITE) {
-      int fd = (int)(intptr_t)event->userdata;
-      writefds->__fds[writefds->__nfds++] = fd;
+      if (!FD_ISSET(fd, writefds)) {
+        FD_SET(fd, writefds);
+        ++nready;
+      }
     }
   }
-  return readfds->__nfds + writefds->__nfds;
+  return nready;
 }

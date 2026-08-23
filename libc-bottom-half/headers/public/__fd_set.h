@@ -7,17 +7,24 @@
 extern "C" {
 #endif
 
+/*
+ * Bitmask FD_* macros (#D7S) — see __typedef_fd_set.h for why the layout
+ * changed. These are upstream musl's, byte-for-byte in behaviour; sys/select.h
+ * already carries the same definitions behind `#ifdef
+ * __wasilibc_unmodified_upstream`.
+ *
+ * ⚠️ An out-of-range fd is UNDEFINED in POSIX and was silently absorbed by the
+ * old list layout (FD_SET simply appended). Here it would index past the array,
+ * so the bounds test is explicit: callers that pass fd >= FD_SETSIZE get a
+ * no-op / false rather than a stray write. That is a deliberate difference from
+ * upstream musl, which does not bounds-check — an unchecked write here would be
+ * a silent memory corruption, and this libc has no way to warn.
+ */
+
 static __inline void FD_CLR(int __fd, fd_set *__set) {
-    size_t __n = __set->__nfds;
-    for (int *__p = __set->__fds, *__e = __p + __n;
-         __p < __e; ++__p)
-    {
-        if (*__p == __fd) {
-            *__p = __e[-1];
-            __set->__nfds = __n - 1;
-            return;
-        }
-    }
+    if ((unsigned int)__fd < (unsigned int)FD_SETSIZE)
+        __set->__fds_bits[__fd / __NFDBITS] &=
+            ~((__fd_mask)1 << (__fd % __NFDBITS));
 }
 
 static __inline
@@ -28,39 +35,28 @@ _Bool
 #endif
 FD_ISSET(int __fd, const fd_set *__set)
 {
-    size_t __n = __set->__nfds;
-    for (const int *__p = __set->__fds, *__e = __p + __n;
-         __p < __e; ++__p)
-    {
-        if (*__p == __fd) {
-            return 1;
-        }
-    }
-    return 0;
+    if ((unsigned int)__fd >= (unsigned int)FD_SETSIZE)
+        return 0;
+    return (__set->__fds_bits[__fd / __NFDBITS] &
+            ((__fd_mask)1 << (__fd % __NFDBITS))) != 0;
 }
 
 static __inline void FD_SET(int __fd, fd_set *__set) {
-    size_t __n = __set->__nfds;
-    for (const int *__p = __set->__fds, *__e = __p + __n;
-         __p < __e; ++__p)
-    {
-        if (*__p == __fd) {
-            return;
-        }
-    }
-    __set->__nfds = __n + 1;
-    __set->__fds[__n] = __fd;
+    if ((unsigned int)__fd < (unsigned int)FD_SETSIZE)
+        __set->__fds_bits[__fd / __NFDBITS] |=
+            ((__fd_mask)1 << (__fd % __NFDBITS));
 }
 
 static __inline void FD_ZERO(fd_set *__set) {
-    __set->__nfds = 0;
+    unsigned int __i;
+    for (__i = 0; __i < (unsigned int)(FD_SETSIZE / __NFDBITS); ++__i)
+        __set->__fds_bits[__i] = 0;
 }
 
 static __inline void FD_COPY(const fd_set *__restrict __from,
                              fd_set *__restrict __to) {
-    size_t __n = __from->__nfds;
-    __to->__nfds = __n;
-    __builtin_memcpy(__to->__fds, __from->__fds, __n * sizeof(int));
+    __builtin_memcpy(__to->__fds_bits, __from->__fds_bits,
+                     sizeof(__to->__fds_bits));
 }
 
 #define FD_CLR(fd, set)   (FD_CLR((fd), (set)))
