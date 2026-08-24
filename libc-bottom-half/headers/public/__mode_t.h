@@ -8,8 +8,19 @@
 #define S_IFDIR (0x4000)
 #define S_IFLNK (0xa000)
 #define S_IFREG (0x8000)
-#define S_IFSOCK (0xe000)
-#define S_IFIFO (0xc000)
+/* firebox#NJ4: S_IFSOCK/S_IFIFO must carry LINUX's values, not values that
+ * merely stay distinct from each other. Upstream 6426235 ("Add DT_SOCK")
+ * resolved an S_IFIFO==S_IFSOCK collision by moving S_IFSOCK OFF Linux's
+ * 0140000 (to 0160000) instead of moving S_IFIFO ONTO 0010000, which left
+ * both wrong and dragged the COMPUTED S_IFMT above down to 0160000 — losing
+ * the 0010000 bit. A guest stays self-consistent under that mask, so the
+ * damage is only visible at a boundary: a Linux socket mode masks to the
+ * guest's S_IFIFO (a silent WRONG type, invariant 0's worst class), a Linux
+ * fifo mode masks to 0 and answers NO type at all, and mknodat() rejects a
+ * caller passing the literal 0010000. Fixing these two makes S_IFMT come out
+ * at 0170000 on its own — do not touch it directly. */
+#define S_IFSOCK (0xc000)
+#define S_IFIFO (0x1000)
 
 #define S_ISBLK(m) (((m)&S_IFMT) == S_IFBLK)
 #define S_ISCHR(m) (((m)&S_IFMT) == S_IFCHR)
