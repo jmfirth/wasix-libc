@@ -18,14 +18,26 @@ struct __clockid {
   __wasi_clockid_t id;
 };
 
-// The two pointer-ABI clock objects. Under wasi-sdk's __header_time.h the
-// macros CLOCK_REALTIME / CLOCK_MONOTONIC expand to &_CLOCK_REALTIME /
-// &_CLOCK_MONOTONIC (these are the only two the pointer ABI ever names —
-// see expected/wasm32-wasi-threads/defined-symbols.txt). They are declared
-// here so __wasilibc_clockid_from_any_checked can recognise a legitimate
-// pointer-ABI clockid by ADDRESS, without dereferencing an arbitrary value.
+// The FOUR pointer-ABI clock objects. Under wasi-sdk's __header_time.h the
+// macros CLOCK_REALTIME / CLOCK_MONOTONIC / CLOCK_PROCESS_CPUTIME_ID /
+// CLOCK_THREAD_CPUTIME_ID expand to the addresses of these objects. They are
+// declared here so __wasilibc_clockid_from_any_checked can recognise a
+// legitimate pointer-ABI clockid by ADDRESS, without dereferencing an
+// arbitrary value.
+//
+// firebox#YWV: the two CPUTIME objects were DELETED upstream (b0555fc,
+// 2022-07-20) as "unused code". That is true only of a STATIC non-PIC link,
+// where --gc-sections drops an address-taken-but-never-read constant. Under
+// -C relocation-model=pic the address-take becomes a GOT.mem DATA import, and
+// GOT.mem data imports resolve EAGERLY at instantiate — so a PIC guest that
+// merely NAMES the constant (the Rust libc crate takes the address of all
+// four) dies before _start with "Unresolved global GOT.mem._CLOCK_*". A
+// symbol that does not exist kills the program at LOAD instead of returning
+// an errno at the CALL, which is what invariant 0 forbids.
 extern const struct __clockid _CLOCK_REALTIME;
 extern const struct __clockid _CLOCK_MONOTONIC;
+extern const struct __clockid _CLOCK_PROCESS_CPUTIME_ID;
+extern const struct __clockid _CLOCK_THREAD_CPUTIME_ID;
 
 // Firebox: resolve a clockid_t argument to its underlying __wasi_clockid_t,
 // VALIDATING it (firebox#79E). Accepts both the integer clockid ABI
@@ -54,7 +66,16 @@ static inline bool __wasilibc_clockid_from_any_checked(uintptr_t raw,
     *out = (__wasi_clockid_t)raw;
     return true;
   }
-  if (raw == (uintptr_t)&_CLOCK_REALTIME || raw == (uintptr_t)&_CLOCK_MONOTONIC) {
+  // firebox#YWV: all FOUR objects, not just the two. The integer branch above
+  // already accepts 2 (PROCESS_CPUTIME) and 3 (THREAD_CPUTIME) and forwards
+  // them to the host, so admitting only two ADDRESSES here would make the
+  // pointer ABI answer EINVAL for a clock the integer ABI resolves — the same
+  // clock, two answers, which is exactly the silent divergence invariant 4
+  // rules out. This still never dereferences an unrecognised value.
+  if (raw == (uintptr_t)&_CLOCK_REALTIME ||
+      raw == (uintptr_t)&_CLOCK_MONOTONIC ||
+      raw == (uintptr_t)&_CLOCK_PROCESS_CPUTIME_ID ||
+      raw == (uintptr_t)&_CLOCK_THREAD_CPUTIME_ID) {
     *out = ((const struct __clockid *)raw)->id;
     return true;
   }
