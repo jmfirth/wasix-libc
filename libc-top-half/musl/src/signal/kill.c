@@ -10,12 +10,22 @@
 #include "atomic.h"
 /* firebox#VYD — RT-signal queue DEPTH for a SELF-directed kill(getpid(), RT).
  * Same rationale as raise()/pthread_kill(): the host doorbell coalesces, so the
- * guest owns depth via the __fbx_rtsigq ring. Feed it (+ the process-wide
- * pending bit for sigpending) before the proc_signal nudge. No-op for a non-RT
+ * guest owns depth via the __fbx_rtsigq ring. Feed it (+ the pending bitmask,
+ * both words — see the firebox#4MP note below) before the proc_signal nudge.
+ * No-op for a non-RT
  * signal or a cross-process target (which routes to the host stash instead). */
 extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
-extern volatile int __wasm_pending_sigs[];
+/* firebox#4MP — THE paired pending-bit write (sigaction.c). It sets BOTH the
+ * calling thread's `self->pending_sigs[]` mirror AND the process-wide
+ * `__wasm_pending_sigs[]` word, which is the joint invariant the teardown
+ * depends on: __wasm_drain_pending_sigs clears the process-wide word by
+ * AND-NOTing the bits it SWAPS OUT of the per-thread mirror, and the
+ * post-handler drain in __wasm_signal only runs at all when that mirror is
+ * nonzero. A site that writes the process-wide word alone therefore sets a bit
+ * that nothing on the consumption path can ever clear. Use this helper rather
+ * than an open-coded a_or so the pair cannot be separated again. */
+extern void __fbx_rtsig_repend(int sig);
 #endif
 
 int kill(pid_t pid, int sig)
@@ -57,9 +67,31 @@ int kill(pid_t pid, int sig)
 	if (sig >= 35 && sig <= (_NSIG - 1) && pid == (pid_t)getpid()) {
 		union sigval sv; memset(&sv, 0, sizeof sv);
 		(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
-		int word = (sig - 1) / 32;
-		int bit  = 1 << ((sig - 1) % 32);
-		a_or(&__wasm_pending_sigs[word], bit);
+		/* firebox#4MP — mark pending through the PAIRED write.
+		 *
+		 * This line used to be a bare
+		 *     a_or(&__wasm_pending_sigs[word], bit);
+		 * which set the process-wide word and NOT the calling thread's
+		 * `pending_sigs[]` mirror. Every other set-path in the tree writes
+		 * both (pthread_kill.c:66-67, timer_create.c:381-382,
+		 * sigaction.c:648-649 and :1038-1042); kill.c was the sole outlier,
+		 * and the mirror is what ARMS the clear. __wasm_drain_pending_sigs
+		 * computes `bits = a_swap(&self->pending_sigs[word], 0)` and then
+		 * `a_and(&__wasm_pending_sigs[word], ~bits)`, so with the mirror
+		 * never set `bits == 0` and the AND-NOT is a no-op — and the
+		 * post-handler drain gate in __wasm_signal never even calls it,
+		 * because that gate tests the mirror too. Result: after the ring
+		 * record this bit represents had been consumed and the handler had
+		 * run, the process-wide bit survived, so sigpending(2) kept
+		 * reporting a signal that was not pending and timer_create's
+		 * `if (pending & bit) { overrun++; return; }` expiry check treated
+		 * every later expiry of that signo as already-pending — a POSIX
+		 * timer on that signal never fired again.
+		 *
+		 * __fbx_rtsig_repend performs exactly the pair. The pending state
+		 * and the RT ring are two stores that must agree; keeping the write
+		 * behind the one helper is what stops them being separated again. */
+		__fbx_rtsig_repend(sig);
 	}
 	__wasi_errno_t e = __wasi_proc_signal(pid, (__wasi_signal_t)sig);
 	if (e != __WASI_ERRNO_SUCCESS) {

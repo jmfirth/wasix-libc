@@ -635,12 +635,30 @@ int __fbx_rtsigq_count(int sig) {
 	return c;
 }
 
-/* Re-mark RT signal `sig` pending after a synchronous accept (sigtimedwait/
- * sigwaitinfo) popped one queued record but MORE remain, so the pending bit
- * stays ≡ "this RT signal's queue is non-empty" and the next accept finds the
- * remaining FIFO instances (sigwaitinfo/7-1). Mirrors __wasm_pend_signal's bit
- * writes (per-thread + process-wide masks) minus the wake — the caller is
- * returning from the accept, not parking. */
+/* Mark RT signal `sig` pending on the CALLING thread: the PAIRED bit write.
+ *
+ * Two callers, one invariant:
+ *  - sigtimedwait/sigwaitinfo, after a synchronous accept popped one queued
+ *    record but MORE remain, so the pending bit stays ≡ "this RT signal's
+ *    queue is non-empty" and the next accept finds the remaining FIFO
+ *    instances (sigwaitinfo/7-1).
+ *  - kill(getpid(), <rtsig>) (kill.c, firebox#4MP), which pushes a ring record
+ *    and must mark it pending.
+ *
+ * Mirrors __wasm_pend_signal's bit writes (per-thread + process-wide masks)
+ * minus the wake — the caller is not parking.
+ *
+ * firebox#4MP — BOTH writes are load-bearing and must never be separated. The
+ * process-wide word is what sigpending(2) and timer_create's expiry check read,
+ * but the per-thread mirror is what ARMS the clear: __wasm_drain_pending_sigs
+ * (below) derives the process-wide AND-NOT mask from the bits it SWAPS OUT of
+ * `self->pending_sigs[]`, and __wasm_signal's post-handler drain gate only
+ * calls it when that mirror is nonzero. A caller that ORs the process-wide word
+ * alone sets a bit no consumption path can clear — which is exactly the defect
+ * kill.c carried until #4MP. Route new pending-marks through this helper rather
+ * than open-coding the a_or pair. (pthread_kill.c and timer_create.c pend a
+ * DIFFERENT thread — `t` / `d->owner` — so they cannot use this `self`-based
+ * helper and open-code the same pair against their own target.) */
 void __fbx_rtsig_repend(int sig) {
 	struct pthread *self = __pthread_self();
 	int word = (sig - 1) / 32;
