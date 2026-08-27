@@ -59,10 +59,14 @@ extern "C" {
 #define BUFSIZ 1024
 #define FILENAME_MAX 4096
 #define FOPEN_MAX 1000
-#ifdef __wasilibc_unmodified_upstream /* WASI has no temp directories */
+/* C requires <stdio.h> to define both. They were compiled out on the premise
+ * that "WASI has no temp directories" -- false for Firebox, MEASURED in-guest.
+ * These are plain integer constants: hiding them does not make anything safer,
+ * it just means `char buf[L_tmpnam];` fails to COMPILE, which is a conformance
+ * gap a program cannot work around. (firebox #P47)
+ */
 #define TMP_MAX 10000
 #define L_tmpnam 20
-#endif
 
 typedef union _G_fpos64_t {
 	char __opaque[16];
@@ -147,8 +151,15 @@ void setbuf(FILE *__restrict, char *__restrict);
 char *tmpnam(char *);
 FILE *tmpfile(void);
 #else
-char *tmpnam(char *) __attribute__((__deprecated__("tmpnam is not defined on WASI")));
-FILE *tmpfile(void) __attribute__((__deprecated__("tmpfile is not defined on WASI")));
+/* Both ARE defined here. tmpfile has been implemented all along (MEASURED: a
+ * write/rewind/read round-trip succeeds inside `firebox run`), and tmpnam is
+ * implemented in src/stdio/tmpnam.c's wasi branch. The deprecation attributes
+ * that used to sit here read "... is not defined on WASI" -- a false statement
+ * about our own libc, and a user-reachable one: -Wdeprecated-declarations turns
+ * it into a warning and any -Werror build calling tmpfile FAILED. (firebox #P47)
+ */
+char *tmpnam(char *);
+FILE *tmpfile(void);
 #endif
 
 #if defined(_POSIX_SOURCE) || defined(_POSIX_C_SOURCE) \
