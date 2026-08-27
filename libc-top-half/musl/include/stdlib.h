@@ -138,9 +138,25 @@ int putenv (char *);
 #ifdef __wasilibc_unmodified_upstream /* WASI has no pseudo-terminals */
 int unlockpt (int);
 char *ptsname (int);
-#endif
+/* firebox#P47: posix_openpt and grantpt were OUTSIDE this guard while their three
+   siblings (unlockpt, ptsname, ptsname_r) were inside it -- so the two that OPEN
+   and PREPARE a pty were declared and the three that USE one were not. Nothing
+   defines them in any archive on any shelf, so they COMPILED CLEAN and failed at
+   LINK: MEASURED compile EXIT=0 / link EXIT=1 under -D_XOPEN_SOURCE=700, against
+   unlockpt's honest compile EXIT=1 in the same header under the same macro.
+   That is a capability lie (invariant 0) and it is invisible to any probe that
+   only COMPILES -- CMake check_symbol_exists, meson has_header_symbol, a bare
+   #ifdef. (Autoconf AC_CHECK_FUNCS links, which is why Python's pyconfig.h
+   already reads /* #undef HAVE_GRANTPT */ and no shipped package was misled.)
+   Declaring absence honestly is the faithful answer here, and it is the same
+   rule firebox#H18 applied in the opposite direction on this very file: a
+   declaration must match a definition. NOT defining them to return ENOSYS:
+   musl's grantpt body is `return 0;` unconditionally, so shipping the pair
+   would report SUCCESS for preparing a pty that cannot exist -- a false
+   success, which invariant 0 forbids outright. */
 int posix_openpt (int);
 int grantpt (int);
+#endif
 char *l64a (long);
 long a64l (const char *);
 void setkey (const char *);
