@@ -91,6 +91,20 @@ int setjmp (jmp_buf buf) {
     return __wasilibc_setjmp(buf);
 }
 
+/* POSIX _setjmp/_longjmp are the no-signal-mask variants. musl's setjmp does
+ * not touch the mask either (that is sigsetjmp's job, see
+ * src/signal/sigsetjmp_wasix.c), so plain aliases are the faithful mapping --
+ * exactly what musl does on every other arch.
+ *
+ * Only the NON-EH branch needs these. On the EH shelf setjmp/longjmp are not
+ * symbols at all: LLVM's WebAssemblyLowerEmscriptenEHSjLj pass rewrites the
+ * call site, and MEASURED it recognises the underscore spellings too -- a
+ * program calling _setjmp there links to byte-identical output. Aliasing here
+ * would have nothing to alias and is not needed. (firebox #P47)
+ */
+weak_alias(setjmp, _setjmp);
+weak_alias(longjmp, _longjmp);
+
 #  endif
 
 /* WASIX sigsetjmp is defined in src/signal/sigsetjmp_wasix.c so it
