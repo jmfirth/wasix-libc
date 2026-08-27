@@ -209,6 +209,9 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         unistd/getsid.c \
         unistd/setsid.c \
         unistd/gethostname.c \
+        unistd/ctermid.c \
+        unistd/getlogin.c \
+        unistd/getlogin_r.c \
         unistd/alarm.c \
         unistd/ualarm.c \
         unistd/ttyname.c \
@@ -228,6 +231,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         legacy/getpagesize.c \
         legacy/getpass.c \
         legacy/daemon.c \
+        legacy/cuserid.c \
         thread/thrd_sleep.c \
         wasix/call_dynamic.c \
         wasix/closure_allocate.c \
