@@ -140,4 +140,20 @@ int __execvp(const char *file, char *const argv[])
 }
 
 weak_alias(__execvp, execvp);
-weak_alias(__execvp, execvpe);
+
+/* execvpe(file, argv, envp) is the GNU extension: PATH search like execvp, but
+ * with a caller-supplied environment. It CANNOT be an alias of __execvp, which
+ * takes two parameters and supplies __wasilibc_environ itself -- that alias gave
+ * the symbol a two-parameter type and was wrong from the day it was written. It
+ * stayed invisible only because nothing DECLARED execvpe, so no translation unit
+ * ever compared the alias's type against a prototype; firebox#H18/#DEK adding
+ * the declaration to <unistd.h> is what turned it into a build error. Give it a
+ * real definition instead, forwarding to the live four-parameter __execvpe with
+ * use_path=1. (firebox #P47)
+ */
+int __execvpe_env(const char *file, char *const argv[], char *const envp[])
+{
+	return __execvpe(file, argv, envp, 1);
+}
+
+weak_alias(__execvpe_env, execvpe);

@@ -491,11 +491,6 @@ MUSL_PRINTSCAN_OBJS = $(call objs,$(MUSL_PRINTSCAN_SOURCES))
 MUSL_PRINTSCAN_LONG_DOUBLE_OBJS = $(patsubst %.o,%.long-double.o,$(MUSL_PRINTSCAN_OBJS))
 MUSL_PRINTSCAN_NO_FLOATING_POINT_OBJS = $(patsubst %.o,%.no-floating-point.o,$(MUSL_PRINTSCAN_OBJS))
 BULK_MEMORY_OBJS = $(call objs,$(BULK_MEMORY_SOURCES))
-NETWORK_STUB_SOURCES = $(addprefix $(LIBC_TOP_HALF_MUSL_SRC_DIR)/, \
-    network/ent.c \
-    network/serv.c \
-    network/netname.c)
-NETWORK_STUB_OBJS = $(call objs,$(NETWORK_STUB_SOURCES))
 LIBWASI_EMULATED_MMAN_OBJS = $(call objs,$(LIBWASI_EMULATED_MMAN_SOURCES))
 LIBWASI_EMULATED_PROCESS_CLOCKS_OBJS = $(call objs,$(LIBWASI_EMULATED_PROCESS_CLOCKS_SOURCES))
 LIBWASI_EMULATED_GETPID_OBJS = $(call objs,$(LIBWASI_EMULATED_GETPID_SOURCES))
@@ -633,17 +628,6 @@ $(MUSL_PRINTSCAN_NO_FLOATING_POINT_OBJS): CFLAGS += \
 # https://github.com/llvm/llvm-project/issues/52618 is resolved
 $(BULK_MEMORY_OBJS): CFLAGS += \
         -mbulk-memory
-
-# These three files are musl's deliberate no-op stubs for the resolver
-# ENUMERATION API (get/set/endhostent, get/set/endnetent, get/set/endservent,
-# getnetbyname, getnetbyaddr). Their parameters are unused BY DESIGN -- there is
-# no /etc/networks to walk -- so they cannot survive this build's -Wextra
-# -Werror, which is why upstream wasi-libc silently dropped them from the
-# hand-written network source list rather than exempting them. Dropping them
-# does not make the symbols honest: <netdb.h> still DECLARES all of them, so a
-# conforming program compiles clean and fails at link. Exempt the warning and
-# ship the stubs. (firebox #P47)
-$(NETWORK_STUB_OBJS): CFLAGS += -Wno-unused-parameter
 
 $(BULK_MEMORY_OBJS): CFLAGS += \
         -DBULK_MEMORY_THRESHOLD=$(BULK_MEMORY_THRESHOLD)
