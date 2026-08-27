@@ -169,8 +169,19 @@ int clearenv(void);
 #ifdef __wasilibc_unmodified_upstream /* WASI has no wait */
 #define WCOREDUMP(s) ((s) & 0x80)
 #define WIFCONTINUED(s) ((s) == 0xffff)
-void *reallocarray (void *, size_t, size_t);
 #endif
+/* firebox#H18: DEFINED in our libc.a, so the prototype must be visible.
+ * Upstream hid reallocarray behind __wasilibc_unmodified_upstream because stock
+ * wasi-libc has no implementation. Firebox DOES: MEASURED W reallocarray in libc.a.
+ * A capability we define but do not DECLARE is unreachable -- the caller's only
+ * recourse is to hand-declare it, and a hand-declaration in front of a real
+ * implementation is a latent ABI mismatch (firebox#4ZY deleted packages/vi/shims
+ * for exactly that). The block-mates left hidden are NOT defined (MEASURED 0). */
+/* ⚠️ AND IT WAS NEVER A WAIT FUNCTION. reallocarray is a malloc-family call that had
+ * been swept into a block whose stated reason is "WASI has no wait", beside WCOREDUMP
+ * and WIFCONTINUED. The guard's own comment did not describe it, which is why no
+ * reader questioned it. */
+void *reallocarray (void *, size_t, size_t);
 #endif
 
 #ifdef _GNU_SOURCE

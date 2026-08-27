@@ -255,22 +255,39 @@ int getpagesize(void);
 #ifdef __wasilibc_unmodified_upstream /* WASI has no processes */
 int getdtablesize(void);
 int sethostname(const char *, size_t);
-int getdomainname(char *, size_t);
 int setdomainname(const char *, size_t);
 #endif
+/* firebox#H18: DEFINED in our libc.a, so the prototype must be visible.
+ * Upstream hid getdomainname behind __wasilibc_unmodified_upstream because stock
+ * wasi-libc has no implementation. Firebox DOES: MEASURED T getdomainname in libc.a.
+ * A capability we define but do not DECLARE is unreachable -- the caller's only
+ * recourse is to hand-declare it, and a hand-declaration in front of a real
+ * implementation is a latent ABI mismatch (firebox#4ZY deleted packages/vi/shims
+ * for exactly that). The block-mates left hidden are NOT defined (MEASURED 0). */
+int getdomainname(char *, size_t);
 /* firebox#K9N: real credential substrate — setgroups is live (privileged-only). */
 int setgroups(size_t, const gid_t *);
 char *getpass(const char *);
 #ifdef __wasilibc_unmodified_upstream
-int daemon(int, int);
 void setusershell(void);
 void endusershell(void);
 char *getusershell(void);
 int acct(const char *);
 long syscall(long, ...);
-int execvpe(const char *, char *const [], char *const []);
 int issetugid(void);
 #endif
+/* firebox#H18: DEFINED in our libc.a, so the prototype must be visible.
+ * Upstream hid daemon/execvpe behind __wasilibc_unmodified_upstream because stock
+ * wasi-libc has no implementation. Firebox DOES: MEASURED T daemon / W execvpe in libc.a.
+ * A capability we define but do not DECLARE is unreachable -- the caller's only
+ * recourse is to hand-declare it, and a hand-declaration in front of a real
+ * implementation is a latent ABI mismatch (firebox#4ZY deleted packages/vi/shims
+ * for exactly that). The block-mates left hidden are NOT defined (MEASURED 0). */
+/* firebox#H18 carrier: dropbear's src/cli-session.c:291 calls daemon() and failed
+ * with `call to undeclared function`, dropping cli-session.o and cascading to four
+ * undefined cli_* symbols at link -- while T daemon sat in libc.a the whole time. */
+int daemon(int, int);
+int execvpe(const char *, char *const [], char *const []);
 int getentropy(void *, size_t);
 extern int optreset;
 #endif

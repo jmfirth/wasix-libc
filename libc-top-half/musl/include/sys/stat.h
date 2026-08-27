@@ -94,8 +94,19 @@ int mkfifoat(int, const char *, mode_t);
 #ifdef __wasilibc_unmodified_upstream /* WASI has no mknod */
 #if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
 int mknod(const char *, mode_t, dev_t);
-int mknodat(int, const char *, mode_t, dev_t);
 #endif
+#endif
+/* firebox#H18: DEFINED in our libc.a, so the prototype must be visible.
+ * Upstream hid mknodat behind __wasilibc_unmodified_upstream because stock
+ * wasi-libc has no implementation. Firebox DOES: MEASURED T mknodat in libc.a.
+ * A capability we define but do not DECLARE is unreachable -- the caller's only
+ * recourse is to hand-declare it, and a hand-declaration in front of a real
+ * implementation is a latent ABI mismatch (firebox#4ZY deleted packages/vi/shims
+ * for exactly that). The block-mates left hidden are NOT defined (MEASURED 0). */
+/* ⚠️ mknod itself stays hidden ON PURPOSE: MEASURED 0 definitions in libc.a. The two
+ * are NOT a pair here -- declare the one we implement, leave the one we do not. */
+#if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+int mknodat(int, const char *, mode_t, dev_t);
 #endif
 
 int futimens(int, const struct timespec [2]);

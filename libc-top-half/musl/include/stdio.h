@@ -164,11 +164,18 @@ int fseeko(FILE *, off_t, int);
 off_t ftello(FILE *);
 int dprintf(int, const char *__restrict, ...);
 int vdprintf(int, const char *__restrict, __isoc_va_list);
-#if defined(__wasilibc_unmodified_upstream) || defined(_REENTRANT)
+/* firebox#H18: DEFINED in our libc.a, so the prototype must be visible.
+ * Upstream hid the stdio locking trio behind __wasilibc_unmodified_upstream because stock
+ * wasi-libc has no implementation. Firebox DOES: MEASURED T flockfile / T ftrylockfile / T funlockfile in libc.a.
+ * A capability we define but do not DECLARE is unreachable -- the caller's only
+ * recourse is to hand-declare it, and a hand-declaration in front of a real
+ * implementation is a latent ABI mismatch (firebox#4ZY deleted packages/vi/shims
+ * for exactly that). The block-mates left hidden are NOT defined (MEASURED 0). */
+/* POSIX declares these in <stdio.h> UNCONDITIONALLY; requiring _REENTRANT was a
+ * divergence that broke ordinary single-threaded callers. */
 void flockfile(FILE *);
 int ftrylockfile(FILE *);
 void funlockfile(FILE *);
-#endif
 int getc_unlocked(FILE *);
 int getchar_unlocked(void);
 int putc_unlocked(int, FILE *);

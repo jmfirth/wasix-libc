@@ -1,8 +1,27 @@
-#ifndef _WASI_EMULATED_PROCESS_CLOCKS
-#error WASI lacks process-associated clocks; to enable emulation of the `getrusage` function using \
-the wall clock, which isn't sensitive to whether the program is running or suspended, \
-compile with -D_WASI_EMULATED_PROCESS_CLOCKS and link with -lwasi-emulated-process-clocks
-#else
+/* firebox#DEK: the whole-header `#error` is GONE.
+ *
+ * It read "WASI lacks process-associated clocks … compile with
+ * -D_WASI_EMULATED_PROCESS_CLOCKS and link with -lwasi-emulated-process-clocks",
+ * and it refused THE ENTIRE HEADER. Three things were wrong with that here:
+ *
+ *  1. ⛔ IT BROKE <sys/wait.h> ON EVERY SHELF WE SHIP. musl's features.h turns on
+ *     _BSD_SOURCE by DEFAULT, and <sys/wait.h> then includes <sys/resource.h>
+ *     unconditionally for wait3/wait4 — so `#include <sys/wait.h>`, the most
+ *     ordinary POSIX process header there is, did not compile at all. MEASURED
+ *     2026-08-26: all nine shelves, both widths, from a two-line program.
+ *  2. ⛔ THE REMEDY IT PRESCRIBED DOES NOT SUPPLY getrusage. MEASURED:
+ *     libwasi-emulated-process-clocks.a defines only `T __clock`; getrusage is
+ *     `T getrusage` in libc.a itself. So the macro selected nothing emulated — it
+ *     was a pure header unlock whose name asserted the opposite of the truth, and
+ *     every caller that "fixed" the build by defining it was misled about why.
+ *  3. ⛔ IT GATED FUNCTIONS THAT HAVE NOTHING TO DO WITH CLOCKS. getrlimit and
+ *     setrlimit are `T` in libc.a and are not clock-related in any way.
+ *
+ * What remains honest: getrusage's VALUES may be wall-clock-derived rather than
+ * process-associated. That is a semantics caveat to document, not grounds to make
+ * the header uncompilable — an honest value with a caveat beats a build failure,
+ * and a build failure is not how POSIX reports a degraded optional feature.
+ */
 #ifndef	_SYS_RESOURCE_H
 #define	_SYS_RESOURCE_H
 
@@ -61,10 +80,15 @@ struct rusage {
 
 int getrusage (int, struct rusage *);
 
+/* firebox#DEK: NOT defined in our libc.a (MEASURED 0 for all three), so they stay
+ * hidden. Declaring what we do not define would only move the failure from compile
+ * to link. getrusage/getrlimit/setrlimit above ARE defined and are now visible. */
+#ifdef __wasilibc_unmodified_upstream /* firebox: no getpriority/setpriority */
 int getpriority (int, id_t);
 int setpriority (int, id_t, int);
+#endif
 
-#ifdef _GNU_SOURCE
+#if defined(_GNU_SOURCE) && defined(__wasilibc_unmodified_upstream) /* firebox: no prlimit */
 int prlimit(pid_t, int, const struct rlimit *, struct rlimit *);
 #define prlimit64 prlimit
 #endif
@@ -126,5 +150,4 @@ __REDIR(getrusage, __getrusage_time64);
 #else
 #include <__struct_rusage.h>
 
-#endif
 #endif

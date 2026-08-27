@@ -235,9 +235,16 @@ int sigqueue(pid_t, int, union sigval);
 int pthread_sigmask(int, const sigset_t *__restrict, sigset_t *__restrict);
 int pthread_kill(pthread_t, int);
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no siginfo */
+/* firebox#H18: DEFINED in our libc.a, so the prototype must be visible.
+ * Upstream hid psiginfo behind __wasilibc_unmodified_upstream because stock
+ * wasi-libc has no implementation. Firebox DOES: MEASURED T psiginfo in libc.a.
+ * A capability we define but do not DECLARE is unreachable -- the caller's only
+ * recourse is to hand-declare it, and a hand-declaration in front of a real
+ * implementation is a latent ABI mismatch (firebox#4ZY deleted packages/vi/shims
+ * for exactly that). The block-mates left hidden are NOT defined (MEASURED 0). */
+/* ⚠️ The guard's reason -- "WASI has no siginfo" -- is FALSE about Firebox: real signal
+ * semantics are the moat, and siginfo_t is declared in this very header. */
 void psiginfo(const siginfo_t *, const char *);
-#endif
 void psignal(int, const char *);
 
 #endif
@@ -297,11 +304,21 @@ typedef void (*sig_t)(int);
 #ifdef _GNU_SOURCE
 typedef void (*sighandler_t)(int);
 void (*bsd_signal(int, void (*)(int)))(int);
-#ifdef __wasilibc_unmodified_upstream /* WASI has no signal sets */
+/* firebox#H18: DEFINED in our libc.a, so the prototype must be visible.
+ * Upstream hid the GNU sigset operators behind __wasilibc_unmodified_upstream because stock
+ * wasi-libc has no implementation. Firebox DOES: MEASURED T sigisemptyset / T sigorset / T sigandset in libc.a.
+ * A capability we define but do not DECLARE is unreachable -- the caller's only
+ * recourse is to hand-declare it, and a hand-declaration in front of a real
+ * implementation is a latent ABI mismatch (firebox#4ZY deleted packages/vi/shims
+ * for exactly that). The block-mates left hidden are NOT defined (MEASURED 0). */
+/* ⚠️ "WASI has no signal sets" is FALSE about Firebox. These stay inside _GNU_SOURCE,
+ * which is correct -- they are GNU extensions -- but they are no longer hidden from a
+ * _GNU_SOURCE build that has every right to them. */
 int sigisemptyset(const sigset_t *);
 int sigorset (sigset_t *, const sigset_t *, const sigset_t *);
 int sigandset(sigset_t *, const sigset_t *, const sigset_t *);
 
+#ifdef __wasilibc_unmodified_upstream /* WASI has no signal sets */
 #define SA_NOMASK SA_NODEFER
 #define SA_ONESHOT SA_RESETHAND
 #endif
