@@ -56,7 +56,7 @@
 #define AT_BASE_PLATFORM 24
 #define AT_CLKTCK 17
 #define AT_DCACHEBSIZE 19
-#define AT_EACCESS (0x0)
+#define AT_EACCESS (0x200)
 #define AT_EGID 14
 #define AT_ENTRY 9
 #define AT_EUID 12
@@ -95,7 +95,7 @@
 #define AT_REMOVEDIR (0x4)
 #define AT_SECURE 23
 #define AT_SYMLINK_FOLLOW (0x2)
-#define AT_SYMLINK_NOFOLLOW (0x1)
+#define AT_SYMLINK_NOFOLLOW (0x100)
 #define AT_SYSINFO 32
 #define AT_SYSINFO_EHDR 33
 #define AT_UCACHEBSIZE 21

@@ -61,6 +61,14 @@ __wasi_errno_t __wasix_path_lchown(__wasi_fd_t fd, const char *path, size_t path
  * → lstat). See __wasixlibc_firebox.c. */
 __wasi_errno_t __wasix_fd_filestat_get_ext(__wasi_fd_t fd, uint32_t *owner2);
 __wasi_errno_t __wasix_path_filestat_get_ext(__wasi_fd_t fd, uint32_t flags, const char *path, size_t path_len, uint32_t *owner2);
+/* firebox#Q2Y — host-authoritative POSIX access/faccessat. `amode` is the
+ * R_OK|W_OK|X_OK mask; `flags` accepts AT_EACCESS|AT_SYMLINK_NOFOLLOW. The
+ * host snapshots real/effective ids plus supplementary groups atomically and
+ * checks lossless mode/owner metadata including directory-prefix search.
+ * ABI: this additive import changes the provider projection, so the provider
+ * must be emitted under a NEW generation; preserving the prior generation is
+ * invalid even though existing imports remain source-compatible. */
+__wasi_errno_t __wasix_path_access(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t amode, uint32_t flags);
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode, uint64_t dev);
 
 /* fd_ioctl ASYMMETRY: on wasm32 __wasi_fd_ioctl is part of the committed generation

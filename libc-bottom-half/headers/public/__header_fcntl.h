@@ -67,8 +67,8 @@
 
 #define FD_CLOEXEC (1)
 
-#define AT_EACCESS          (0x0)
-#define AT_SYMLINK_NOFOLLOW (0x1)
+#define AT_SYMLINK_NOFOLLOW (0x100)
+#define AT_EACCESS          (0x200)
 #define AT_SYMLINK_FOLLOW   (0x2)
 #define AT_REMOVEDIR        (0x4)
 
