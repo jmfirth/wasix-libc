@@ -49,6 +49,19 @@ static int find_relpath_alt(const char *path, char **relative) {
     return fd;
 }
 
+static int validate_access_pathname(const char *path, int mode, int flags) {
+    if ((mode & ~(F_OK | R_OK | W_OK | X_OK)) != 0 ||
+        (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (path[0] == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
+    return 0;
+}
+
 // firebox#HXN: process-wide file-mode creation mask (umask). WASI/WASIX has no
 // kernel umask, so libc maintains it in guest memory. It rides proc_fork's
 // private-memory copy, so a child inherits the parent's umask exactly as on
@@ -185,6 +198,12 @@ int __wasilibc_open_nomode(const char *path, int oflag) {
 }
 
 int access(const char *path, int amode) {
+    // Preserve the caller's pathname before preopen resolution: make_absolute()
+    // maps an empty string to the cwd for APIs where that is useful internally,
+    // but Linux access(2) requires ENOENT for an empty public pathname.
+    if (validate_access_pathname(path, amode, 0) != 0)
+        return -1;
+
     char *relative_path;
     int dirfd = find_relpath(path, &relative_path);
 
@@ -589,6 +608,11 @@ int rename(const char *old, const char *new) {
 int
 __wasilibc_access(const char *path, int mode, int flags)
 {
+    // Do not let find_relpath() normalize the public empty pathname to the cwd.
+    // Validate first so invalid modes/flags retain Linux's EINVAL precedence.
+    if (validate_access_pathname(path, mode, flags) != 0)
+        return -1;
+
     char *relative_path;
     int dirfd = find_relpath(path, &relative_path);
 
