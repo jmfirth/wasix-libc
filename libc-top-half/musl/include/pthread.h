@@ -77,7 +77,34 @@ extern "C" {
 #define PTHREAD_NULL ((pthread_t)0)
 
 
+/* firebox#P47/#S7V: the THIRD half of the nothreads thread-discovery fix.
+ *
+ * #5X0 removed the linkable `pthread_create` from the nothreads libc and
+ * <unistd.h> stopped advertising `_POSIX_THREADS`, so probes that LINK
+ * (autoconf AC_CHECK_FUNCS, AX_PTHREAD, CMake FindThreads) and probes that
+ * read the POSIX option macro both answer correctly. A probe that only
+ * COMPILES did not: CMake `check_symbol_exists(pthread_create pthread.h)`,
+ * meson `has_header_symbol`, a bare `#ifdef`-style prototype test all saw
+ * this declaration and concluded the profile has threads. MEASURED on the
+ * rendered nothreads shelf, `pthread_create` was the ONLY one of the 108
+ * function names <pthread.h> declares that had no definition to link — 98
+ * link, 10 are not declared at all — so the guard is exactly one symbol
+ * wide and is derived from that sweep, not assumed.
+ *
+ * A declaration with no definition is invariant 0's false success: it
+ * promises at compile time what it cannot deliver at link time. Compiling
+ * it out moves the failure to compile time, where every discovery mechanism
+ * detects it, which is invariant 4's "absence must be honest and
+ * discoverable through standard POSIX mechanisms".
+ *
+ * The marker is the SYSROOT's own statement of fact, baked into this
+ * sysroot's installed <features.h> by bake-nothreads-features.sh (included
+ * at the top of this header), so it describes the profile rather than
+ * whatever the consumer's command line asserts. Threaded sysroots never
+ * define it and are unaffected. */
+#ifndef __FIREBOX_NO_THREADS__
 int pthread_create(pthread_t *__restrict, const pthread_attr_t *__restrict, void *(*)(void *), void *__restrict);
+#endif
 int pthread_detach(pthread_t);
 _Noreturn void pthread_exit(void *);
 int pthread_join(pthread_t, void **);
