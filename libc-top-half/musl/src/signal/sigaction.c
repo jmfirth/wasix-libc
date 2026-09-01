@@ -793,7 +793,7 @@ static void core_handler(int sig) {
      * that terminate_handler already attributed to its own signal is not
      * relabelled SIGABRT here. See __fbx_terminating_sig. */
     __fbx_note_terminating(sig);
-    fprintf(stderr, "Program recieved fatal signal: %s\n", strsignal(sig));
+    /* firebox#6DB — silent; see the note above terminate_handler. */
     abort();
 }
 
@@ -848,20 +848,24 @@ static void core_handler(int sig) {
  *   - DISPOSITION: this function is reached only for SIG_DFL by construction,
  *     which is the very fact the host was missing.
  *
- * WHAT IS DELIBERATELY NOT CHANGED — the pid >= 2 arm, byte for byte.
+ * THE pid >= 2 ARM AND ITS STATUS — still load-bearing, still measured.
  * MEASURED 2026-07-30 on this task (`reports/witness-aqh/`, 20/20): at pid >= 2
  * a fork child raising with SIG_DFL is observed by its parent as
  * `WIFSIGNALED=1, WTERMSIG == the signal raised` — FAITHFUL, in both export
- * postures. Which layer supplies that status is UNATTRIBUTED (this task's C1),
- * and `abort()` is documented to race its own `_Exit`, so any edit below this
- * line — including deleting the `fprintf`, which would make the `abort()`
- * happen sooner — perturbs an unattributed race that currently lands right.
- * Replacing it with a "faithful" `_Exit(128 + sig)` would be a REGRESSION: the
- * number would match but the process would become `WIFEXITED`, where the
- * measurement says a parent sees `WIFSIGNALED`. The pid-1 return happens
- * FIRST, so pid 1 never reaches the `fprintf` either — the spurious line is
- * gone at the persona measured here, and survives at pid >= 2 as a separate,
- * separately-tracked inv-0 defect.
+ * postures. Replacing this function's `abort()` with a "faithful"
+ * `_Exit(128 + sig)` would still be a REGRESSION: the number would match but
+ * the process would become `WIFEXITED`, where the measurement says a parent
+ * sees `WIFSIGNALED`. So the `abort()` stays.
+ *
+ * ⚠️ SUPERSEDED, and deliberately replaced rather than appended (firebox#6DB,
+ * 2026-09-01): this block used to say the pid >= 2 arm was frozen BYTE FOR
+ * BYTE because deleting the `fprintf` would move the `abort()` earlier inside
+ * an UNATTRIBUTED race. The `fprintf` is now gone and the objection is
+ * RETIRED, on evidence rather than on argument — see the firebox#6DB note
+ * below for the 400-run A/B that bounds it. The attribution is also no longer
+ * open on this artifact: the status is manufactured by
+ * `__fbx_note_terminating()` (firebox#R3M) plus `abort()`'s `_Exit(127)`, and
+ * both are unmoved by the deletion.
  *
  * WHY NOT `__wasi_proc_raise(sig)` — the "hand the signal back to the host"
  * shape an earlier #AQH design proposed, guarded by a one-shot latch. It is
@@ -872,6 +876,39 @@ static void core_handler(int sig) {
  * design buys nothing over doing that thing directly. On the posture where the
  * host CAN claim the signal, this function is never reached at all.
  */
+/* firebox#6DB — THE DEFAULT ACTION IS SILENT, because the Linux kernel's is.
+ *
+ * Upstream wasix-libc announced each SIG_DFL default action on stderr
+ * ("Program recieved <kind> signal: %s", sic). Linux prints NOTHING from libc
+ * or from the kernel when a process is terminated, cored or stopped by a
+ * default action — the shell that reaps it may say "Terminated", but the dying
+ * process emits no bytes. A guest that prints here writes a line into the
+ * program's own stderr that the same program on Linux does not, which is
+ * invariant 0's "no user-visible Firebox-specific knowledge, ever". The
+ * misspelling made it unmistakably ours, and it has already been read as
+ * evidence by an unrelated investigation (#584's "decisive line").
+ *
+ * ⛔ THIS IS NOT THE #AQH/#NRW MISSING-EXPORT HOLE AND DELETING THE PRINT DOES
+ * NOT DEPEND ON IT. These handlers are ALSO the correct actor on a path that
+ * exists whatever the artifact exports: a SYNCHRONOUS IN-GUEST SELF-RAISE
+ * (raise(), an SA_RESETHAND re-raise, kill(getpid(),...)) is dispatched
+ * straight into __wasm_signal without the host being asked, exactly as Linux
+ * performs a self-raise's default action in-kernel. So the print is not a
+ * symptom of an unreadable disposition mirror that a fleet relink retires —
+ * it is an unconditional divergence on a permanently-live path, and the fix
+ * belongs to the polyfill itself.
+ *
+ * ON #AQH's C1 OBJECTION (deleting the fprintf moves the abort() earlier,
+ * inside an unattributed race that currently lands right): MEASURED
+ * 2026-09-01, 400 runs — 40 per arm across 5 arms on 2 twins of the #R3M
+ * witness differing on this axis ALONE (3 announcement strings present vs 0,
+ * same sysroot, same link line). Every arm collapsed to a SINGLE status value,
+ * identical between the twins, 0 variance; the only difference measured was
+ * stderr itself (40/40 non-empty on the print twin's `resethand` arm, 0/40 on
+ * the no-print twin). The parent still observes WIFSIGNALED=1 WTERMSIG=15 on
+ * `resethand`, the one arm that reaches this function. The status is supplied by __fbx_note_terminating() +
+ * abort()'s _Exit(127), both of which are UNMOVED; the fprintf was never
+ * load-bearing for it. Witness: the 6DB task dir's witness recipe. */
 static void terminate_handler(int sig) {
     /* Re-read the pid rather than caching it: `fork()` changes it, and a
      * cached 1 in a child would make an ordinary process unkillable. */
@@ -879,22 +916,18 @@ static void terminate_handler(int sig) {
         return;
     /* firebox#R3M — declare WHICH default action is killing this process.
      * Placed AFTER the pid-1 return so an unkillable init never claims a
-     * termination it survived, and BEFORE the fprintf so it is recorded even
-     * if stderr is a wedged fd.
-     *
-     * ⚠️ The AQH note above warns that edits here perturb an unattributed
-     * race by making the abort() happen SOONER. This makes it happen very
-     * slightly LATER (one uncontended a_cas), which is the safe direction —
-     * and the pid>=2 `default` arm of #R3M's witness is a frozen control that
-     * measures exactly that outcome. */
+     * termination it survived, and BEFORE the abort() that manufactures the
+     * 127, so the signal is recorded even if this store is all that runs.
+     * (It used to be described as "before the fprintf"; firebox#6DB deleted
+     * that fprintf, so the a_cas is now the whole body.) */
     __fbx_note_terminating(sig);
-    fprintf(stderr, "Program recieved termination signal: %s\n", strsignal(sig));
     abort();
 }
 
 _Noreturn
 static void stop_handler(int sig) {
-    fprintf(stderr, "Program recieved stop signal: %s\n", strsignal(sig));
+    /* firebox#6DB — silent; see the note above terminate_handler. */
+    (void)sig;
     abort();
 }
 

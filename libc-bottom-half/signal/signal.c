@@ -13,21 +13,32 @@
 #include <string.h>
 #include <assert.h>
 
+/* firebox#6DB — SILENT default actions, matching the Linux kernel's.
+ *
+ * ⚠️ THIS FILE IS THE SECOND COPY. The live SIG_DFL polyfill is the one in
+ * libc-top-half/musl/src/signal/sigaction.c — this table's raise()/signal()
+ * were moved there (see the commented-out block below), no
+ * libwasi-emulated-signal.a is produced by our build, and none of the 19
+ * shelves under scripts/wasix-libc/ contains one. It is fixed here anyway
+ * because a duplicate that a grep for the announcement string finds only
+ * HALF of is exactly how an inv-0 defect comes back: the next reader greps,
+ * patches the hit they know about, and the other copy waits for whoever
+ * re-enables this archive. The reasoning lives at the top-half copy; do not fork it here. */
 _Noreturn
 static void core_handler(int sig) {
-    fprintf(stderr, "Program recieved fatal signal: %s\n", strsignal(sig));
+    (void)sig;
     abort();
 }
 
 _Noreturn
 static void terminate_handler(int sig) {
-    fprintf(stderr, "Program recieved termination signal: %s\n", strsignal(sig));
+    (void)sig;
     abort();
 }
 
 _Noreturn
 static void stop_handler(int sig) {
-    fprintf(stderr, "Program recieved stop signal: %s\n", strsignal(sig));
+    (void)sig;
     abort();
 }
 
