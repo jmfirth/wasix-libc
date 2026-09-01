@@ -634,6 +634,40 @@ int timer_settime(timer_t tt, int flags, const struct itimerspec *restrict val,
 	return 0;
 }
 
+/* firebox#QQN — a DISCONTINUOUS CLOCK_REALTIME change must immediately
+ * re-evaluate armed absolute CLOCK_REALTIME timers. POSIX requires it and Linux
+ * re-arms them; without it an absolute timer that the clock jump has already
+ * made overdue still fires only at its ORIGINAL deadline.
+ *
+ * WHY THE MANAGER CANNOT NOTICE ON ITS OWN: fbx_timer_manager computes the
+ * nearest remaining expiry in each timer's own clock domain, converts it to a
+ * CLOCK_MONOTONIC deadline, and blocks in pthread_cond_timedwait. A REALTIME
+ * offset change moves no monotonic deadline and signals nothing, so the manager
+ * sleeps out the stale interval. Before this hook the timer still usually fired
+ * roughly on time -- but only because SOME unrelated wakeup (a spurious condvar
+ * return, the host futex poller, incidental signal processing) happened to land
+ * first. That is correctness resting on an accident, and it lost the signal
+ * ~2.5% of the time (Open POSIX clock_settime/speculative/4-3).
+ *
+ * ⛔ g_lock IS LOAD-BEARING, NOT DEFENSIVE COPYING. Signalling without it
+ * reintroduces the very defect being fixed: the manager could be between
+ * computing min_rem and entering pthread_cond_timedwait, where a lock-free
+ * signal is simply lost and the stale deadline is waited out anyway. Holding
+ * the lock forces the two states to be exhaustive -- either the manager is
+ * already parked on g_cond (it receives this), or it has not yet computed
+ * min_rem (it will compute it from the NEW clock).
+ *
+ * WEAK-LINKED FROM THE CALLER: clock_settime declares this weak, so a program
+ * that never links the timer machinery resolves it to NULL and pays nothing.
+ * Defining it here keeps it in the same translation unit as g_lock/g_cond,
+ * which are static. */
+void __fbx_timers_clock_changed(void)
+{
+	pthread_mutex_lock(&g_lock);
+	if (g_cond_ready) pthread_cond_broadcast(&g_cond);
+	pthread_mutex_unlock(&g_lock);
+}
+
 int timer_gettime(timer_t tt, struct itimerspec *val)
 {
 	if (!val) { errno = EINVAL; return -1; }
