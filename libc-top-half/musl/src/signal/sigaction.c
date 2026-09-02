@@ -7,6 +7,7 @@
 #include <sysexits.h>
 #ifndef __wasilibc_unmodified_upstream
 #include <wasi/api.h>
+#include <wasi/api_firebox.h>  /* firebox#1QR — __wasix_proc_get_sigmask */
 #endif
 #include "syscall.h"
 #include "pthread_impl.h"
@@ -2179,6 +2180,52 @@ void __wasi_init_signals() {
 	 * __sigaction, which __wasi_init_signals can skip entirely when
 	 * the builder has no signal dispositions. */
 	if (default_handler == 0) default_handler = &__default_handler;
+
+	/* firebox#1QR — adopt the blocked signal mask this instance was spawned
+	 * with, BEFORE the disposition replay below.
+	 *
+	 * POSIX says a posix_spawn'ed child inherits its parent's signal mask, and
+	 * that POSIX_SPAWN_SETSIGMASK replaces that inherited value. Neither held on
+	 * the WASIX path: the child is a NEW instance with NEW linear memory, so
+	 * blocked_sigmask starts all-zero and the child ALWAYS began fully
+	 * unblocked — while posix_spawn returned 0, which is the false success
+	 * invariant 0 forbids. proc_spawn2 now records the correct mask host-side
+	 * (the parent's live mask, or attr->__mask when SETSIGMASK was requested);
+	 * this is where the child collects it.
+	 *
+	 * Order matters: the mask must be in place before any disposition is
+	 * replayed and before __wasi_callback_signal registers the dispatcher below,
+	 * so no signal can be dispatched against the wrong mask.
+	 *
+	 * ⛔ BEST-EFFORT, NEVER FATAL — the firebox#9AV posture the disposition loop
+	 * below documents at length. __WASI_ERRNO_NOENT is the ordinary answer for a
+	 * root process and for any host predating the call, and an old host does not
+	 * export it at all; none of those may keep the guest from running. A
+	 * non-Success simply leaves this instance's own startup mask alone, which is
+	 * the pre-fix behaviour: the fix goes dormant, it does not go wrong.
+	 *
+	 * ⛔ NOENT means ABSENT, not "the empty mask". They are written differently on
+	 * purpose: absent leaves the mask untouched, whereas a recorded value of 0
+	 * is applied, because a parent asking for sigemptyset asked for a GUARANTEED
+	 * clean mask and must get one. Folding the two would recreate the very bug
+	 * for the callers who were most explicit.
+	 *
+	 * Bit n of the u64 is signal n+1 — the same indexing blocked_sigmask uses,
+	 * and 64 bits is all of _NSIG. It is applied through pthread_sigmask so the
+	 * SIGKILL/SIGSTOP invariant (firebox#H2F) and the pending drain are handled
+	 * by the single authority that owns them rather than duplicated here. */
+	{
+		uint64_t spawn_mask;
+		if (__wasix_proc_get_sigmask(&spawn_mask) == __WASI_ERRNO_SUCCESS) {
+			sigset_t set;
+			sigemptyset(&set);
+			for (int sig = 1; sig <= 64 && sig < _NSIG; sig++) {
+				if (spawn_mask & (1ULL << (sig - 1)))
+					sigaddset(&set, sig);
+			}
+			(void)pthread_sigmask(SIG_SETMASK, &set, 0);
+		}
+	}
 
     __wasi_size_t signal_count;
     err = __wasi_proc_signals_sizes_get(&signal_count);

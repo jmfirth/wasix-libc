@@ -140,6 +140,37 @@ __wasi_errno_t __wasix_sched_check_owner(uint32_t pid);
  * Host: lib/wasix/src/syscalls/wasix/resource_set_nofile.rs. */
 __wasi_errno_t __wasix_resource_set_nofile(uint64_t soft, uint64_t hard);
 
+/* firebox#1QR — the blocked signal mask a freshly instantiated guest must START
+ * WITH: POSIX signal-mask inheritance across posix_spawn(3), plus the
+ * POSIX_SPAWN_SETSIGMASK override. The WASIX posix_spawn path honoured neither —
+ * it returned 0 and the child ran with an all-zero mask, because the child is a
+ * NEW instance with NEW linear memory and nothing carried the mask over. The
+ * mask cannot ride proc_spawn2 (seven params, none a mask; widening it is an
+ * instantiation-time link error for every prebuilt .webc) and cannot ride the
+ * disposition array (a two-variant enum with no `blocked` state — riding it
+ * would conflate *blocked*, which pends, with *ignored*, which discards). So the
+ * host reads the PARENT's live blocked_sigmask at proc_spawn2, records it on the
+ * child, and the child pulls it back HERE, once, from __wasi_init_signals,
+ * before it replays the inherited dispositions.
+ *
+ * `mask` is a single uint64_t: bit n is signal n+1, the same indexing
+ * struct pthread.blocked_sigmask uses (64 bits is all of _NSIG, and it is the
+ * same 8 little-endian bytes on wasm32 — two unsigned long — and wasm64 — one).
+ *
+ * Returns __WASI_ERRNO_SUCCESS (0) and writes *mask when a mask was recorded, or
+ * __WASI_ERRNO_NOENT WITHOUT writing *mask when none was — a root process, or a
+ * child spawned by a host predating this call.
+ *
+ * ⛔ PRESENCE IS CARRIED BY THE ERRNO, NEVER BY THE VALUE. Success with *mask == 0
+ * is a REAL answer: a parent that called posix_spawnattr_setsigmask() with an
+ * empty set asked for a GUARANTEED clean mask. Treating absent as empty
+ * recreates firebox#1QR for exactly those callers; treating empty as absent
+ * leaves the child holding the parent's mask instead. The caller must be
+ * fail-soft (leave its own mask alone on any non-Success), never fatal — the
+ * firebox#9AV posture for the disposition replay this sits in front of.
+ * Host: lib/wasix/src/syscalls/wasix/proc_get_sigmask.rs. */
+__wasi_errno_t __wasix_proc_get_sigmask(uint64_t *mask);
+
 #ifdef __cplusplus
 }
 #endif

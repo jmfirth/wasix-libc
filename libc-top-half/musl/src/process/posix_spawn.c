@@ -306,6 +306,16 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 				  char *const argv[restrict], char *const envp[restrict],
 				  uint8_t use_path)
 {
+	/* POSIX: `attrp` may be NULL, meaning "all defaults". The fork-based path
+	 * normalises it (`args.attr = attr ? attr : &(const posix_spawnattr_t){0}`)
+	 * but this one never did, so every `attr->__flags` read below — and the
+	 * SETSIGDEF read that has been here all along — dereferenced NULL for the
+	 * extremely ordinary `posix_spawn(&pid, path, NULL, NULL, argv, envp)`.
+	 * Normalise identically, at the top, so the whole function can read `attr`
+	 * unconditionally the way the fork path does. */
+	const posix_spawnattr_t __fbx_default_attr = {0};
+	if (!attr) attr = &__fbx_default_attr;
+
 	int nfdops = 0;
 	__wasi_proc_spawn_fd_op_t *fdops = NULL;
 
@@ -458,10 +468,76 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 	char *combined_argv = __wasilibc_exec_combine_strings(argv);
 	char *combined_env = __wasilibc_exec_combine_strings(envp);
 
+	/* firebox#1QR — POSIX_SPAWN_SETSIGMASK.
+	 *
+	 * The child's blocked mask travels to the host as the CALLING THREAD'S LIVE
+	 * `blocked_sigmask`, which the runtime reads out of guest memory at the top
+	 * of `proc_spawn2` through the layout-independent `__fbx_main_pthread` /
+	 * `__fbx_blocked_off` anchors (firebox#KKR) and records on the child, where
+	 * `__wasi_init_signals` pulls it back. That read alone implements POSIX mask
+	 * INHERITANCE — the no-flag case, and the larger population, since the child
+	 * is a fresh instance whose mask would otherwise start all-zero.
+	 *
+	 * `SETSIGMASK` therefore only has to make the value the host reads be
+	 * `attr->__mask` for the duration of the one host call. There is no room in
+	 * the syscall for it: `proc_spawn2`'s witx signature has seven params and
+	 * none is a mask, widening it is an instantiation-time link error for every
+	 * prebuilt `.webc`, and the disposition array is a two-variant enum with no
+	 * `blocked` state (riding it would conflate *blocked* with *ignored*).
+	 *
+	 * ⛔ WHY THE FIELD IS WRITTEN DIRECTLY AND NOT VIA `pthread_sigmask`.
+	 * `pthread_sigmask(SIG_SETMASK, …)` calls `__wasm_drain_pending_sigs()`
+	 * (pthread_sigmask.c:115) because a SETMASK may lift blocks. Using it here
+	 * would DELIVER, inside `posix_spawn`, every signal the parent had
+	 * deliberately blocked that `attr->__mask` does not — and the common idiom is
+	 * exactly that shape: a parent with SIGCHLD blocked spawning with
+	 * `sigemptyset` to hand the child a guaranteed clean mask (libuv, cmake).
+	 * Running the parent's SIGCHLD handler mid-spawn is a behaviour Linux does
+	 * not have. Writing the words directly and restoring them immediately keeps
+	 * every guest-side delivery point out of the window: the only call in
+	 * between is the host one.
+	 *
+	 * ⚠️ RESIDUAL, and it is filed rather than hidden: the HOST can still read
+	 * the temporarily-swapped mask during that single call (`proc_spawn2` runs
+	 * `do_pending_operations` at its top, and the #KKR no-handler routing may run
+	 * concurrently), so a signal that is pending AND in `parent_mask &
+	 * ~attr->__mask` could be routed as deliverable. Closing that needs a
+	 * parent-side staging import so the parent never has to hold a foreign mask
+	 * at all; see the follow-up task. The window is one host call wide and
+	 * strictly smaller than the pre-fix behaviour, which was to drop the flag
+	 * entirely and return 0.
+	 *
+	 * SIGKILL/SIGSTOP are masked off on the way in, the same invariant
+	 * `pthread_sigmask` enforces (firebox#H2F): `blocked_sigmask` must never
+	 * carry them, whoever writes it. */
+	const size_t __fbx_nwords = _NSIG / (8 * sizeof(long));
+	struct pthread *__fbx_self = __pthread_self();
+	unsigned long __fbx_saved_mask[_NSIG / (8 * sizeof(long))];
+	int __fbx_mask_swapped = 0;
+	if (__fbx_self && (attr->__flags & POSIX_SPAWN_SETSIGMASK)) {
+		const size_t kw = (size_t)(SIGKILL - 1) / (8 * sizeof(long));
+		const unsigned long kb = 1UL << ((SIGKILL - 1) % (8 * sizeof(long)));
+		const size_t sw = (size_t)(SIGSTOP - 1) / (8 * sizeof(long));
+		const unsigned long sb = 1UL << ((SIGSTOP - 1) % (8 * sizeof(long)));
+		for (size_t i = 0; i < __fbx_nwords; i++) {
+			unsigned long nw = attr->__mask.__bits[i];
+			if (i == kw) nw &= ~kb;
+			if (i == sw) nw &= ~sb;
+			__fbx_saved_mask[i] = __fbx_self->blocked_sigmask[i];
+			__fbx_self->blocked_sigmask[i] = nw;
+		}
+		__fbx_mask_swapped = 1;
+	}
+
 	__wasi_pid_t ret_pid;
 	int err = __wasi_proc_spawn2(
 		path, combined_argv, combined_env, fdops, nfdops, signals, nsignals,
 		use_path ? __WASI_BOOL_TRUE : __WASI_BOOL_FALSE, getenv("PATH"), &ret_pid);
+
+	if (__fbx_mask_swapped) {
+		for (size_t i = 0; i < __fbx_nwords; i++)
+			__fbx_self->blocked_sigmask[i] = __fbx_saved_mask[i];
+	}
 
 	free(combined_argv);
 	free(combined_env);
