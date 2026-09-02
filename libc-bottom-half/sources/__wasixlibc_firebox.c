@@ -231,3 +231,18 @@ __wasi_errno_t __wasix_sched_check_owner(uint32_t pid){return (uint16_t)__import
  * fixed u64/u64 signature, registered identically in wasix_32v1 and wasix_64v1. */
 int32_t __imported_wasix_fbx_resource_set_nofile(int64_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("resource_set_nofile")));
 __wasi_errno_t __wasix_resource_set_nofile(uint64_t soft,uint64_t hard){return (uint16_t)__imported_wasix_fbx_resource_set_nofile((int64_t)soft,(int64_t)hard);}
+
+/* firebox#1QR — the blocked signal mask a freshly instantiated guest must adopt
+ * at startup, i.e. POSIX signal-mask inheritance across posix_spawn plus
+ * POSIX_SPAWN_SETSIGMASK. A spawned child is a NEW instance with NEW linear
+ * memory, so its struct pthread.blocked_sigmask starts all-zero and the parent's
+ * mask was lost outright; proc_spawn2 records the right value host-side and
+ * __wasi_init_signals pulls it back through this one call. `mask` points at a
+ * single guest uint64_t (bit n = signal n+1, covering all of _NSIG), so the
+ * pointer is intptr_t for the usual wasix_32v1/wasix_64v1 width-agnosticism.
+ * ⛔ PRESENCE IS THE ERRNO, NEVER THE VALUE: __WASI_ERRNO_NOENT means nothing was
+ * recorded (a root process, or an older host) and *mask is NOT written, while
+ * Success with a value of 0 is a real, requested empty mask. See api_firebox.h.
+ * Host: lib/wasix/src/syscalls/wasix/proc_get_sigmask.rs. */
+int32_t __imported_wasix_fbx_proc_get_sigmask(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_get_sigmask")));
+__wasi_errno_t __wasix_proc_get_sigmask(uint64_t *mask){return (uint16_t)__imported_wasix_fbx_proc_get_sigmask((intptr_t)mask);}
