@@ -68,6 +68,10 @@ __wasi_errno_t __wasix_path_filestat_get_ext(__wasi_fd_t fd,uint32_t flags,const
    only the public masks and forwards the path operation atomically. */
 int32_t __imported_wasix_fbx_path_access(int32_t,intptr_t,intptr_t,int32_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_access")));
 __wasi_errno_t __wasix_path_access(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t amode,uint32_t flags){return (uint16_t)__imported_wasix_fbx_path_access((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)amode,(int32_t)flags);}
+/* firebox#1K9 — fchdir(2). One i32 argument, so ONE declaration resolves under
+   both wasix_32v1 and wasix_64v1 with no width-dependent operand. */
+int32_t __imported_wasix_fbx_fd_chdir(int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_chdir")));
+__wasi_errno_t __wasix_fd_chdir(__wasi_fd_t fd){return (uint16_t)__imported_wasix_fbx_fd_chdir((int32_t)fd);}
 int32_t __imported_wasix_fbx_path_mknod(int32_t,intptr_t,intptr_t,int32_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_mknod")));
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t mode,uint64_t dev){return (uint16_t)__imported_wasix_fbx_path_mknod((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)mode,(int64_t)dev);}
 

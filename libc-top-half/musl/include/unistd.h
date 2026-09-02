@@ -122,9 +122,14 @@ int ftruncate(int, off_t);
 int access(const char *, int);
 int faccessat(int, const char *, int, int);
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no fchdir */
+/* firebox#1K9: upstream gates this out as "WASI has no fchdir". Plain WASI has
+ * no cwd at all, so that is true THERE; Firebox's runtime owns a per-process
+ * cwd and a descriptor table carrying each directory's guest-absolute path, so
+ * fchdir is a real operation here (libc-bottom-half/sources/fchdir.c). Leaving
+ * it declared-out made gnulib substitute a name-table emulation that answers
+ * ENOTDIR for any fd it did not open itself, which is why GNU find printed
+ * correct results and then exited 1. */
 int fchdir(int);
-#endif
 int chdir(const char *);
 char *getcwd(char *, size_t);
 
