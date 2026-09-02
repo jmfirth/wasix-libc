@@ -69,6 +69,14 @@ __wasi_errno_t __wasix_path_filestat_get_ext(__wasi_fd_t fd, uint32_t flags, con
  * must be emitted under a NEW generation; preserving the prior generation is
  * invalid even though existing imports remain source-compatible. */
 __wasi_errno_t __wasix_path_access(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t amode, uint32_t flags);
+/* firebox#1K9 — POSIX fchdir(2): move the process cwd to an already-open
+ * directory DESCRIPTOR. The runtime is the only party that can answer this
+ * without consulting any ancestor's permission bits, because it holds both the
+ * cwd and the descriptor table in which each directory inode carries its
+ * guest-absolute path. Errors are the POSIX set: EBADF (no such descriptor),
+ * ENOTDIR (the descriptor is not a directory). See fchdir.c for why the guest
+ * does not reconstruct the path itself. */
+__wasi_errno_t __wasix_fd_chdir(__wasi_fd_t fd);
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode, uint64_t dev);
 
 /* fd_ioctl ASYMMETRY: on wasm32 __wasi_fd_ioctl is part of the committed generation

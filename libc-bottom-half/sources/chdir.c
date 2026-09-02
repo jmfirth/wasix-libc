@@ -72,6 +72,41 @@ int chdir_legacy(const char *path)
     return 0;
 }
 
+// firebox#1K9: re-read the runtime's authoritative cwd into the libc mirror.
+//
+// wasi-libc resolves relative paths in userspace against `__wasilibc_cwd`, so
+// any operation that moves the cwd host-side WITHOUT a path in hand has to
+// refresh the mirror or every later relative path resolves against a stale
+// directory. `chdir()` does not need this — it has the path and feeds it to
+// chdir_legacy. `fchdir()` (fchdir.c) moves the cwd by DESCRIPTOR and has no
+// path, so it calls here.
+//
+// Returns 0 on success. On failure the mirror is left explicitly UNSYNCED so
+// the next make_absolute() below re-reads it, rather than leaving a stale cwd
+// sitting behind a value that looks current.
+int __wasilibc_resync_cwd(void)
+{
+    // getcwd(NULL, 0) asks the runtime and mallocs to fit (getcwd.c), so there
+    // is no buffer size to guess and no truncation case to get wrong.
+    char *fresh = getcwd(NULL, 0);
+    if (fresh == NULL) {
+        __wasilibc_cwd_lock();
+        __wasilibc_cwd_is_synced = 0;
+        __wasilibc_cwd_unlock();
+        return -1;
+    }
+
+    __wasilibc_cwd_lock();
+    char *prev_cwd = __wasilibc_cwd;
+    __wasilibc_cwd = fresh;
+    if (__wasilibc_cwd_mallocd)
+        free(prev_cwd);
+    __wasilibc_cwd_mallocd = 1;
+    __wasilibc_cwd_is_synced = 1;
+    __wasilibc_cwd_unlock();
+    return 0;
+}
+
 static const char *make_absolute(const char *path) {
     // if the libc has not synced with the runtime yet, call into the runtime to get the cwd
     if (!__wasilibc_cwd_is_synced) {
