@@ -179,6 +179,39 @@ __wasi_errno_t __wasix_resource_set_nofile(uint64_t soft, uint64_t hard);
  * Host: lib/wasix/src/syscalls/wasix/proc_get_sigmask.rs. */
 __wasi_errno_t __wasix_proc_get_sigmask(uint64_t *mask);
 
+/* firebox#BZ5 — stage the process-group id that POSIX_SPAWN_SETPGROUP asks the
+ * NEXT `proc_spawn2` from THIS THREAD to stamp on its child, before that child
+ * can run.
+ *
+ * The WASIX `posix_spawn` path dropped SETPGROUP and returned 0: the child
+ * landed in the parent's group while the caller was told it was in the
+ * requested one. `pgid` is what the host's group signal scan delivers on, so a
+ * job-control `kill(-pgid, SIGINT)` hit the wrong set of processes.
+ *
+ * The request cannot be applied by the parent AFTER the spawn — `proc_spawn2`
+ * returns while the child is already dispatched, which re-opens the very race
+ * SETPGROUP exists to close — and it cannot ride firebox#1QR's live-state
+ * channel, because `pgid == 0` ("make the CHILD a group leader") has no
+ * representation in the parent's own pgid. So it is staged here and consumed by
+ * the next `proc_spawn2`, which resolves it (`0` -> the child's own pid) and
+ * stamps it on the child's process record BEFORE dispatch.
+ *
+ * ⛔ STAGING IS PER-THREAD AND CONSUMED EXACTLY ONCE. `proc_spawn2` TAKES the
+ * slot at its top, on every path including its early error returns, so a staged
+ * value can never leak into a later, unrelated spawn. A single `posix_spawn`
+ * runs on one guest thread, so per-thread staging is race-free by construction
+ * against a concurrent spawn from a sibling thread — per-PROCESS staging would
+ * not be.
+ *
+ * `pgid` is a `pid_t` on the wire as `uint32_t`; the host recovers the sign.
+ * Returns __WASI_ERRNO_SUCCESS when the request was recorded, or
+ * __WASI_ERRNO_INVAL for a negative `pgid` (POSIX's EINVAL for `setpgid`).
+ * ⛔ The caller must NOT be fail-soft: a request that cannot be recorded has to
+ * surface as `posix_spawn`'s return value (EINVAL, or ENOSYS for a runtime that
+ * does not export this at all), never as the 0 that made this a fail-open.
+ * Host: lib/wasix/src/syscalls/wasix/proc_stage_spawn_pgid.rs. */
+__wasi_errno_t __wasix_proc_stage_spawn_pgid(uint32_t pgid);
+
 #ifdef __cplusplus
 }
 #endif
