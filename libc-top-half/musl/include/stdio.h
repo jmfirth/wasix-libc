@@ -266,9 +266,13 @@ FILE *fopencookie(void *, const char *, cookie_io_functions_t);
 #endif
 
 #if defined(_LARGEFILE64_SOURCE) || defined(_GNU_SOURCE)
-#ifdef __wasilibc_unmodified_upstream /* WASI has no temp directories */
+/* firebox#W0Q: tmpfile64 is a plain alias onto tmpfile, which is DEFINED in
+ * libc.a and DECLARED above -- and the four aliases directly below it in this
+ * same #if have always been unconditional. The "WASI has no temp directories"
+ * guard is doubly misapplied here: its premise is false (#P47 MEASURED /tmp
+ * working in-guest) and it is not an LFS question at all. Hiding it only means
+ * a _GNU_SOURCE program naming tmpfile64 fails to COMPILE. */
 #define tmpfile64 tmpfile
-#endif
 #define fopen64 fopen
 #define freopen64 freopen
 #define fseeko64 fseeko

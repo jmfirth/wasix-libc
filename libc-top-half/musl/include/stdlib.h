@@ -214,14 +214,19 @@ double strtod_l(const char *__restrict, char **__restrict, struct __locale_struc
 long double strtold_l(const char *__restrict, char **__restrict, struct __locale_struct *);
 #endif
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no temp directories */
+/* firebox#W0Q: these four are plain aliases onto mkstemp/mkostemp/mkstemps/
+ * mkostemps, all MEASURED defined in libc.a and declared above. The
+ * "WASI has no temp directories" guard that hid them is false (#P47 MEASURED
+ * /tmp working in-guest) and is not an LFS question; the sysroot already ships
+ * 51 other LFS64 aliases under _GNU_SOURCE, so this block was an inconsistency
+ * inside an existing policy, not the policy. The feature-test conditions are
+ * upstream musl's, unchanged. */
 #if defined(_LARGEFILE64_SOURCE) || defined(_GNU_SOURCE)
 #define mkstemp64 mkstemp
 #define mkostemp64 mkostemp
 #if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
 #define mkstemps64 mkstemps
 #define mkostemps64 mkostemps
-#endif
 #endif
 #endif
 
