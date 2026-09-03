@@ -12,6 +12,7 @@
 #include "syscall.h"
 #else
 #include <wasi/api.h>
+#include <wasi/api_firebox.h>  /* firebox#BZ5 — __wasix_proc_stage_spawn_pgid */
 #endif
 #include "lock.h"
 #include "pthread_impl.h"
@@ -462,6 +463,62 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 					.disp = __WASI_DISPOSITION_DEFAULT,
 				};
 			}
+		}
+	}
+
+	/* firebox#BZ5 — POSIX_SPAWN_SETPGROUP.
+	 *
+	 * This path read `attr->__flags` exactly once — for POSIX_SPAWN_SETSIGDEF
+	 * (firebox#1QR added the second read, for SETSIGMASK) — and dropped
+	 * SETPGROUP outright while returning 0. The caller asked for the child to
+	 * be in a named process group before it could run, `posix_spawn` said yes,
+	 * and the child landed in the parent's group instead. That is the false
+	 * success invariant 0 forbids, and it is not cosmetic: `pgid` is what the
+	 * host's `proc_signal` group scan delivers on, so a job-control shell's
+	 * `kill(-pgid, SIGINT)` — and terminal signal delivery to the foreground
+	 * group — targeted the wrong set of processes.
+	 *
+	 * ⛔ WHY THE PARENT CANNOT SIMPLY CALL `setpgid(child, pgrp)` AFTERWARDS.
+	 * `proc_spawn2` ends at `dispatch_exec_task`, which hands the child to the
+	 * task manager and returns WITHOUT waiting for it to begin — so the child
+	 * is already runnable by the time this function regains control. A
+	 * parent-side `setpgid` after the syscall therefore re-opens exactly the
+	 * window SETPGROUP exists to close; POSIX has the child do it between
+	 * `fork` and `exec` for that reason, and the parent's half of the classic
+	 * shell double-`setpgid` is a race-narrower, never a substitute.
+	 *
+	 * ⛔ AND IT CANNOT RIDE firebox#1QR's TRANSPORT. That one works because the
+	 * mask travels as the parent's OWN live `blocked_sigmask`, which the host
+	 * reads out of guest memory. There is no equivalent for pgid: `__pgrp == 0`
+	 * means "make the CHILD a group leader", which the parent's own pgid cannot
+	 * represent, and temporarily moving the parent between groups would open a
+	 * worse window than the one it closes.
+	 *
+	 * So the request is STAGED on the calling thread host-side, immediately
+	 * before the one syscall that consumes it. Per-THREAD, not per-process: a
+	 * single `posix_spawn` runs entirely on one guest thread, so two threads
+	 * spawning concurrently cannot see each other's staged value. `proc_spawn2`
+	 * takes the slot unconditionally at its top and stamps the resolved pgid on
+	 * the child's `WasiProcess` BEFORE dispatch — the child cannot execute an
+	 * instruction outside its requested group.
+	 *
+	 * ⛔ AN UNHONOURABLE REQUEST MUST NOT RETURN 0. `posix_spawn` reports its
+	 * failure through the RETURN VALUE, not `errno`. A negative `__pgrp` is
+	 * EINVAL (POSIX lists it for `setpgid`, and the host applies the same
+	 * argument rules); anything else that keeps the host from recording the
+	 * request — notably a runtime predating this staging call — is ENOSYS, the
+	 * POSIX answer for an unsupported optional feature. Reporting either beats
+	 * the pre-fix 0, which told the caller a guarantee held when it did not. */
+	if (attr->__flags & POSIX_SPAWN_SETPGROUP)
+	{
+		__wasi_errno_t pgerr =
+			__wasix_proc_stage_spawn_pgid((uint32_t)attr->__pgrp);
+		if (pgerr != __WASI_ERRNO_SUCCESS)
+		{
+			free(signals);
+			if (fdops)
+				free(fdops);
+			return pgerr == __WASI_ERRNO_INVAL ? EINVAL : ENOSYS;
 		}
 	}
 

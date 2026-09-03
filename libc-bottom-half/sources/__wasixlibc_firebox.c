@@ -246,3 +246,20 @@ __wasi_errno_t __wasix_resource_set_nofile(uint64_t soft,uint64_t hard){return (
  * Host: lib/wasix/src/syscalls/wasix/proc_get_sigmask.rs. */
 int32_t __imported_wasix_fbx_proc_get_sigmask(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_get_sigmask")));
 __wasi_errno_t __wasix_proc_get_sigmask(uint64_t *mask){return (uint16_t)__imported_wasix_fbx_proc_get_sigmask((intptr_t)mask);}
+
+/* firebox#BZ5 — the process-group id POSIX_SPAWN_SETPGROUP wants stamped on the
+ * next child THIS THREAD spawns. The WASIX posix_spawn path dropped the flag and
+ * returned 0, so the child ran in the parent's group while the caller believed
+ * otherwise — and pgid is what the host's group signal scan delivers on, so
+ * job-control `kill(-pgid, ...)` targeted the wrong processes. It cannot be
+ * applied after the syscall (proc_spawn2 returns with the child already
+ * dispatched, re-opening the race the flag exists to close) and cannot ride
+ * firebox#1QR's live-state channel (`__pgrp == 0` means "make the CHILD a
+ * leader", which the parent's own pgid cannot express), so it is staged here and
+ * consumed — exactly once, on every proc_spawn2 path — before the child runs.
+ * All-scalar, so it is width-independent and registered identically in
+ * wasix_32v1 and wasix_64v1. ⛔ A non-Success answer must reach the caller as
+ * posix_spawn's return value, never be swallowed into a 0.
+ * Host: lib/wasix/src/syscalls/wasix/proc_stage_spawn_pgid.rs. */
+int32_t __imported_wasix_fbx_proc_stage_spawn_pgid(int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_stage_spawn_pgid")));
+__wasi_errno_t __wasix_proc_stage_spawn_pgid(uint32_t pgid){return (uint16_t)__imported_wasix_fbx_proc_stage_spawn_pgid((int32_t)pgid);}
