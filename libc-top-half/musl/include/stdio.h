@@ -199,10 +199,28 @@ char *ctermid(char *);
 #endif
 
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no temp directories */
+/* P_tmpdir is a plain string constant, and /tmp is real here (MEASURED in-guest,
+ * firebox #P47). Hiding it protected nothing: it means `check_writable_directory(
+ * P_tmpdir)` fails to COMPILE, the same conformance gap #P47 closed for
+ * TMP_MAX/L_tmpnam, and a caller cannot work around a macro that is not there.
+ * XSI requires <stdio.h> to define it, so it is exposed under exactly the
+ * feature-test postures upstream musl used. MEASURED: sole blocker for GNU nano
+ * 8.7.1 (src/files.c:1473). (firebox #85Y)
+ *
+ * ⛔ tempnam() below deliberately STAYS in the dead branch: #P47 ruled that
+ * nothing declares it and its absence is therefore already honest (MEASURED:
+ * UNDEFINED in libc.a). A macro is not a declaration -- that is why the two
+ * halves of this upstream block get different answers, and why the branch is
+ * SPLIT rather than opened.
+ */
 #if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
  || defined(_BSD_SOURCE)
 #define P_tmpdir "/tmp"
+#endif
+
+#ifdef __wasilibc_unmodified_upstream /* WASI has no temp directories */
+#if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
+ || defined(_BSD_SOURCE)
 char *tempnam(const char *, const char *);
 #endif
 #endif
