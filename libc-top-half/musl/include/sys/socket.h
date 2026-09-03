@@ -23,6 +23,38 @@ extern "C" {
 
 #include <bits/socket.h>
 
+/* firebox#E1F -- ADJUDICATED: `struct cmsghdr` and the CMSG_ / SCM_ family
+ * below STAY AMPUTATED, deliberately. Recorded here so the next sweep does not
+ * re-open it, in the same spirit as #P47's pty adjudication at stdlib.h:138.
+ *
+ * The obvious read is that this is an accident -- `struct msghdr` IS complete
+ * here (the `#else` arm's <__struct_msghdr.h> carries msg_control and
+ * msg_controllen), so AF_UNIX fd-passing looks one struct away from compiling.
+ * It is not. THERE IS NO ANCILLARY-DATA CHANNEL ANYWHERE BELOW THIS HEADER:
+ *   - the WASIX ABI has none. `__wasi_sock_send(fd, si_data, si_data_len,
+ *     si_flags, &so_datalen)` and `__wasi_sock_recv` take iovecs and flags and
+ *     nothing else; no import in api_wasix.h carries a descriptor as payload
+ *     (`sock_send_file` is sendfile(2), not SCM_RIGHTS).
+ *   - the guest wrappers silently drop it. cloudlibc's sendmsg.c reads
+ *     msg_iov/msg_iovlen/msg_name and NEVER READS msg_control; recvmsg.c never
+ *     writes msg_controllen -- it leaves whatever the caller put there.
+ *   - the host has no notion of it: `scm_rights`/`cmsg`/`ancillary` do not
+ *     appear anywhere in the wasmer fork's lib/wasix or lib/virtual-net.
+ *
+ * So completing this struct would not enable fd-passing; it would make
+ * fd-passing COMPILE AND SILENTLY DO NOTHING. sendmsg() would return the byte
+ * count as success with the control buffer ignored, and the receiver's
+ * CMSG_FIRSTHDR() would read an msg_controllen nobody set. That is a false
+ * success -- invariant 0 rates it strictly worse than the absence -- and a
+ * fail-open under invariant 3, where broken is indistinguishable from working.
+ * The honest compile error is the better artifact until the transport exists.
+ *
+ * TO RETIRE THIS: the fix is bottom-up, not here. Either add an ancillary
+ * channel to the WASIX sock_send/sock_recv ABI and thread it through
+ * virtual-net, or -- the cheap honest step available today -- make sendmsg()
+ * fail with EOPNOTSUPP when msg_control != NULL && msg_controllen > 0 and make
+ * recvmsg() zero msg_controllen on return. Only after the transport lands does
+ * un-amputating the header stop being a lie. */
 #ifdef __wasilibc_unmodified_upstream /* Use alternate WASI libc headers */
 struct msghdr {
 	void *msg_name;

@@ -39,9 +39,24 @@
 
 #include <bits/limits.h>
 
-#ifdef __wasilibc_unmodified_upstream /* WASI has no pipes */
+/* firebox#E1F: Firebox has pipes -- `pipe`/`pipe2`/`popen` are defined in
+ * libc.a on every shipped shelf (llvm-nm, measured) and route to the host
+ * `fd_pipe` import. PIPE_BUF is a GUARANTEE, not a capacity readout: POSIX
+ * requires only that a write of <= PIPE_BUF bytes be atomic, and permits any
+ * value >= _POSIX_PIPE_BUF (512). The guarantee holds here with room to spare
+ * -- `fd_pipe_internal` builds the pipe with `Pipe::new()`, i.e. capacity
+ * `None`/unbounded, and `PipeTx::write` hands the WHOLE buffer to the channel
+ * as one message with no backpressure split (wasmer fork,
+ * lib/virtual-fs/src/pipe.rs), so a single write of ANY length is indivisible.
+ * Keeping upstream musl's 4096 therefore understates a stronger property,
+ * which is the safe direction for a floor guarantee, and keeps the value
+ * byte-identical to musl-on-Linux (invariant 2).
+ *   ⚠ `fpathconf(fd, _PC_PIPE_BUF)` still returns -1 via its own
+ *   __wasilibc_unmodified_upstream site in src/conf/fpathconf.c. That is now a
+ *   divergence between two standard discovery mechanisms, it is a .c change
+ *   rather than a header one, and it is deliberately NOT made here -- a source
+ *   edit invalidates every shelf, so it belongs with a rebuild. */
 #define PIPE_BUF 4096
-#endif
 #define FILESIZEBITS 64
 #ifndef NAME_MAX
 #define NAME_MAX 255
@@ -91,10 +106,24 @@
 #endif
 #define CHARCLASS_NAME_MAX 14
 #define COLL_WEIGHTS_MAX 2
+/* firebox#E1F: "WASI has no shell commands" is false -- `system` and `popen`
+ * are defined in libc.a on every shipped shelf (llvm-nm, measured). LINE_MAX is
+ * the POSIX utility input-line limit that text tools (awk, sed, getconf) read;
+ * it is a plain limit constant, not a capability claim, and 4096 is upstream
+ * musl's value verbatim, so a guest sees exactly what musl-on-Linux gives it
+ * (invariant 2). Note this introduces NO new inconsistency:
+ * `sysconf(_SC_LINE_MAX)` returns -1, but that -1 is upstream musl's own
+ * answer (it predates the WASI port -- present in commit 320054e, the initial
+ * import), so header-4096-plus-sysconf-indeterminate IS the Linux behaviour we
+ * are matching, not an amputation artefact.
+ *
+ * EXPR_NEST_MAX stays amputated by SCOPE, not by verdict -- it is the same
+ * class and very likely the same answer, but this lane was scoped to LINE_MAX
+ * and did not measure it. */
 #ifdef __wasilibc_unmodified_upstream /* WASI has no shell commands */
 #define EXPR_NEST_MAX 32
-#define LINE_MAX 4096
 #endif
+#define LINE_MAX 4096
 #define RE_DUP_MAX 255
 
 #define NL_ARGMAX 9

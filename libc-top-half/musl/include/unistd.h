@@ -345,11 +345,64 @@ pid_t gettid(void);
 #define _POSIX_ADVISORY_INFO    _POSIX_VERSION
 #define _POSIX_CHOWN_RESTRICTED 1
 #define _POSIX_IPV6             _POSIX_VERSION
+/* firebox#E1F: this site's premise -- "WASI has no processes, mmap, or mq" --
+ * is now false for two of its four members, and the two are split out below
+ * rather than un-gating the block, because the OTHER two are still honest
+ * absences and un-gating all four is the exact fail-open invariant 0 forbids.
+ *
+ * _POSIX_JOB_CONTROL STAYS AMPUTATED, and that is a measurement, not caution.
+ * The pieces exist and the WHOLE does not: setpgid/getpgrp are host-backed
+ * (firebox#HS6/#Y42), but there is NO session model host-side at all --
+ * `WasiProcess` carries a `pgid` and no `sid` (see setsid.c's #Y42 header,
+ * which says so in its own words), so setsid() reports a session it did not
+ * create, and `__wasilibc_pgrp` -- the entire backing store for
+ * tcsetpgrp/tcgetpgrp -- is PER-PROCESS USERSPACE STATE, so one process's
+ * tcsetpgrp() is invisible to every other (tcsetpgrp.c, #Y42: "It is still a
+ * fiction, and an honest gap rather than a fixed one"). A shell that read
+ * `_POSIX_JOB_CONTROL` as 1 would take the job-control path and get a
+ * success from an operation nobody can observe. Retiring this amputation
+ * requires the host session model, not a header edit.
+ *   ⚠ `sysconf(_SC_JOB_CONTROL)` returns 1 today (src/conf/sysconf.c) and is
+ *   therefore ALREADY making the claim this macro declines to make. That is a
+ *   real invariant-4 divergence between two standard discovery mechanisms; it
+ *   is pre-existing, it is NOT fixed here, and it wants its own task.
+ *
+ * _POSIX_MEMORY_PROTECTION stays here for the reason the #SAH block below
+ * states: it takes the POSIX 0 sentinel, defined unconditionally further down.
+ */
 #ifdef __wasilibc_unmodified_upstream /* WASI has no processes, mmap, or mq */
 #define _POSIX_JOB_CONTROL      1
 #define _POSIX_MAPPED_FILES     _POSIX_VERSION
 #define _POSIX_MEMORY_PROTECTION _POSIX_VERSION
 #define _POSIX_MESSAGE_PASSING  _POSIX_VERSION
+#endif
+/* firebox#E1F: POSIX message queues are REAL here. firebox#KS9 added a guest
+ * named-queue implementation (libc-top-half/musl/src/mq/mq_impl.c); `mq/*.c`
+ * is an unconditional entry in the Makefile source list, and `mq_open`,
+ * `mq_send`, `mq_receive`, `mq_close`, `mq_unlink` are DEFINED in libc.a on
+ * every shelf this repo ships -- wasm32 and wasm64, threads and nothreads
+ * (llvm-nm, measured). #KS9 already un-amputated the matching MQ_PRIO_MAX in
+ * <limits.h>, and sysconf(_SC_MESSAGE_PASSING) already answers _POSIX_VERSION,
+ * so the compile-time macro was the one discovery mechanism still saying no. */
+#define _POSIX_MESSAGE_PASSING  _POSIX_VERSION
+/* firebox#E1F: mapped files are real but OPT-IN, so the macro is conditional
+ * rather than absent or unconditional -- both of the simpler answers lie.
+ * `mmap`/`munmap`/`msync` live ONLY in libwasi-emulated-mman.a (never in
+ * libc.a -- measured with llvm-nm across every shipped shelf), and
+ * <sys/mman.h> #error's outright unless the TU was compiled
+ * -D_WASI_EMULATED_MMAN. So the facility's presence is exactly the presence of
+ * that build mode, and the macro must say so: defining it unconditionally
+ * would promise mmap to a TU that cannot even include the header, and leaving
+ * it undefined would deny mmap to the many builds that DO enable the mode.
+ * This is the same shape as `_POSIX_THREADS` under `_REENTRANT` below --
+ * a standard POSIX feature-test macro whose definedness tracks the link mode
+ * the consumer actually selected (invariant 4).
+ *   ⚠ `sysconf(_SC_MAPPED_FILES)` returns _POSIX_VERSION unconditionally
+ *   (src/conf/sysconf.c), i.e. it claims mmap even for a TU built without the
+ *   emulated-mman mode. Pre-existing, not fixed here, and it wants its own
+ *   task -- fixing it belongs with the runtime half, not this header. */
+#ifdef _WASI_EMULATED_MMAN
+#define _POSIX_MAPPED_FILES     _POSIX_VERSION
 #endif
 // firebox#R23: memory locking (mlock/munlock/mlockall/munlockall) genuinely
 // exists on BOTH profiles. On WASM linear memory every page is resident and
@@ -388,11 +441,38 @@ pid_t gettid(void);
 #endif
 #define _POSIX_REALTIME_SIGNALS _POSIX_VERSION
 #define _POSIX_REGEXP           1
+/* firebox#E1F: "WASI has no processes" is false here -- Firebox implements real
+ * fork/exec/spawn -- but the three members of this site are backed to three
+ * different degrees, so two come out and one stays in. `_POSIX_SHELL` is left
+ * amputated by SCOPE, not by verdict: it was not measured by this lane and is
+ * not this lane's to rule on. */
 #ifdef __wasilibc_unmodified_upstream /* WASI has no processes */
 #define _POSIX_SAVED_IDS        1
 #define _POSIX_SHELL            1
 #define _POSIX_SPAWN            _POSIX_VERSION
 #endif
+/* firebox#E1F: the saved set-user-ID is a REAL, HOST-ENFORCED triple, not a
+ * fiction. firebox#K9N routes setuid/seteuid/setgid/setegid/setreuid/setresuid
+ * and getresuid/getresgid through the #BDY `proc_setcred` / #MHZ `proc_getcred`
+ * imports, which pin {ruid, euid, suid, rgid, egid, sgid} host-side and enforce
+ * the POSIX privilege rules there -- including the one thing this macro
+ * actually asserts: that an unprivileged euid may move to the SAVED id and
+ * back. All ten symbols are defined in libc.a on the shipped shelves, and
+ * `setuid.o`'s only meaningful undefined is `__wasix_proc_setcred` (llvm-nm,
+ * measured) -- i.e. the shipped object is the host-cred one, not musl's
+ * syscall stub. sysconf(_SC_SAVED_IDS) already returns 1. */
+#define _POSIX_SAVED_IDS        1
+/* firebox#E1F: posix_spawn/posix_spawnp are real and, importantly, do NOT
+ * depend on fork being linkable in a given artifact. The default (non-
+ * `__wasilibc_fork_based_posix_spawn`) path in src/process/posix_spawn.c calls
+ * the host `__wasi_proc_spawn2` import directly, translating the file-actions
+ * list into `__wasi_proc_spawn_fd_op_t`s. Both symbols are defined in libc.a on
+ * every shipped shelf (llvm-nm, measured), and sysconf(_SC_SPAWN) already
+ * returns _POSIX_VERSION. This matters beyond tidiness: `_POSIX_SPAWN` is what
+ * autoconf/gnulib probe to decide between posix_spawn and a fork/exec
+ * open-coding, and the fork path is the one that needs per-artifact link-time
+ * properties (firebox#9V1) the spawn path does not. */
+#define _POSIX_SPAWN            _POSIX_VERSION
 #define _POSIX_VDISABLE         0
 
 /* firebox#S7V: `_REENTRANT` is set by the COMPILER (clang's `-pthread`), so it
