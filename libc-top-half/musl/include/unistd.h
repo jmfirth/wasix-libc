@@ -377,8 +377,8 @@ pid_t gettid(void);
 #define _POSIX_MESSAGE_PASSING  _POSIX_VERSION
 #endif
 /* firebox#E1F: POSIX message queues are REAL here. firebox#KS9 added a guest
- * named-queue implementation (libc-top-half/musl/src/mq/mq_impl.c); `mq/*.c`
- * is an unconditional entry in the Makefile source list, and `mq_open`,
+ * named-queue implementation (libc-top-half/musl/src/mq/mq_impl.c); the `mq`
+ * sources are an unconditional entry in the Makefile source list, and `mq_open`,
  * `mq_send`, `mq_receive`, `mq_close`, `mq_unlink` are DEFINED in libc.a on
  * every shelf this repo ships -- wasm32 and wasm64, threads and nothreads
  * (llvm-nm, measured). #KS9 already un-amputated the matching MQ_PRIO_MAX in
