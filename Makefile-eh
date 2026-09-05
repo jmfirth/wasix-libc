@@ -99,6 +99,7 @@ LIBC_TOP_HALF_MUSL_INC = $(LIBC_TOP_HALF_MUSL_DIR)/include
 # unconditionally) — see Makefile.musl-sources.mk for the contract.
 ifneq ($(PIC), no)
 LIBC_TOP_HALF_LDSO_SOURCES = \
+    ldso/dladdr.c \
     ldso/dlclose.c \
     ldso/dlerror.c \
     ldso/dlinfo.c \

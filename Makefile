@@ -89,6 +89,7 @@ LIBC_TOP_HALF_MUSL_INC = $(LIBC_TOP_HALF_MUSL_DIR)/include
 # gates it on PIC (a non-PIC module cannot dynamically link). That is the
 # ONE source-set asymmetry the shared fragment permits — see its header.
 LIBC_TOP_HALF_LDSO_SOURCES = \
+    ldso/dladdr.c \
     ldso/dlclose.c \
     ldso/dlerror.c \
     ldso/dlinfo.c \
