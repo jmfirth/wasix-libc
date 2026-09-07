@@ -498,6 +498,35 @@ __wasi_errno_t __wasi_proc_exec3(
     return (uint16_t) ret;
 }
 
+/*
+ * firebox#39G: proc_exec3 with the combined-buffer lengths supplied by the
+ * caller instead of rediscovered by __wasilibc_exec_buffer_len.
+ *
+ * The double-NUL scan above cannot distinguish an empty argv element from the
+ * end of the buffer — they are the same two bytes — so it truncates argv at
+ * the first `""`, silently, at exit 0. On Linux an empty argv element is an
+ * ordinary string and argc is unchanged, so the length has to come from the
+ * packer (__wasilibc_exec_combine_strings_len), which knows it exactly.
+ *
+ * __wasi_proc_exec3 is left alone: it is in the generated public api_wasix.h
+ * and any out-of-tree caller keeps the signature and the legacy scan it
+ * already codes against.
+ */
+__wasi_errno_t __wasilibc_proc_exec3_n(
+    const char *name,
+    const char *args,
+    size_t args_len,
+    const char *envs,
+    size_t envs_len,
+    __wasi_bool_t search_path,
+    const char *path
+){
+    size_t name_len = strlen(name);
+    size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
+    int32_t ret = __imported_wasix_64v1_proc_exec3((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len);
+    return (uint16_t) ret;
+}
+
 int32_t __imported_wasix_64v1_proc_spawn(int64_t arg0, int64_t arg1, int32_t arg2, int64_t arg3, int64_t arg4, int64_t arg5, int64_t arg6, int32_t arg7, int32_t arg8, int32_t arg9, int64_t arg10, int64_t arg11, int64_t arg12) __attribute__((
     __import_module__("wasix_64v1"),
     __import_name__("proc_spawn")
@@ -544,6 +573,28 @@ __wasi_errno_t __wasi_proc_spawn2(
     /* firebox #54/#JGP: args / envs are NUL-separated combined buffers. */
     size_t args_len = __wasilibc_exec_buffer_len(args);
     size_t envs_len = __wasilibc_exec_buffer_len(envs);
+    size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
+    int32_t ret = __imported_wasix_64v1_proc_spawn2((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (intptr_t) fd_ops, (intptr_t) fd_ops_len, (intptr_t) signal_dispositions, (intptr_t) signal_dispositions_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len, (intptr_t) retptr0);
+    return (uint16_t) ret;
+}
+
+/* firebox#39G: proc_spawn2 with caller-supplied combined-buffer lengths.
+ * See __wasilibc_proc_exec3_n above for why the scan cannot be used. */
+__wasi_errno_t __wasilibc_proc_spawn2_n(
+    const char *name,
+    const char *args,
+    size_t args_len,
+    const char *envs,
+    size_t envs_len,
+    const __wasi_proc_spawn_fd_op_t *fd_ops,
+    size_t fd_ops_len,
+    const __wasi_signal_disposition_t *signal_dispositions,
+    size_t signal_dispositions_len,
+    __wasi_bool_t search_path,
+    const char *path,
+    __wasi_pid_t *retptr0
+){
+    size_t name_len = strlen(name);
     size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
     int32_t ret = __imported_wasix_64v1_proc_spawn2((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (intptr_t) fd_ops, (intptr_t) fd_ops_len, (intptr_t) signal_dispositions, (intptr_t) signal_dispositions_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len, (intptr_t) retptr0);
     return (uint16_t) ret;
@@ -1930,6 +1981,35 @@ __wasi_errno_t __wasi_proc_exec3(
     return (uint16_t) ret;
 }
 
+/*
+ * firebox#39G: proc_exec3 with the combined-buffer lengths supplied by the
+ * caller instead of rediscovered by __wasilibc_exec_buffer_len.
+ *
+ * The double-NUL scan above cannot distinguish an empty argv element from the
+ * end of the buffer — they are the same two bytes — so it truncates argv at
+ * the first `""`, silently, at exit 0. On Linux an empty argv element is an
+ * ordinary string and argc is unchanged, so the length has to come from the
+ * packer (__wasilibc_exec_combine_strings_len), which knows it exactly.
+ *
+ * Must exist in BOTH halves for the same reason __wasilibc_exec_buffer_len
+ * does: the wasm32 and wasm64 wrapper sets are compiled under mutually
+ * exclusive #if branches and cannot see each other.
+ */
+__wasi_errno_t __wasilibc_proc_exec3_n(
+    const char *name,
+    const char *args,
+    size_t args_len,
+    const char *envs,
+    size_t envs_len,
+    __wasi_bool_t search_path,
+    const char *path
+){
+    size_t name_len = strlen(name);
+    size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
+    int32_t ret = __imported_wasix_32v1_proc_exec3((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len);
+    return (uint16_t) ret;
+}
+
 int32_t __imported_wasix_32v1_proc_spawn(int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3, int32_t arg4, int32_t arg5, int32_t arg6, int32_t arg7, int32_t arg8, int32_t arg9, int32_t arg10, int32_t arg11, int32_t arg12) __attribute__((
     __import_module__("wasix_32v1"),
     __import_name__("proc_spawn")
@@ -1976,6 +2056,28 @@ __wasi_errno_t __wasi_proc_spawn2(
     /* firebox #54: args / envs are NUL-separated combined buffers. */
     size_t args_len = __wasilibc_exec_buffer_len(args);
     size_t envs_len = __wasilibc_exec_buffer_len(envs);
+    size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
+    int32_t ret = __imported_wasix_32v1_proc_spawn2((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (intptr_t) fd_ops, (intptr_t) fd_ops_len, (intptr_t) signal_dispositions, (intptr_t) signal_dispositions_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len, (intptr_t) retptr0);
+    return (uint16_t) ret;
+}
+
+/* firebox#39G: proc_spawn2 with caller-supplied combined-buffer lengths.
+ * See __wasilibc_proc_exec3_n above for why the scan cannot be used. */
+__wasi_errno_t __wasilibc_proc_spawn2_n(
+    const char *name,
+    const char *args,
+    size_t args_len,
+    const char *envs,
+    size_t envs_len,
+    const __wasi_proc_spawn_fd_op_t *fd_ops,
+    size_t fd_ops_len,
+    const __wasi_signal_disposition_t *signal_dispositions,
+    size_t signal_dispositions_len,
+    __wasi_bool_t search_path,
+    const char *path,
+    __wasi_pid_t *retptr0
+){
+    size_t name_len = strlen(name);
     size_t path_len = (path != (const char *)0) ? strlen(path) : 0;
     int32_t ret = __imported_wasix_32v1_proc_spawn2((intptr_t) name, (intptr_t) name_len, (intptr_t) args, (intptr_t) args_len, (intptr_t) envs, (intptr_t) envs_len, (intptr_t) fd_ops, (intptr_t) fd_ops_len, (intptr_t) signal_dispositions, (intptr_t) signal_dispositions_len, (int32_t) search_path, (intptr_t) path, (intptr_t) path_len, (intptr_t) retptr0);
     return (uint16_t) ret;

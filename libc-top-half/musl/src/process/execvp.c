@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
+#include <wasi/api.h>
 
 extern char **__wasilibc_environ;
 
@@ -81,7 +82,33 @@ int __execvpe(const char *file, char *const argv[], char *const envp[])
  * / `envs_len`, because strlen() stops at the first intra-buffer NUL
  * and would pass a truncated length to the host.
  */
+/*
+ * firebox#39G: the same packing, but it also hands back the TRUE payload
+ * length.
+ *
+ * The double-NUL end marker described above cannot represent an empty argv
+ * element: `foo "" bar` packs to `foo\0\0bar\0\0`, and the `\0\0` that ends
+ * the empty element is byte-identical to the end-of-buffer marker. Any scan
+ * of this buffer therefore stops early and silently drops every argument
+ * after the first empty one — a fail-open the caller cannot see.
+ *
+ * On Linux an empty argv element is an ordinary string; execve carries it and
+ * the child's argc is unchanged. The only way to keep that is to stop
+ * deriving the length from the payload. `*out_len` is the exact number of
+ * bytes of `n` NUL-terminated entries, so an empty entry is just an entry of
+ * length zero and nothing is ambiguous. The trailing NUL is still written —
+ * it keeps the allocation a valid C string for anything that strlen()s it —
+ * but it is NOT counted, so the host sees exactly one phantom split piece
+ * after the last entry's own terminator and drops precisely that one.
+ */
+char *__wasilibc_exec_combine_strings_len(char *const strings[], size_t *out_len);
+
 char *__wasilibc_exec_combine_strings(char *const strings[])
+{
+	return __wasilibc_exec_combine_strings_len(strings, NULL);
+}
+
+char *__wasilibc_exec_combine_strings_len(char *const strings[], size_t *out_len)
 {
 	int combined_len = 0;
 	for (char **ptr = (char **)strings; *ptr != NULL; ptr++)
@@ -104,16 +131,31 @@ char *__wasilibc_exec_combine_strings(char *const strings[])
 	 * whole buffer is a single `\0` — wrappers treat that as length 0. */
 	*combined_p = 0;
 
+	/* firebox#39G: the true payload length, EXCLUDING the trailing NUL above. */
+	if (out_len != NULL)
+		*out_len = (size_t)combined_len;
+
 	return combined;
 }
 
+/* firebox#39G: length-carrying wrapper, defined in __wasixlibc_real.c. */
+__wasi_errno_t __wasilibc_proc_exec3_n(const char *name, const char *args,
+									   size_t args_len, const char *envs,
+									   size_t envs_len,
+									   __wasi_bool_t search_path,
+									   const char *path);
+
 int __execvpe(const char *path, char *const argv[], char *const envp[], uint8_t use_path)
 {
-	char *combined_argv = __wasilibc_exec_combine_strings(argv);
-	char *combined_env = __wasilibc_exec_combine_strings(envp);
+	size_t argv_len = 0, env_len = 0;
+	char *combined_argv = __wasilibc_exec_combine_strings_len(argv, &argv_len);
+	char *combined_env = __wasilibc_exec_combine_strings_len(envp, &env_len);
 
-	int e = __wasi_proc_exec3(
-		path, combined_argv, combined_env,
+	/* firebox#39G: pass the packed length rather than letting the wrapper
+	 * rediscover it with a double-NUL scan, which truncates at the first
+	 * empty argument. */
+	int e = __wasilibc_proc_exec3_n(
+		path, combined_argv, argv_len, combined_env, env_len,
 		use_path ? __WASI_BOOL_TRUE : __WASI_BOOL_FALSE, getenv("PATH"));
 #ifdef __wasm_exception_handling__
 	extern _Noreturn void __vfork_restore();

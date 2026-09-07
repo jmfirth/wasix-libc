@@ -300,6 +300,16 @@ fail:
 }
 #else
 char *__wasilibc_exec_combine_strings(char *const strings[]);
+/* firebox#39G: the length-carrying packer and the length-carrying wrapper. The
+ * double-NUL scan they replace cannot tell an empty argv element from the end
+ * of the buffer, so posix_spawn silently truncated argv at the first `""`. */
+char *__wasilibc_exec_combine_strings_len(char *const strings[], size_t *out_len);
+__wasi_errno_t __wasilibc_proc_spawn2_n(
+	const char *name, const char *args, size_t args_len, const char *envs,
+	size_t envs_len, const __wasi_proc_spawn_fd_op_t *fd_ops, size_t fd_ops_len,
+	const __wasi_signal_disposition_t *signal_dispositions,
+	size_t signal_dispositions_len, __wasi_bool_t search_path, const char *path,
+	__wasi_pid_t *retptr0);
 
 int __posix_spawn(pid_t *restrict res, const char *restrict path,
 				  const posix_spawn_file_actions_t *fa,
@@ -522,8 +532,9 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 		}
 	}
 
-	char *combined_argv = __wasilibc_exec_combine_strings(argv);
-	char *combined_env = __wasilibc_exec_combine_strings(envp);
+	size_t combined_argv_len = 0, combined_env_len = 0;
+	char *combined_argv = __wasilibc_exec_combine_strings_len(argv, &combined_argv_len);
+	char *combined_env = __wasilibc_exec_combine_strings_len(envp, &combined_env_len);
 
 	/* firebox#1QR — POSIX_SPAWN_SETSIGMASK.
 	 *
@@ -587,8 +598,12 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 	}
 
 	__wasi_pid_t ret_pid;
-	int err = __wasi_proc_spawn2(
-		path, combined_argv, combined_env, fdops, nfdops, signals, nsignals,
+	/* firebox#39G: pass the packed lengths rather than letting the wrapper
+	 * rediscover them with a double-NUL scan, which truncates at the first
+	 * empty argument. */
+	int err = __wasilibc_proc_spawn2_n(
+		path, combined_argv, combined_argv_len, combined_env, combined_env_len,
+		fdops, nfdops, signals, nsignals,
 		use_path ? __WASI_BOOL_TRUE : __WASI_BOOL_FALSE, getenv("PATH"), &ret_pid);
 
 	if (__fbx_mask_swapped) {
