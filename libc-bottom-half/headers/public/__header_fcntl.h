@@ -41,12 +41,32 @@
 #define POSIX_FADV_SEQUENTIAL __WASI_ADVICE_SEQUENTIAL
 #define POSIX_FADV_WILLNEED __WASI_ADVICE_WILLNEED
 
+/*
+ * fcntl(2) command numbers. Authority: Linux uapi asm-generic/fcntl.h
+ * (x86-64 and aarch64 agree on all of these).
+ *
+ * firebox#87F: F_DUPFD, F_DUPFD_CLOEXEC, F_SETLK, F_GETLK and F_SETLKW
+ * previously carried WASI-invented values (5, 6, 7, 8, 9). They are safe to
+ * renumber because `cmd` NEVER crosses the host boundary: fcntl() in
+ * libc-bottom-half/cloudlibc/src/libc/fcntl/fcntl.c dispatches on it in a
+ * symbolic `switch` and the lock path re-encodes into its own
+ * __FIREBOX_LOCK_OP_* opcodes, which are unchanged. Nothing in the runtime
+ * (crates/, the wasmer fork, blink's xlat.c) reads a guest F_* number.
+ *
+ * ⛔ LOCKSTEP, and it is not a loud failure: the old and new sets OVERLAP.
+ * Old F_DUPFD(5) == new F_GETLK(5) and old F_DUPFD_CLOEXEC(6) == new
+ * F_SETLK(6), so an object compiled against the OLD header calling a NEWLY
+ * built libc — reachable through the shared libc provider under dynamic
+ * linking — enters the lock branch and va_arg's an int as `struct flock *`.
+ * That is memory-unsafe, not an EINVAL. This header must move together with
+ * a complete relink of everything that links or dlopen's this libc.
+ */
+#define F_DUPFD (0)
 #define F_GETFD (1)
 #define F_SETFD (2)
 #define F_GETFL (3)
 #define F_SETFL (4)
-#define F_DUPFD (5)
-#define F_DUPFD_CLOEXEC (6)
+#define F_DUPFD_CLOEXEC (1030)
 
 /*
  * POSIX advisory record locks (Firebox extension, issue #243).
@@ -57,9 +77,9 @@
  * fails with ENOTSUP on contention (no wait queue yet); callers should
  * use F_SETLK and retry-with-backoff if they need blocking semantics.
  */
-#define F_SETLK   (7)
-#define F_GETLK   (8)
-#define F_SETLKW  (9)
+#define F_GETLK   (5)
+#define F_SETLK   (6)
+#define F_SETLKW  (7)
 
 #define F_RDLCK   (0)
 #define F_WRLCK   (1)
