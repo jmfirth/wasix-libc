@@ -3,6 +3,8 @@
 #include <signal.h>
 #include <pthread.h>   /* firebox#B28 — pthread_sigmask, for epoll_pwait */
 #include <errno.h>
+#include <fcntl.h>     /* firebox#RK5 — fcntl/F_SETFD/FD_CLOEXEC for EPOLL_CLOEXEC */
+#include <unistd.h>    /* firebox#RK5 — close, on the mark-failure path */
 #include <wasi/libc.h>
 
 int epoll_create(int size)
@@ -17,9 +19,59 @@ int epoll_create(int size)
     return -1;
 }
 
+/* firebox#RK5 — epoll_create1 DISCARDED ITS FLAGS ARGUMENT.
+ *
+ * `EPOLL_CLOEXEC` is the only flag Linux defines here, and it was thrown away:
+ * a guest asking for a close-on-exec epoll descriptor got one that survived
+ * exec, at exit 0 with a valid fd. Nothing at the call site can see it. The
+ * leak surfaces far from the cause, in a child that inherited a descriptor it
+ * should never have seen — a fail-open where the broken state is
+ * indistinguishable from the working one, which invariant 3 admits no
+ * deferral for.
+ *
+ * `__wasi_epoll_create` takes no argument at all, so there is no flag to pass
+ * through. The fd is marked after creation with `fcntl(F_SETFD, FD_CLOEXEC)`,
+ * which is the mechanism the rest of this libc already uses for exactly this
+ * shape — a create syscall with no fdflagsext parameter: socket.c (SOCK_CLOEXEC),
+ * accept.c (accept4's SOCK_CLOEXEC), socketpair.c and cloudlibc's pipe2.c all
+ * do the same, and fcntl.c's F_SETFD arm is what turns it into
+ * `__WASI_FDFLAGSEXT_CLOEXEC` on the fd table. Not a new path.
+ *
+ * The close-on-failure is not defensive padding: returning a usable fd whose
+ * requested cloexec was silently not applied would reintroduce the exact
+ * fail-open this fixes, so a descriptor that cannot be marked is not handed
+ * back. Same shape as socket.c's, errno preserved across the close.
+ *
+ * Unknown bits are EINVAL because that is what Linux does (`if (flags &
+ * ~EPOLL_CLOEXEC) return -EINVAL;` in do_epoll_create), and because accepting
+ * them silently is how the dropped flag went unnoticed in the first place.
+ */
 int epoll_create1(int flags)
 {
-    return epoll_create(0);
+    if (flags & ~EPOLL_CLOEXEC)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = epoll_create(0);
+    if (fd < 0)
+    {
+        return -1;
+    }
+
+    if (flags & EPOLL_CLOEXEC)
+    {
+        if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
+        {
+            int saved_errno = errno;
+            close(fd);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    return fd;
 }
 
 /* firebox#XBX — epoll_ctl RETURNED A RAW WASI ERRNO, NOT -1 WITH errno SET.
