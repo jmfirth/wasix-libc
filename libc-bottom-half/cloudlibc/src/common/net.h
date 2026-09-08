@@ -143,7 +143,36 @@ static inline int wasi_to_sockaddr(const struct __wasi_addr_port_t *restrict pee
     addrun.sun_family = AF_UNIX;
     memcpy(&addrun.sun_path, &peer_addr->u.unix.b0, sizeof(addrun.sun_path));
     addrun.sun_path[sizeof(addrun.sun_path) - 1] = '\0'; // make sure the address is null-terminated
-    *addrlen = offsetof(struct sockaddr_un, sun_path) + strlen(addrun.sun_path);
+    // firebox#GN5 — THE COPY-OUT. This arm built `addrun` on the stack, set
+    // `*addrlen` to describe it, and returned 0 WITHOUT EVER COPYING IT INTO
+    // `addr` -- the one line the INET4 and INET6 arms above both end with.
+    //
+    // MEASURED with a guest probe under `firebox run`: getsockname() on a
+    // socket bound to /tmp/gn5-probe.sock returned 0 with *addrlen == 21,
+    // and the caller's buffer -- poisoned with 0xAA before the call --
+    // came back all zeros: sun_family 0 (AF_UNSPEC), sun_path "". The
+    // memset at the top of this function is what zeroed it; without that
+    // the caller would have read back its own stale bytes. Either way the
+    // call reports success and a length that claims N valid bytes are
+    // present, so broken state is indistinguishable from working state.
+    // Invariant 3 admits no deferral for that class.
+    //
+    // ⚠ ORDER. `*addrlen` is an in/out parameter: on the way in it is the
+    // SIZE OF THE CALLER'S BUFFER, on the way out the length of the
+    // address. The length is computed into a local FIRST so the copy can
+    // still be bounded by the incoming buffer size; assigning `*addrlen`
+    // before the memcpy would bound the copy by the value we just invented
+    // and overrun a short buffer. Same sequencing as the arms above, where
+    // the input size is read inside the MIN and overwritten on the next
+    // line.
+    //
+    // Truncation follows Linux's move_addr_to_user: copy what fits, and
+    // still report the UNTRUNCATED length, which is how a caller detects
+    // that it got a short address.
+    socklen_t unix_addrlen =
+        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(addrun.sun_path));
+    memcpy(addr, &addrun, MIN((size_t)unix_addrlen, (size_t)*addrlen));
+    *addrlen = unix_addrlen;
   } else {
     addr->sa_family = AF_UNSPEC;
     *addrlen = sizeof(struct sockaddr);
