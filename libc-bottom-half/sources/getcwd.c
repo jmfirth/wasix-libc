@@ -20,7 +20,7 @@ char *getcwd(char *buf, size_t size)
 {
     __wasi_pointersize_t bufsize = size;
     __wasi_errno_t error = __wasi_getcwd((uint8_t *)buf, &bufsize);
-    if (error == ERANGE && buf == NULL) {
+    if (error == __WASI_ERRNO_RANGE && buf == NULL) {
         buf = (char *)__libc_malloc(bufsize);
         if (buf == NULL) {
             return NULL;

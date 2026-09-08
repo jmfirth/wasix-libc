@@ -23,7 +23,7 @@ ssize_t write(int fildes, const void *buf, size_t nbyte) {
     // discards bytes it already consumed. Never returns if a cancel is
     // pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error == ENOTCAPABLE ? EBADF : __wasilibc_errno_from_wasi(error);
+    errno = error == __WASI_ERRNO_NOTCAPABLE ? EBADF : __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return bytes_written;

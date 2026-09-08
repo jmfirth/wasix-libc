@@ -28,7 +28,7 @@ ssize_t pwrite(int fildes, const void *buf, size_t nbyte, off_t offset) {
     // is pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
     __wasi_fdstat_t fds;
-    if (error == ENOTCAPABLE && __wasi_fd_fdstat_get(fildes, &fds) == 0) {
+    if (error == __WASI_ERRNO_NOTCAPABLE && __wasi_fd_fdstat_get(fildes, &fds) == 0) {
       // Determine why we got ENOTCAPABLE.
       if ((fds.fs_rights_base & __WASI_RIGHTS_FD_WRITE) == 0)
         error = EBADF;

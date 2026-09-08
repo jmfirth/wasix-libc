@@ -20,7 +20,7 @@ int fsync(int fildes) {
     // call never discards what it already consumed. Never returns if a cancel
     // is pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error == ENOTCAPABLE ? EINVAL : __wasilibc_errno_from_wasi(error);
+    errno = error == __WASI_ERRNO_NOTCAPABLE ? EINVAL : __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;

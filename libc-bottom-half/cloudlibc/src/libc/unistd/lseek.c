@@ -17,7 +17,7 @@ off_t __lseek(int fildes, off_t offset, int whence) {
   __wasi_errno_t error =
       __wasi_fd_seek(fildes, offset, whence, &new_offset);
   if (error != 0) {
-    errno = error == ENOTCAPABLE ? ESPIPE : __wasilibc_errno_from_wasi(error);
+    errno = error == __WASI_ERRNO_NOTCAPABLE ? ESPIPE : __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return new_offset;
