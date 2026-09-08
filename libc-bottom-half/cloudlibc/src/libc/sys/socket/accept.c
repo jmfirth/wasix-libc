@@ -57,6 +57,29 @@ int accept4(int socket, struct sockaddr *restrict addr, socklen_t *restrict addr
     }
   }
 
-  wasi_to_sockaddr(&peer_addr, addr, addrlen);
+  // firebox#9EJ — THE CONVERSION'S ERRNO WAS DISCARDED.
+  // wasi_to_sockaddr diagnoses ENTIRELY IN THE GUEST and returns a guest `E*`;
+  // no host call is made in it, so there is nothing for
+  // __wasilibc_errno_from_wasi to translate and running it through the
+  // translator would translate a guest constant a second time. Separate
+  // variable, separate type. See the note in common/net.h.
+  //
+  // The `addr != NULL` guard is not defensive padding: POSIX and Linux both let
+  // accept() take a NULL address, meaning "I do not want the peer's address."
+  // That is a success, not the EFAULT the helper reports for a copy-out target
+  // it was asked to write through. Only a caller that asked for the address can
+  // fail to receive it.
+  if (addr != NULL) {
+    int guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
+    if (guest_error != 0) {
+      // Linux drops the accepted connection when it cannot hand the address
+      // back (__sys_accept4_file's move_addr_to_user failure path releases the
+      // socket and the fd), so returning -1 while leaking `ret` would be a
+      // divergence of its own. Same shape as the SOCK_CLOEXEC failure above.
+      close(ret);
+      errno = guest_error;
+      return -1;
+    }
+  }
   return ret;
 }

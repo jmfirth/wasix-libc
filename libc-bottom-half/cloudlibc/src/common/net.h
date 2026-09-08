@@ -77,56 +77,90 @@ static inline int is_wasi_port_ok() {
 //   EAFNOSUPPORT -- a family this libc cannot express as a WASI address.
 //   EINVAL       -- the right family, an addrlen that cannot hold it (or, for
 //                   AF_UNIX, a path longer than the WASI address can carry).
-//   EFAULT       -- asked to write an address out through a NULL buffer, which
-//                   is what Linux reports when the copy-out target is unusable.
+//   EFAULT       -- a NULL address buffer, in either direction: a copy-out
+//                   target we cannot write the address into, or (firebox#9EJ)
+//                   a copy-in source we cannot read one out of. Linux reports
+//                   EFAULT for an unusable user pointer on both sides.
 // Blanketing one code over all three would erase a distinction Linux makes and
 // callers switch on.
+//
+// firebox#9EJ — THE NULL CHECKS LIVE HERE, NOT IN THE CALLERS, AND A NULL
+// POINTER DOES NOT TRAP ON WASM.
+//
+// The ticket predicted a trap. MEASURED, it is worse than that. A null
+// `struct sockaddr *` is linear-memory offset 0, and offset 0 is ordinary
+// readable, writable module memory -- there is no unmapped page to fault on.
+// So `addr->sa_family` on a NULL address quietly read the zeros that live
+// there, decided the family was AF_UNSPEC, and returned EAFNOSUPPORT: a
+// plausible, wrong, un-diagnosable errno where Linux says EFAULT. On the
+// copy-out side it was worse still -- getsockname's ENOTSOCK arm WROTE
+// AF_LOCAL through the null pointer into guest address 0 and returned 0, so
+// the guest corrupted its own memory and was told it had succeeded. Only an
+// out-of-bounds pointer traps; a null one is silent.
+//
+// The guard is at the only place that dereferences, so the next caller to be
+// written cannot reintroduce it. Callers that are ALLOWED a NULL address by
+// POSIX -- accept() and recvfrom(), where NULL means "do not report the peer"
+// and is not an error -- must still skip the call entirely rather than
+// translate the EFAULT, and they do.
 
 /// Converts a WASI address into a socket address
 static inline int wasi_to_sockaddr(const struct __wasi_addr_port_t *restrict peer_addr, struct sockaddr *restrict addr, socklen_t *restrict addrlen) {
+  // No usable buffer to write the address into. EFAULT is what Linux reports
+  // for a copy-out target it cannot use. `addrlen` is checked alongside `addr`
+  // because the very first thing done with a non-NULL `addr` is `*addrlen`:
+  // Linux's move_addr_to_user reads the length through the same get_user, so a
+  // non-NULL addr with a NULL addrlen is EFAULT there too -- not a trap.
+  if (addr == NULL || addrlen == NULL) {
+    return EFAULT;
+  }
   // This test needs to be here because some older versions of wasmer report the port as big-endian
   static int tested = 0;
   static int need_revert = 1;
-  if(!tested && addr) {
+  if(!tested) {
     tested = 1;
     need_revert = is_wasi_port_ok();
   }
-  if (addr != NULL) {
-    memset(addr, 0, *addrlen);
-    if (peer_addr->tag == __WASI_ADDRESS_FAMILY_INET4) {
-      struct sockaddr_in addr4;
-      addr4.sin_family = AF_INET;
-      addr4.sin_port = need_revert?htons(peer_addr->u.inet4.port):peer_addr->u.inet4.port;
-      addr4.sin_addr.s_addr = *((in_addr_t*)&peer_addr->u.inet4.addr);
-      memcpy(addr, &addr4, MIN(sizeof(struct sockaddr_in), *addrlen));
-      *addrlen = sizeof(struct sockaddr_in);
-    } else if (peer_addr->tag == __WASI_ADDRESS_FAMILY_INET6) {
-      struct sockaddr_in6 addr6;
-      addr6.sin6_family = AF_INET6;
-      addr6.sin6_flowinfo = peer_addr->u.inet6.addr.flow_info1 << 16 | peer_addr->u.inet6.addr.flow_info0;
-      addr6.sin6_scope_id = peer_addr->u.inet6.addr.scope_id1 << 16 | peer_addr->u.inet6.addr.scope_id0;;
-      addr6.sin6_port = need_revert?htons(peer_addr->u.inet6.port):peer_addr->u.inet6.port;
-      memcpy(&addr6.sin6_addr.s6_addr, &peer_addr->u.inet6.addr, sizeof(struct in6_addr));
-      memcpy(addr, &addr6, MIN(sizeof(struct sockaddr_in6), *addrlen));
-      *addrlen = sizeof(struct sockaddr_in6);
-    } else if (peer_addr->tag == __WASI_ADDRESS_FAMILY_UNIX) {
-      struct sockaddr_un addrun;
-      addrun.sun_family = AF_UNIX;
-      memcpy(&addrun.sun_path, &peer_addr->u.unix.b0, sizeof(addrun.sun_path));
-      addrun.sun_path[sizeof(addrun.sun_path) - 1] = '\0'; // make sure the address is null-terminated
-      *addrlen = offsetof(struct sockaddr_un, sun_path) + strlen(addrun.sun_path);
-    } else {
-      addr->sa_family = AF_UNSPEC;
-      *addrlen = sizeof(struct sockaddr);
-    }
-    return 0;
+  memset(addr, 0, *addrlen);
+  if (peer_addr->tag == __WASI_ADDRESS_FAMILY_INET4) {
+    struct sockaddr_in addr4;
+    addr4.sin_family = AF_INET;
+    addr4.sin_port = need_revert?htons(peer_addr->u.inet4.port):peer_addr->u.inet4.port;
+    addr4.sin_addr.s_addr = *((in_addr_t*)&peer_addr->u.inet4.addr);
+    memcpy(addr, &addr4, MIN(sizeof(struct sockaddr_in), *addrlen));
+    *addrlen = sizeof(struct sockaddr_in);
+  } else if (peer_addr->tag == __WASI_ADDRESS_FAMILY_INET6) {
+    struct sockaddr_in6 addr6;
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_flowinfo = peer_addr->u.inet6.addr.flow_info1 << 16 | peer_addr->u.inet6.addr.flow_info0;
+    addr6.sin6_scope_id = peer_addr->u.inet6.addr.scope_id1 << 16 | peer_addr->u.inet6.addr.scope_id0;;
+    addr6.sin6_port = need_revert?htons(peer_addr->u.inet6.port):peer_addr->u.inet6.port;
+    memcpy(&addr6.sin6_addr.s6_addr, &peer_addr->u.inet6.addr, sizeof(struct in6_addr));
+    memcpy(addr, &addr6, MIN(sizeof(struct sockaddr_in6), *addrlen));
+    *addrlen = sizeof(struct sockaddr_in6);
+  } else if (peer_addr->tag == __WASI_ADDRESS_FAMILY_UNIX) {
+    struct sockaddr_un addrun;
+    addrun.sun_family = AF_UNIX;
+    memcpy(&addrun.sun_path, &peer_addr->u.unix.b0, sizeof(addrun.sun_path));
+    addrun.sun_path[sizeof(addrun.sun_path) - 1] = '\0'; // make sure the address is null-terminated
+    *addrlen = offsetof(struct sockaddr_un, sun_path) + strlen(addrun.sun_path);
+  } else {
+    addr->sa_family = AF_UNSPEC;
+    *addrlen = sizeof(struct sockaddr);
   }
-  // No buffer to write the address into. EFAULT is what Linux reports for a
-  // copy-out target it cannot use.
-  return EFAULT;
+  return 0;
 }
 
 static inline int sockaddr_to_wasi(const struct sockaddr *restrict addr, const socklen_t addrlen, struct __wasi_addr_port_t *restrict peer_addr) {
+  // firebox#9EJ — `addr->sa_family` below is an unconditional dereference, and
+  // bind()/connect() pass the caller's pointer through untouched. On wasm that
+  // read does not fault: it returns the zeros at linear-memory offset 0, so
+  // `bind(fd, NULL, 0)` reported EAFNOSUPPORT where Linux reports EFAULT --
+  // measured, not predicted. Checked before the memset so nothing is written
+  // on a request that cannot be read.
+  if (addr == NULL) {
+    return EFAULT;
+  }
   memset(peer_addr, 0, sizeof(struct __wasi_addr_port_t));
   // The family test and the length test are separate branches on purpose. A
   // single `family == X && addrlen >= Y` chain funnels "family we do not know"

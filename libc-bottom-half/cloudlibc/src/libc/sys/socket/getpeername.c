@@ -16,6 +16,14 @@ int getpeername(int socket, struct sockaddr *restrict addr, socklen_t *restrict 
     return -1;
   }
 
-  wasi_to_sockaddr(&peer_addr, addr, addrlen);
+  // firebox#9EJ — the conversion's errno was discarded. It is a guest `E*` and
+  // must not pass through __wasilibc_errno_from_wasi; see common/net.h. As with
+  // getsockname(), a NULL address is not a legal request here -- Linux reports
+  // EFAULT -- so there is no NULL guard to skip the call.
+  int guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
+  if (guest_error != 0) {
+    errno = guest_error;
+    return -1;
+  }
   return 0;
 }
