@@ -39,6 +39,16 @@ int __wasilibc_openat_nomode(int fd, const char *path, int oflag);
 // Initialize the library environ
 void __wasilibc_initialize_environ(void);
 
+/// firebox#87F: translate a WASI errno into the guest's errno numbering.
+///
+/// This is the runtime half of __FBX_ERRNO_MAP (see <__errno_values.h>); the
+/// compile-time half is __FBX_E_FROM_WASI. Both are generated from the same
+/// list, so they cannot drift apart.
+///
+/// A value outside the map -- including one from a host newer than this libc
+/// -- becomes EUNKNOWN. __WASI_ERRNO_SUCCESS becomes 0.
+int __wasilibc_errno_from_wasi(__wasi_errno_t code);
+
 /// Used for accessing the stack pointers
 void* __wasilibc_get_stack_pointer(void);
 void __wasilibc_set_stack_pointer(void *val);
