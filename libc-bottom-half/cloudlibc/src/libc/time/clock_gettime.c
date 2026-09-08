@@ -8,6 +8,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <time.h>
+#include <wasi/libc.h>
 
 int __clock_gettime(clockid_t clock_id, struct timespec *tp) {
   // firebox#79E — reject an unknown clock_id with EINVAL (POSIX) instead of
@@ -21,7 +22,7 @@ int __clock_gettime(clockid_t clock_id, struct timespec *tp) {
   __wasi_timestamp_t ts;
   __wasi_errno_t error = __wasi_clock_time_get(id, 1, &ts);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   *tp = timestamp_to_timespec(ts);

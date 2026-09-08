@@ -9,6 +9,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <stddef.h>
+#include <wasi/libc.h>
 
 static_assert(offsetof(struct iovec, iov_base) ==
                   offsetof(__wasi_ciovec_t, buf),
@@ -43,7 +44,7 @@ ssize_t writev(int fildes, const struct iovec *iov, int iovcnt) {
     // call never discards what it already consumed. Never returns if a cancel
     // is pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return bytes_written;

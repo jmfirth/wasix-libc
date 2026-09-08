@@ -12,6 +12,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <wasi/libc.h>
 
 int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
             fd_set *restrict errorfds, const struct timespec *restrict timeout,
@@ -182,7 +183,7 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     // longer any case to relabel. Report what the runtime reported — in
     // particular `EINTR`, which is how an indefinite wait ends when a signal
     // handler runs.
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 
