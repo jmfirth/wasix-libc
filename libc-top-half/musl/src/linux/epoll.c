@@ -22,6 +22,37 @@ int epoll_create1(int flags)
     return epoll_create(0);
 }
 
+/* firebox#XBX — epoll_ctl RETURNED A RAW WASI ERRNO, NOT -1 WITH errno SET.
+ *
+ * `__wasi_epoll_ctl` returns a `__wasi_errno_t`, and both `return` statements
+ * below handed it straight back to the guest. Linux's epoll_ctl returns 0 or
+ * -1 with errno set, so `if (epoll_ctl(...) < 0)` -- the way every caller
+ * writes it -- saw SUCCESS on every failure, and the failure left errno
+ * untouched, so even a caller that checked `!= 0` had nothing to report. A
+ * fail-open where broken state is indistinguishable from working state;
+ * invariant 3 admits no deferral for that.
+ *
+ * The translation is not decorative even though it is the identity today. The
+ * naive `errno = err; return -1;` would be accidentally right until #87F step
+ * 4 renumbers the guest side, and would then silently hand back a plausible
+ * wrong errno with nothing to flag it -- a bad fd reporting the guest meaning
+ * of WASI 8 rather than EBADF. Written with the translation, it is correct in
+ * both numbering worlds.
+ *
+ * Checked against the whole file, since the class is the unit: epoll_create
+ * (:8) and epoll_pwait (:57) already translate and return -1, and
+ * epoll_create1/epoll_wait delegate to them, so epoll_ctl was the only carrier.
+ */
+static inline int __fbx_epoll_ctl_finish(__wasi_errno_t error)
+{
+    if (error != 0)
+    {
+        errno = __wasilibc_errno_from_wasi(error);
+        return -1;
+    }
+    return 0;
+}
+
 int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
 {
     if (ev)
@@ -49,9 +80,9 @@ int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
         ev2.data.fd = fd2;
         ev2.data.data1 = ev->data.u32;
         ev2.data.data2 = ev->data.u64;
-        return __wasi_epoll_ctl(fd, op, fd2, &ev2);
+        return __fbx_epoll_ctl_finish(__wasi_epoll_ctl(fd, op, fd2, &ev2));
     }
-    return __wasi_epoll_ctl(fd, op, fd2, NULL);
+    return __fbx_epoll_ctl_finish(__wasi_epoll_ctl(fd, op, fd2, NULL));
 }
 
 int epoll_pwait(int fd, struct epoll_event *ev, int cnt, int to, const sigset_t *sigs)
