@@ -5,6 +5,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 int ftruncate(int fildes, off_t length) {
   if (length < 0) {
@@ -38,7 +39,7 @@ int ftruncate(int fildes, off_t length) {
         return -1;
       }
     }
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;

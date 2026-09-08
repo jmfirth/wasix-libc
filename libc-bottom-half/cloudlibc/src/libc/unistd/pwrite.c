@@ -6,6 +6,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 ssize_t pwrite(int fildes, const void *buf, size_t nbyte, off_t offset) {
   if (offset < 0) {
@@ -34,7 +35,7 @@ ssize_t pwrite(int fildes, const void *buf, size_t nbyte, off_t offset) {
       else
         error = ESPIPE;
     }
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return bytes_written;

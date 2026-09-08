@@ -6,6 +6,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 int close(int fildes) {
   // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
@@ -14,7 +15,7 @@ int close(int fildes) {
 
   __wasi_errno_t error = __wasi_fd_close(fildes);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;
