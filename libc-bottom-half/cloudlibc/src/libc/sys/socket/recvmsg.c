@@ -24,6 +24,7 @@ ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
   __wasi_size_t ro_datalen;
   __wasi_roflags_t ro_flags;
   __wasi_errno_t error;
+  int guest_error = 0;
   if (msg->msg_name == NULL) {
     // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
     // already-pending cancel BEFORE parking in the host await.
@@ -52,10 +53,25 @@ ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
     
     struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
     socklen_t *addrlen = &msg->msg_namelen;
-    error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
+    // firebox#EK0 — ONE VARIABLE CANNOT INHABIT TWO NUMBERING SPACES.
+    // `error` carries the host's code from __wasi_sock_recv{,_from} above.
+    // wasi_to_sockaddr makes a purely guest-side diagnosis and returns a guest
+    // `E*`; letting it land in `error` funnelled it into the shared
+    // __wasilibc_errno_from_wasi below, which translates a guest constant a
+    // second time -- invisible today, wrong after #87F step 4. Same split as
+    // pread/pwrite.
+    guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
   }
   msg->msg_flags = ro_flags;
-  
+
+  if (guest_error != 0) {
+    // No host call is outstanding on this path -- __wasi_sock_recv_from
+    // already returned 0 -- so there is no parked call to test a cancel
+    // against and nothing to translate.
+    errno = guest_error;
+    return -1;
+  }
+
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED
