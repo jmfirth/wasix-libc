@@ -7,6 +7,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 ssize_t sendto(int socket, const void *restrict buffer, size_t length, int flags, const struct sockaddr *restrict addr, socklen_t addrlen) {
   if (buffer == NULL || addr == NULL) {
@@ -25,7 +26,7 @@ ssize_t sendto(int socket, const void *restrict buffer, size_t length, int flags
   __wasi_addr_port_t peer_addr;
   __wasi_errno_t error = sockaddr_to_wasi(addr, addrlen, &peer_addr);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 
@@ -33,7 +34,7 @@ ssize_t sendto(int socket, const void *restrict buffer, size_t length, int flags
   __wasi_size_t so_datalen;
   error = __wasi_sock_send_to(socket, si_data, si_data_len, si_flags, &peer_addr, &so_datalen);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return so_datalen;

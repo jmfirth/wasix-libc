@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 int socketpair(int domain, int ty, int protocol, int *restrict socket_vector) {
   int fd1, fd2;
@@ -33,7 +34,7 @@ int socketpair(int domain, int ty, int protocol, int *restrict socket_vector) {
   }
   __wasi_errno_t error = __wasi_sock_pair(domain, ty, protocol, &fd1, &fd2);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 

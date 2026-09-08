@@ -6,12 +6,13 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 int getpeername(int socket, struct sockaddr *restrict addr, socklen_t *restrict addrlen) {
   __wasi_addr_port_t peer_addr;
   __wasi_errno_t error = __wasi_sock_addr_peer(socket, &peer_addr);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 

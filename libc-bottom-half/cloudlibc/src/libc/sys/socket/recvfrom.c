@@ -6,6 +6,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 #define MIN(a,b) ((a)<(b) ? (a) : (b))
 
@@ -31,7 +32,7 @@ ssize_t recvfrom(int socket, void* buffer, size_t length, int flags, struct sock
                                                &ro_flags,
                                                &peer_addr);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 

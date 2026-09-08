@@ -9,6 +9,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
   __wasi_iovec_t *ri_data = (__wasi_iovec_t *)msg->msg_iov;
@@ -45,7 +46,7 @@ ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
       // call never discards what it already consumed. Never returns if a cancel
       // is pending and enabled.
       __cloudlibc_testcancel_if_intr(error);
-      errno = error;
+      errno = __wasilibc_errno_from_wasi(error);
       return -1;
     }
     
@@ -61,7 +62,7 @@ ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
     // call never discards what it already consumed. Never returns if a cancel
     // is pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return ro_datalen;

@@ -5,6 +5,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 int setsockopt(int socket, int level, int option_name, const void *restrict option_value, socklen_t option_len) {
   if (level == IPPROTO_IPV6 && option_name == IPV6_V6ONLY) {
@@ -43,7 +44,7 @@ int setsockopt(int socket, int level, int option_name, const void *restrict opti
 
       __wasi_errno_t error = __wasi_sock_set_opt_flag(socket, option_name, on);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return 0;
@@ -60,7 +61,7 @@ int setsockopt(int socket, int level, int option_name, const void *restrict opti
 	  }
       __wasi_errno_t error = __wasi_sock_set_opt_time(socket, option_name, &tm);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return 0;
@@ -81,7 +82,7 @@ int setsockopt(int socket, int level, int option_name, const void *restrict opti
 
 	  __wasi_errno_t error = __wasi_sock_set_opt_time(socket, option_name, &tm);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return 0;
@@ -101,7 +102,7 @@ int setsockopt(int socket, int level, int option_name, const void *restrict opti
       
       __wasi_errno_t error = __wasi_sock_set_opt_size(socket, option_name, fs);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return 0;

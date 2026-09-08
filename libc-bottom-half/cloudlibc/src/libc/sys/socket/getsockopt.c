@@ -4,6 +4,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 int getsockopt(int socket, int level, int option_name,
                void *restrict option_value, socklen_t *restrict option_len) {
@@ -36,7 +37,7 @@ int getsockopt(int socket, int level, int option_name,
       __wasi_bool_t on = 0;
       __wasi_errno_t error = __wasi_sock_get_opt_flag(socket, option_name, &on);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       
@@ -55,7 +56,7 @@ int getsockopt(int socket, int level, int option_name,
       __wasi_option_timestamp_t tm;
       __wasi_errno_t error = __wasi_sock_get_opt_time(socket, option_name, &tm);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
 
@@ -73,7 +74,7 @@ int getsockopt(int socket, int level, int option_name,
       __wasi_option_timestamp_t tm;
       __wasi_errno_t error = __wasi_sock_get_opt_time(socket, option_name, &tm);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
 
@@ -94,7 +95,7 @@ int getsockopt(int socket, int level, int option_name,
       __wasi_filesize_t fs;
       __wasi_errno_t error = __wasi_sock_get_opt_size(socket, option_name, &fs);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       socklen_t len = fs;
@@ -106,7 +107,7 @@ int getsockopt(int socket, int level, int option_name,
       __wasi_filesize_t fs;
       __wasi_errno_t error = __wasi_sock_get_opt_size(socket, option_name, &fs);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       int value = 0;
