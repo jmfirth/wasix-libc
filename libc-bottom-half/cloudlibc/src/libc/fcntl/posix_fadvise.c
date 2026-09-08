@@ -6,6 +6,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <wasi/libc.h>
 
 static_assert(POSIX_FADV_DONTNEED == __WASI_ADVICE_DONTNEED,
               "Value mismatch");
@@ -20,5 +21,9 @@ static_assert(POSIX_FADV_WILLNEED == __WASI_ADVICE_WILLNEED,
 int posix_fadvise(int fd, off_t offset, off_t len, int advice) {
   if (offset < 0 || len < 0)
     return EINVAL;
-  return __wasi_fd_advise(fd, offset, len, advice);
+  /* firebox#87F: posix_fadvise REPORTS THROUGH ITS RETURN VALUE, not errno,
+     so the host code has to be translated on the way out. The EINVAL two lines
+     up is already a guest constant -- one function, both spaces, and only the
+     host one converts. */
+  return __wasilibc_errno_from_wasi(__wasi_fd_advise(fd, offset, len, advice));
 }

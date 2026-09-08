@@ -622,7 +622,10 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 		*res = ret_pid;
 	}
 
-	return err;
+	/* firebox#87F: posix_spawn reports through its RETURN VALUE (POSIX), and
+	 * `err` came straight back from __wasilibc_proc_spawn2_n, which is declared
+	 * __wasi_errno_t. Host space out, guest space in. */
+	return __wasilibc_errno_from_wasi(err);
 }
 
 int posix_spawn(pid_t *restrict res, const char *restrict path,
