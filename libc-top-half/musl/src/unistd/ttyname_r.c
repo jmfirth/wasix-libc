@@ -1,6 +1,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream /* WASI has no ttyname */
 #include "syscall.h"
 #else
@@ -35,7 +36,7 @@ int ttyname_r(int fd, char *name, size_t size)
 	__wasi_tty_t tty;
 	int r = __wasi_tty_get(&tty);
 	if (r != 0) {
-		errno = r;
+		errno = __wasilibc_errno_from_wasi(r);
 		return 0;
 	}
 	if (fd == 0 && tty.stdin_tty == __WASI_BOOL_TRUE)  {

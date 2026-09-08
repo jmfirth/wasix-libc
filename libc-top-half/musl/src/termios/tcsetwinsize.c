@@ -1,4 +1,5 @@
 #include <termios.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include <sys/ioctl.h>
 #include "syscall.h"
@@ -16,7 +17,7 @@ int tcsetwinsize(int fd, const struct winsize *wsz)
 	__wasi_tty_t tty;
 	int r = __wasi_tty_get(&tty);
 	if (r != 0) {
-		errno = r;
+		errno = __wasilibc_errno_from_wasi(r);
 		return -1;
 	}
 
@@ -27,7 +28,7 @@ int tcsetwinsize(int fd, const struct winsize *wsz)
 
 	r = __wasi_tty_set(&tty);
 	if (r != 0) {
-		errno = r;
+		errno = __wasilibc_errno_from_wasi(r);
 		return -1;
 	}
 

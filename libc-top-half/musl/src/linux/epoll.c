@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <pthread.h>   /* firebox#B28 — pthread_sigmask, for epoll_pwait */
 #include <errno.h>
+#include <wasi/libc.h>
 
 int epoll_create(int size)
 {
@@ -12,7 +13,7 @@ int epoll_create(int size)
     {
         return ret_val;
     }
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
 }
 
@@ -139,7 +140,7 @@ int epoll_pwait(int fd, struct epoll_event *ev, int cnt, int to, const sigset_t 
         }
         return (int)ret_val;
     }
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
 }
 

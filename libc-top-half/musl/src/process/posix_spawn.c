@@ -18,6 +18,7 @@
 #include "pthread_impl.h"
 #include "fdop.h"
 #include "libc.h"
+#include <wasi/libc.h>
 
 #ifdef __wasilibc_unmodified_upstream
 #else
@@ -46,7 +47,7 @@ static int __sys_dup2(int old, int new)
 #else
 	__wasi_errno_t error = __wasi_fd_renumber(old, new);
 	if (error != 0) {
-		errno = error;
+		errno = __wasilibc_errno_from_wasi(error);
 		return -1;
 	}
 	return 0;

@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 #else
@@ -49,7 +50,7 @@ int setpgid(pid_t pid, pid_t pgid)
 	__wasi_errno_t error = __wasi_proc_set_pgid((__wasi_pid_t) pid,
 	                                            (__wasi_pid_t) pgid);
 	if (error != 0) {
-		errno = error;
+		errno = __wasilibc_errno_from_wasi(error);
 		return -1;
 	}
 	return 0;

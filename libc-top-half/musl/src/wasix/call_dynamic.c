@@ -1,5 +1,6 @@
 #include <wasix/call_dynamic.h>
 #include <errno.h>
+#include <wasi/libc.h>
 
 int wasix_call_dynamic(
     wasix_function_pointer_t function_id,
@@ -19,7 +20,7 @@ int wasix_call_dynamic(
 
     if (err != __WASI_ERRNO_SUCCESS)
     {
-        errno = err;
+        errno = __wasilibc_errno_from_wasi(err);
         return -1;
     }
 

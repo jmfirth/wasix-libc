@@ -1,6 +1,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 #else
@@ -19,7 +20,7 @@ int eventfd(unsigned int count, int flags)
 	int fd = -1;
 	int r = __wasi_fd_event((uint64_t)count, (uint16_t)flags, &fd);
 	if (r != 0) {
-		errno = r;
+		errno = __wasilibc_errno_from_wasi(r);
 		return -1;
 	}
 	return fd;

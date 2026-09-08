@@ -1,5 +1,6 @@
 #include <wasix/closure.h>
 #include <errno.h>
+#include <wasi/libc.h>
 
 int wasix_closure_free(wasix_function_pointer_t closure)
 {
@@ -7,7 +8,7 @@ int wasix_closure_free(wasix_function_pointer_t closure)
 
     if (err != __WASI_ERRNO_SUCCESS)
     {
-        errno = err;
+        errno = __wasilibc_errno_from_wasi(err);
         return -1;
     }
 

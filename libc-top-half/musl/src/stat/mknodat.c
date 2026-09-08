@@ -1,5 +1,6 @@
 #include <sys/stat.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 
@@ -34,7 +35,7 @@ int mknodat(int fd, const char *path, mode_t mode, dev_t dev)
 		(uint64_t) dev
 	);
 	if (err != 0) {
-		errno = err;
+		errno = __wasilibc_errno_from_wasi(err);
 		return -1;
 	}
 	return 0;

@@ -2,6 +2,7 @@
 #define __NEED_gid_t
 
 #include <bits/alltypes.h>
+#include <wasi/libc.h>
 
 #ifdef __wasilibc_unmodified_upstream
 #include <unistd.h>
@@ -54,7 +55,7 @@ int setgroups(size_t count, const gid_t list[])
 	 * order: (list, count). */
 	__wasi_errno_t err = __wasix_proc_setgroups((const uint32_t *)list, count);
 	if (err != __WASI_ERRNO_SUCCESS) {
-		errno = (int)err;
+		errno = __wasilibc_errno_from_wasi((int)err);
 		return -1;
 	}
 	return 0;
