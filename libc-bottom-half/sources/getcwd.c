@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "lock.h"
+#include <wasi/libc.h>
 
 char *__wasilibc_cwd = "/";
 
@@ -28,7 +29,7 @@ char *getcwd(char *buf, size_t size)
     }
     
     if (error != 0) {
-      errno = error;
+      errno = __wasilibc_errno_from_wasi(error);
       return NULL;
     }
     return buf;
