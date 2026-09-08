@@ -94,12 +94,41 @@ int __execvpe(const char *file, char *const argv[], char *const envp[])
  *
  * On Linux an empty argv element is an ordinary string; execve carries it and
  * the child's argc is unchanged. The only way to keep that is to stop
- * deriving the length from the payload. `*out_len` is the exact number of
- * bytes of `n` NUL-terminated entries, so an empty entry is just an entry of
- * length zero and nothing is ambiguous. The trailing NUL is still written —
- * it keeps the allocation a valid C string for anything that strlen()s it —
- * but it is NOT counted, so the host sees exactly one phantom split piece
- * after the last entry's own terminator and drops precisely that one.
+ * deriving the length from the payload — `*out_len` is computed from the
+ * entries, so an empty entry is just an entry of length zero and nothing is
+ * ambiguous.
+ *
+ * WHICH length: the trailing sentinel is COUNTED.
+ *
+ * There are two candidate conventions for a non-empty list, and they differ
+ * only in whether the final sentinel is inside the transmitted length:
+ *
+ *   n entries, sentinel EXCLUDED  ->  `x\0y\0`   (host pops 1 phantom)
+ *   n entries, sentinel INCLUDED  ->  `x\0y\0\0` (host pops 2 phantoms)
+ *
+ * The second is what firebox-rust's `combine_cstrings`
+ * (library/std/src/sys/process/unix/wasix.rs) already puts on the wire, and
+ * those artifacts cannot be rebuilt in step with libc. So the host has to
+ * decode both, and it separates them by asking whether the counted buffer
+ * ends in `\0\0`.
+ *
+ * That test is exact for every list EXCEPT one: a sentinel-excluded buffer
+ * whose LAST entry is itself empty also ends in `\0\0`, and is byte-identical
+ * to a sentinel-included buffer one element shorter. `{"A", ""}` excluded is
+ * `A\0\0`, which is `{"A"}` included. No host-side rule can separate them —
+ * MEASURED as exactly that loss (argc 2, not 3) by the `c2 tail` arm of the
+ * #39G wire probe.
+ *
+ * Counting the sentinel here collapses this packer onto the Rust convention,
+ * leaving ONE encoding on the wire and no ambiguous case at all. See
+ * `split_combined_argv_or_envp` in the wasmer fork's proc_exec3.rs for the
+ * decoder's side of this contract.
+ *
+ * The zero-entry list keeps its own length of 0. `combined` is then a lone
+ * `\0`; counting the sentinel would send length 1, which the host splits into
+ * a single empty element — `execve(p, (char*[]){NULL}, e)` would reach the
+ * child as argc 1 rather than Linux's argc 0. Sending 0 keeps that faithful
+ * and matches what every wrapper in this tree already assumed.
  */
 char *__wasilibc_exec_combine_strings_len(char *const strings[], size_t *out_len);
 
@@ -131,9 +160,11 @@ char *__wasilibc_exec_combine_strings_len(char *const strings[], size_t *out_len
 	 * whole buffer is a single `\0` — wrappers treat that as length 0. */
 	*combined_p = 0;
 
-	/* firebox#39G: the true payload length, EXCLUDING the trailing NUL above. */
+	/* firebox#39G: the transmitted length, INCLUDING the trailing NUL above,
+	 * so this packer is byte-for-byte the convention firebox-rust already
+	 * sends. Zero entries stays 0 — see the header comment for both. */
 	if (out_len != NULL)
-		*out_len = (size_t)combined_len;
+		*out_len = (combined_len == 0) ? 0 : (size_t)combined_len + 1;
 
 	return combined;
 }
