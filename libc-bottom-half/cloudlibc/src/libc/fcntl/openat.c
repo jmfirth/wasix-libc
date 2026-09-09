@@ -31,18 +31,40 @@ int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
       ~(__WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_READ |
         __WASI_RIGHTS_FD_WRITE | __WASI_RIGHTS_FD_ALLOCATE |
         __WASI_RIGHTS_FD_READDIR | __WASI_RIGHTS_FD_FILESTAT_SET_SIZE);
+  //
+  // firebox#87F — the access mode is a VALUE, not a set of bits.
+  //
+  // POSIX and Linux specify O_RDONLY/O_WRONLY/O_RDWR as three enumerated
+  // values selected by the O_ACCMODE field, not as independent flags; on Linux
+  // O_RDONLY is 0, so a `(oflag & O_RDONLY) != 0` test can never fire. Testing
+  // them as bits happens to work only while our O_RDONLY/O_WRONLY carry the
+  // WASI-invented values 0x04000000/0x10000000, where they really are disjoint
+  // bits above the wire field.
+  //
+  // Why that matters here rather than in a header: this function IS the wire
+  // encoder. It ships `oflag & 0xfff` as __wasi_fdflags_t below. Linux's
+  // O_WRONLY(1)/O_RDWR(2) land exactly on __WASI_FDFLAGS_APPEND(1) and
+  // __WASI_FDFLAGS_DSYNC(2), so once these constants move onto Linux numbering
+  // a bit-testing encoder turns every write-open into a silent O_APPEND — a
+  // fail-open, indistinguishable from a correct open, not an errno. The
+  // renumber therefore has to be preceded by this rewrite, and the value
+  // semantics below are what stays correct on both sides of it.
+  //
+  // This form is a behaviour-preserving no-op against today's constants: the
+  // switch already discriminated on `oflag & O_ACCMODE`, so reaching the RDWR
+  // arm already implied both bits were set.
   switch (oflag & O_ACCMODE) {
     case O_RDONLY:
-    case O_RDWR:
+      max |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR;
+      break;
     case O_WRONLY:
-      if ((oflag & O_RDONLY) != 0) {
-        max |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR;
-      }
-      if ((oflag & O_WRONLY) != 0) {
-        max |= __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
-               __WASI_RIGHTS_FD_ALLOCATE |
-               __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
-      }
+      max |= __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
+             __WASI_RIGHTS_FD_ALLOCATE | __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
+      break;
+    case O_RDWR:
+      max |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR |
+             __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
+             __WASI_RIGHTS_FD_ALLOCATE | __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
       break;
     case O_EXEC:
       break;

@@ -383,21 +383,30 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 				~(__WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_READ |
 				  __WASI_RIGHTS_FD_WRITE | __WASI_RIGHTS_FD_ALLOCATE |
 				  __WASI_RIGHTS_FD_READDIR | __WASI_RIGHTS_FD_FILESTAT_SET_SIZE);
+			// firebox#87F — access mode by VALUE, not by bit. Same reasoning as
+			// libc-bottom-half/cloudlibc/src/libc/fcntl/openat.c: this block is
+			// the second wire encoder for O_*, and `(oflag & O_RDONLY) != 0` is
+			// only ever true because our O_RDONLY is 0x04000000. Under Linux
+			// numbering O_RDONLY is 0 and the test dies silently, granting an
+			// O_RDONLY spawn-open no FD_READ — a fail-open on the rights side to
+			// match the O_APPEND fail-open on the flags side. Note the `default`
+			// here is a bare `break`, NOT the EINVAL openat() returns; that
+			// difference is pre-existing and deliberately preserved.
 			switch (op->oflag & O_ACCMODE)
 			{
 			case O_RDONLY:
-			case O_RDWR:
+				rights |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR;
+				break;
 			case O_WRONLY:
-				if ((op->oflag & O_RDONLY) != 0)
-				{
-					rights |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR;
-				}
-				if ((op->oflag & O_WRONLY) != 0)
-				{
-					rights |= __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
-							  __WASI_RIGHTS_FD_ALLOCATE |
-							  __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
-				}
+				rights |= __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
+						  __WASI_RIGHTS_FD_ALLOCATE |
+						  __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
+				break;
+			case O_RDWR:
+				rights |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR |
+						  __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
+						  __WASI_RIGHTS_FD_ALLOCATE |
+						  __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
 				break;
 			default:
 				break;
