@@ -80,17 +80,6 @@ struct dirent *readdir(DIR *dirp) {
     GROW(dirp->dirent, dirp->dirent_size,
          offsetof(struct dirent, d_name) + entry.d_namlen + 1);
     struct dirent *dirent = dirp->dirent;
-    switch (entry.d_type) {
-      case __WASI_FILETYPE_SOCKET_DGRAM:
-      case __WASI_FILETYPE_SOCKET_RAW:
-      case __WASI_FILETYPE_SOCKET_SEQPACKET:
-      case __WASI_FILETYPE_SOCKET_STREAM:
-        dirent->d_type = DT_SOCK;
-        break;
-      default:
-        dirent->d_type = entry.d_type;
-        break;
-    }
     memcpy(dirent->d_name, name, entry.d_namlen);
     dirent->d_name[entry.d_namlen] = '\0';
 
@@ -98,7 +87,7 @@ struct dirent *readdir(DIR *dirp) {
     // the inode number is unknown. In that case, do an `fstatat` to get the
     // inode number.
     off_t d_ino = entry.d_ino;
-    unsigned char d_type = entry.d_type;
+    unsigned char d_type = __wasilibc_filetype_to_dt(entry.d_type);
     if (d_ino == 0 && strcmp(dirent->d_name, "..") != 0) {
       struct stat statbuf;
       if (fstatat(dirp->fd, dirent->d_name, &statbuf, AT_SYMLINK_NOFOLLOW) != 0) {

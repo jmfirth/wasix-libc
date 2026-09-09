@@ -92,7 +92,6 @@ int __wasilibc_nocwd_scandirat(int dirfd, const char *dir, struct dirent ***name
         malloc(offsetof(struct dirent, d_name) + entry.d_namlen + 1);
     if (dirent == NULL)
       goto bad;
-    dirent->d_type = entry.d_type;
     memcpy(dirent->d_name, name, entry.d_namlen);
     dirent->d_name[entry.d_namlen] = '\0';
 
@@ -100,7 +99,7 @@ int __wasilibc_nocwd_scandirat(int dirfd, const char *dir, struct dirent ***name
     // the inode number is unknown. In that case, do an `fstatat` to get the
     // inode number.
     off_t d_ino = entry.d_ino;
-    unsigned char d_type = entry.d_type;
+    unsigned char d_type = __wasilibc_filetype_to_dt(entry.d_type);
     if (d_ino == 0) {
       if (fstatat(fd, dirent->d_name, &statbuf, AT_SYMLINK_NOFOLLOW) != 0) {
         return -1;
