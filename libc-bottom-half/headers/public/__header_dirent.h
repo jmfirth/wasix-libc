@@ -3,17 +3,44 @@
 
 #include <wasi/api.h>
 
-#define DT_BLK __WASI_FILETYPE_BLOCK_DEVICE
-#define DT_CHR __WASI_FILETYPE_CHARACTER_DEVICE
-#define DT_DIR __WASI_FILETYPE_DIRECTORY
-#define DT_FIFO __WASI_FILETYPE_SOCKET_STREAM
-#define DT_LNK __WASI_FILETYPE_SYMBOLIC_LINK
-#define DT_REG __WASI_FILETYPE_REGULAR_FILE
-// Since WASI(X) has more than one socket filetype, we need to use a different
-// value for DT_SOCK. The value 255 is chosen to avoid conflicts with the
-// values of __WASI_FILETYPE_*.
-#define DT_SOCK (UINT8_C(255))
-#define DT_UNKNOWN __WASI_FILETYPE_UNKNOWN
+// firebox#4TY: these are Linux's `DT_*` values, verbatim from
+// `linux/include/uapi/linux/fs.h` (and identically musl's `include/dirent.h`).
+//
+// They used to be spelled as `__WASI_FILETYPE_*`, which made `d_type` a WASI
+// filetype wearing a `DT_*` name: `DT_DIR` was 3 where Linux says 4, `DT_REG`
+// 4 where Linux says 8, and `DT_FIFO` was *aliased onto*
+// `__WASI_FILETYPE_SOCKET_STREAM` (6), so a FIFO and a stream socket shared
+// one `d_type` byte while `__WASI_FILETYPE_FIFO` (10) had no `DT_*` spelling
+// at all. Six of the eight diverged; only `DT_UNKNOWN` and `DT_CHR` happened
+// to land on Linux's value. That is the same reasoning error firebox#NJ4 corrected in
+// `__mode_t.h` -- a constant set to something *distinct* rather than to Linux's
+// value -- and both halves came from the same upstream commit, 6426235.
+//
+// Invariant 2: `d_type` is an ABI-visible byte that guest programs compare
+// against literals, serialise, and carry between separately-compiled
+// components. There is no version of "the same way you would on Linux" in
+// which `DT_DIR` is 3.
+//
+// Nothing is lost by no longer aliasing WASI's space. The single crossing
+// point from `__wasi_filetype_t` into `DT_*` is `__wasilibc_filetype_to_dt`
+// (firebox#1DX, `dirent_impl.h`), which is a symbolic switch and therefore
+// already correct at whatever values this table holds. `__wasilibc_iftodt` and
+// `__wasilibc_dttoif` in `libc-bottom-half/sources/__wasilibc_dt.c` are the
+// other two, likewise symbolic on both sides.
+//
+// With this table and firebox#NJ4's `S_IF*`, the pair satisfies Linux's
+// algebraic identity `DTTOIF(x) == (x) << 12` / `IFTODT(x) == (x) >> 12 & 017`
+// for every defined type -- which it could not before, and which is the
+// property portable code actually relies on.
+#define DT_UNKNOWN 0
+#define DT_FIFO 1
+#define DT_CHR 2
+#define DT_DIR 4
+#define DT_BLK 6
+#define DT_REG 8
+#define DT_LNK 10
+#define DT_SOCK 12
+#define DT_WHT 14
 
 #define IFTODT(x) (__wasilibc_iftodt(x))
 #define DTTOIF(x) (__wasilibc_dttoif(x))
