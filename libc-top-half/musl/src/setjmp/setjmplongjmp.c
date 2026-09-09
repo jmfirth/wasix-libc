@@ -104,9 +104,22 @@ __wasm_longjmp(void *env, int val)
  * `__wasm_setjmp` / `__wasm_longjmp` / the `__c_longjmp` tag out of libc.
  * Removing them would break every such consumer link.
  *
- * The two mechanisms never meet on one jmp_buf: libc longjmps only on buffers
- * libc itself captured (vfork.c, time/timer_create.c, and sigsetjmp/siglongjmp
- * where the buffer is the consumer's storage but BOTH halves are libc code).
+ * The two mechanisms must never meet on one jmp_buf. Where BOTH halves are
+ * libc code the pairing is automatic: time/timer_create.c captures and
+ * restores its own `jb`, and sigsetjmp/siglongjmp use the consumer's STORAGE
+ * but run libc code on both ends.
+ *
+ * ⛔ vfork.c IS THE EXCEPTION, and reading it as one of the automatic cases is
+ * what regressed firebox#EHR. `vfork()` is a MACRO (unistd.h) whose `setjmp`
+ * half expands in the CONSUMER's translation unit, where wasixcc's
+ * `-mllvm --wasm-enable-sjlj` lowers it to `__wasm_setjmp`. libc only ever
+ * supplies the RESTORE half, so `__vfork_restore` must call `__wasm_longjmp`
+ * directly -- it does. Do not "simplify" it back to the C-visible `longjmp`.
+ *
+ * ⚠️ And the C-visible pair below is not a universal fallback: `stack_checkpoint`
+ * needs asyncify instrumentation, so on a plain wasixcc-built EH guest
+ * `__wasilibc_setjmp` TRAPS (MEASURED 2026-09-09, firebox#XAE). On this shelf
+ * the C-visible pair is usable only by guests that carry that instrumentation.
  * ------------------------------------------------------------------------ */
 
 #include <wasi/libc.h>
