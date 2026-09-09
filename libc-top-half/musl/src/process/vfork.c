@@ -78,11 +78,48 @@ pid_t __vfork_internal(int setjmp_result) {
   }
 }
 
+/* Defined in src/setjmp/setjmplongjmp.c on this shelf. This is the SJLJ
+ * half of the pair -- it throws the `__c_longjmp` tag that
+ * WebAssemblyLowerEmscriptenEHSjLj's generated `try_table` catches. */
+void __wasm_longjmp(void *env, int val);
+
 // This function must be called in case proc_exit2 or proc_exec return without
 // error
+//
+// ⛔ THIS MUST USE `__wasm_longjmp`, NOT THE C-VISIBLE `longjmp` (firebox#EHR
+// regression, caught by the exec-argv-empty-element contract member).
+//
+// The buffer being restored here was NOT captured by libc. `vfork()` is a
+// MACRO (unistd.h) that expands to
+// `__vfork_internal(setjmp(__vfork_jump[...]))`, so the `setjmp` half compiles
+// in the CONSUMER's translation unit -- and the toolchain we ship to consumers
+// (wasixcc) passes `-mllvm --wasm-enable-sjlj`, which rewrites that call site
+// into `__wasm_setjmp` plus a `try_table`. The jmp_buf therefore always holds
+// an SJLJ `struct jmp_buf_impl`, never a `__wasi_stack_snapshot_t`.
+//
+// Calling the C-visible `longjmp` here routes into `__wasilibc_longjmp`
+// (WASIX `stack_restore`), which reads that storage as a stack snapshot and
+// traps -- `RuntimeError: unreachable`, no errno, no diagnostic. MEASURED
+// 2026-09-09: the WASIX pair traps in a plain wasixcc-built EH guest even on a
+// buffer it captured itself, because `stack_checkpoint` needs asyncify
+// instrumentation these guests do not carry. So the WASIX mechanism is not an
+// option on this shelf regardless of which half captured the buffer.
+//
+// This is NOT a reason to restore `-wasm-enable-sjlj` to libc's own CFLAGS.
+// #EHSJ removed it so libc's C-visible setjmp/longjmp stopped emitting a
+// `try_table` (which blocks `wasm-opt --asyncify`), and #EHR finished that
+// because `weak_alias(setjmp, _setjmp)` is a non-call use of `@setjmp` the
+// SJLJ pass refuses. Both of those stand. Naming the SJLJ helper directly is
+// what lets vfork keep the mechanism its buffer is actually in without
+// dragging the flag -- and without depending on a compile flag at all.
+//
+// No libc translation unit calls `vfork()`: the one that appears to,
+// src/thread/clone.c, is inside `#if defined(__wasilibc_unmodified_upstream)`
+// and compiles to an empty `clone.o` here. Consumers are the only callers, so
+// the SJLJ capture above holds for every buffer that reaches this function.
 _Noreturn void __vfork_restore() {
   // Longjmp back to the vfork call site in the parent
-  longjmp(__vfork_jump[1 - __vfork_jump_free_index], 1);
+  __wasm_longjmp(__vfork_jump[1 - __vfork_jump_free_index], 1);
   __builtin_unreachable();
 }
 
