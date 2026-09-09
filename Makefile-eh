@@ -149,12 +149,38 @@ CFLAGS += -Wall -Wextra -Werror -Wno-error=deprecated \
  -Wno-unknown-warning-option \
  -Wno-unused-command-line-argument
 
+# firebox#EHR — `-mllvm --wasm-enable-sjlj -Wl,-mllvm,--wasm-enable-sjlj` USED TO
+# BE IN BOTH BRANCHES BELOW AND IS GONE, for the same reason it left
+# firebox's scripts/wasix-libc/build.sh (see the #EHSJ note at build.sh:205).
+#
+# The flag made LLVM's WebAssemblyLowerEmscriptenEHSjLj pass rewrite libc's OWN
+# setjmp call sites onto __wasm_setjmp/__wasm_longjmp. #EHSJ made that
+# unnecessary — setjmplongjmp.c now defines the C-visible setjmp/longjmp over
+# the WASIX host-call path on this shelf too, so vfork.c's `U longjmp` resolves
+# inside libc.a — and made it IMPOSSIBLE: the same commit's
+# `weak_alias(setjmp, _setjmp)` is a non-call use of @setjmp, which the pass
+# rejects outright:
+#
+#   fatal error: error in backend: Indirect use of setjmp is not supported:
+#   @_setjmp = weak hidden alias i32 (ptr), ptr @setjmp
+#
+# MEASURED on setjmplongjmp.c with this file's exact flag set, wasixcc's clang:
+#   61a3300 (pre-#EHSJ)  with flag exit 0   without flag exit 0
+#   2d41f0b (#EHSJ)      with flag exit 70  without flag exit 0
+#   9232cf9 (tip)        with flag exit 70  without flag exit 0
+# So the EH shelf has been unbuildable from this Makefile since #EHSJ landed;
+# dropping the flag is what #EHSJ already did on the other producer.
+#
+# The __wasm_setjmp/__wasm_setjmp_test/__wasm_longjmp trio and the __c_longjmp
+# tag are hand-written C in setjmplongjmp.c, not pass output, so they survive
+# the removal and every wasixcc consumer TU (which still passes
+# `-mllvm --wasm-enable-sjlj` itself) still links against them.
 ifeq ($(EXNREF_EH), yes)
     # Use wasm 3.0 exnref exception handling
-    CFLAGS += -mexception-handling -fwasm-exceptions -mllvm --wasm-enable-sjlj -Wl,-mllvm,--wasm-enable-sjlj -mllvm --wasm-enable-eh -Wl,-mllvm,--wasm-enable-eh -mllvm --wasm-use-legacy-eh=false -Wl,-mllvm,--wasm-use-legacy-eh=false -Wl,-mllvm,--exception-model=wasm
+    CFLAGS += -mexception-handling -fwasm-exceptions -mllvm --wasm-enable-eh -Wl,-mllvm,--wasm-enable-eh -mllvm --wasm-use-legacy-eh=false -Wl,-mllvm,--wasm-use-legacy-eh=false -Wl,-mllvm,--exception-model=wasm
 else
     # Use legacy exception handling
-    CFLAGS += -mexception-handling -fwasm-exceptions -mllvm --wasm-enable-sjlj -Wl,-mllvm,--wasm-enable-sjlj
+    CFLAGS += -mexception-handling -fwasm-exceptions
 endif
 
 # Configure support for threads.
