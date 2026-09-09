@@ -14,6 +14,11 @@
  * `__wasm_setjmp.N` suffixed refs that wasm-ld 21.1.2 does not resolve.
  * See issue #37 and docs/runtime-gotchas.md §8.
  *
+ * firebox#EHSJ: libc is no longer built with `-mllvm -wasm-enable-sjlj`, so
+ * that pass does not run over THIS file any more and the split is currently
+ * inert here. It is kept because the hazard returns the moment anyone
+ * reinstates the flag, and because the split costs nothing.
+ *
  * Mask storage: thread-local slot keyed by jmp_buf pointer. Single-slot,
  * so nested sigsetjmp pairs within a thread will clobber the outer saved
  * mask — documented limitation, covers the bash/perl exception-unwind
@@ -27,7 +32,8 @@ static __FBX_THREAD_LOCAL int __firebox_saved_valid;
 /* Out-of-line recorder. The noinline attribute is load-bearing: if the
  * body were inlined back into sigsetjmp, the resulting non-trivial
  * control flow around `return setjmp(buf)` would re-trigger SJLJ
- * instrumentation and reintroduce the `.N` suffix refs. */
+ * instrumentation and reintroduce the `.N` suffix refs. Same firebox#EHSJ
+ * note as above: inert while the sjlj flag is off, kept as a guard. */
 __attribute__((noinline))
 static void __firebox_sigsetjmp_record(void *buf, int savesigs) {
     if (savesigs) {

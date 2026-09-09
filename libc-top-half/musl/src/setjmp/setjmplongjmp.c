@@ -79,16 +79,54 @@ __wasm_longjmp(void *env, int val)
         __builtin_wasm_throw(1, arg); /* 1 == C_LONGJMP */
 }
 
-#  else
+#  endif /* __wasm_exception_handling__ */
+
+/* ------------------------------------------------------------------------
+ * The C-VISIBLE setjmp/longjmp, on BOTH shelves. (firebox#EHSJ)
+ *
+ * These used to exist only on the non-EH shelf. On the EH shelf libc itself
+ * was compiled with `-mllvm -wasm-enable-sjlj`, so LLVM's
+ * WebAssemblyLowerEmscriptenEHSjLj pass rewrote every `setjmp` call site in
+ * libc into `__wasm_setjmp` + a `try_table` catching `__c_longjmp`, and there
+ * was no `setjmp` SYMBOL to link against at all.
+ *
+ * That coupled two unrelated things: EH-for-C++-exceptions (which the shelf
+ * genuinely needs) and EH-for-setjmp/longjmp (which it does not). The cost was
+ * a single `try_table` in sigsetjmp_wasix.o -- and `wasm-opt --asyncify`
+ * cannot process a module containing one, which took the whole EH libc
+ * provider off the asyncify path.
+ *
+ * So libc's own setjmp/longjmp now go through the WASIX host-call mechanism
+ * (`stack_checkpoint` / `stack_restore`) on both shelves, exactly as the
+ * non-EH shelf always did. The `__wasm_*` helpers above STAY: the toolchain we
+ * ship to consumers (wasixcc) still passes `-mllvm --wasm-enable-sjlj`, so a
+ * consumer's own setjmp call sites are still SJLJ-lowered and still resolve
+ * `__wasm_setjmp` / `__wasm_longjmp` / the `__c_longjmp` tag out of libc.
+ * Removing them would break every such consumer link.
+ *
+ * The two mechanisms never meet on one jmp_buf: libc longjmps only on buffers
+ * libc itself captured (vfork.c, time/timer_create.c, and sigsetjmp/siglongjmp
+ * where the buffer is the consumer's storage but BOTH halves are libc code).
+ * ------------------------------------------------------------------------ */
 
 #include <wasi/libc.h>
 
+/* On the EH shelf <setjmp.h> still declares the 156-byte musl-shaped jmp_buf
+ * rather than __wasi_stack_snapshot_t, because LLVM's SJLJ lowering in
+ * consumer TUs writes its own 16-byte `struct jmp_buf_impl` into that same
+ * storage. Only the size has to hold; wasm linear-memory accesses carry an
+ * alignment HINT, never a trap, so the 4-vs-8 alignment gap is not a fault on
+ * this target. Assert the size so a header change cannot silently truncate a
+ * snapshot. */
+_Static_assert(sizeof(jmp_buf) >= sizeof(__wasi_stack_snapshot_t),
+               "jmp_buf must be able to hold a WASIX stack snapshot");
+
 _Noreturn void longjmp (jmp_buf buf, int val) {
-    __wasilibc_longjmp(buf, val);
+    __wasilibc_longjmp((__wasi_stack_snapshot_t *)buf, val);
 }
 
 int setjmp (jmp_buf buf) {
-    return __wasilibc_setjmp(buf);
+    return __wasilibc_setjmp((__wasi_stack_snapshot_t *)buf);
 }
 
 /* POSIX _setjmp/_longjmp are the no-signal-mask variants. musl's setjmp does
@@ -96,16 +134,12 @@ int setjmp (jmp_buf buf) {
  * src/signal/sigsetjmp_wasix.c), so plain aliases are the faithful mapping --
  * exactly what musl does on every other arch.
  *
- * Only the NON-EH branch needs these. On the EH shelf setjmp/longjmp are not
- * symbols at all: LLVM's WebAssemblyLowerEmscriptenEHSjLj pass rewrites the
- * call site, and MEASURED it recognises the underscore spellings too -- a
- * program calling _setjmp there links to byte-identical output. Aliasing here
- * would have nothing to alias and is not needed. (firebox #P47)
+ * These now exist on BOTH shelves. The old note here said the EH shelf needed
+ * no aliases because setjmp was not a symbol there; that premise is gone with
+ * the flag. (firebox #P47, superseded by #EHSJ)
  */
 weak_alias(setjmp, _setjmp);
 weak_alias(longjmp, _longjmp);
-
-#  endif
 
 /* WASIX sigsetjmp is defined in src/signal/sigsetjmp_wasix.c so it
  * can share the TLS saved-mask slot with siglongjmp. See issue #37. */
