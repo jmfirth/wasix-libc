@@ -3,6 +3,9 @@
 #include <signal.h>
 #include <pthread.h>   /* firebox#B28 — pthread_sigmask, for epoll_pwait */
 #include <errno.h>
+#include <fcntl.h>     /* firebox#RK5 — fcntl/F_SETFD/FD_CLOEXEC for EPOLL_CLOEXEC */
+#include <unistd.h>    /* firebox#RK5 — close, on the mark-failure path */
+#include <wasi/libc.h>
 
 int epoll_create(int size)
 {
@@ -12,13 +15,94 @@ int epoll_create(int size)
     {
         return ret_val;
     }
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
 }
 
+/* firebox#RK5 — epoll_create1 DISCARDED ITS FLAGS ARGUMENT.
+ *
+ * `EPOLL_CLOEXEC` is the only flag Linux defines here, and it was thrown away:
+ * a guest asking for a close-on-exec epoll descriptor got one that survived
+ * exec, at exit 0 with a valid fd. Nothing at the call site can see it. The
+ * leak surfaces far from the cause, in a child that inherited a descriptor it
+ * should never have seen — a fail-open where the broken state is
+ * indistinguishable from the working one, which invariant 3 admits no
+ * deferral for.
+ *
+ * `__wasi_epoll_create` takes no argument at all, so there is no flag to pass
+ * through. The fd is marked after creation with `fcntl(F_SETFD, FD_CLOEXEC)`,
+ * which is the mechanism the rest of this libc already uses for exactly this
+ * shape — a create syscall with no fdflagsext parameter: socket.c (SOCK_CLOEXEC),
+ * accept.c (accept4's SOCK_CLOEXEC), socketpair.c and cloudlibc's pipe2.c all
+ * do the same, and fcntl.c's F_SETFD arm is what turns it into
+ * `__WASI_FDFLAGSEXT_CLOEXEC` on the fd table. Not a new path.
+ *
+ * The close-on-failure is not defensive padding: returning a usable fd whose
+ * requested cloexec was silently not applied would reintroduce the exact
+ * fail-open this fixes, so a descriptor that cannot be marked is not handed
+ * back. Same shape as socket.c's, errno preserved across the close.
+ *
+ * Unknown bits are EINVAL because that is what Linux does (`if (flags &
+ * ~EPOLL_CLOEXEC) return -EINVAL;` in do_epoll_create), and because accepting
+ * them silently is how the dropped flag went unnoticed in the first place.
+ */
 int epoll_create1(int flags)
 {
-    return epoll_create(0);
+    if (flags & ~EPOLL_CLOEXEC)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = epoll_create(0);
+    if (fd < 0)
+    {
+        return -1;
+    }
+
+    if (flags & EPOLL_CLOEXEC)
+    {
+        if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
+        {
+            int saved_errno = errno;
+            close(fd);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    return fd;
+}
+
+/* firebox#XBX — epoll_ctl RETURNED A RAW WASI ERRNO, NOT -1 WITH errno SET.
+ *
+ * `__wasi_epoll_ctl` returns a `__wasi_errno_t`, and both `return` statements
+ * below handed it straight back to the guest. Linux's epoll_ctl returns 0 or
+ * -1 with errno set, so `if (epoll_ctl(...) < 0)` -- the way every caller
+ * writes it -- saw SUCCESS on every failure, and the failure left errno
+ * untouched, so even a caller that checked `!= 0` had nothing to report. A
+ * fail-open where broken state is indistinguishable from working state;
+ * invariant 3 admits no deferral for that.
+ *
+ * The translation is not decorative even though it is the identity today. The
+ * naive `errno = err; return -1;` would be accidentally right until #87F step
+ * 4 renumbers the guest side, and would then silently hand back a plausible
+ * wrong errno with nothing to flag it -- a bad fd reporting the guest meaning
+ * of WASI 8 rather than EBADF. Written with the translation, it is correct in
+ * both numbering worlds.
+ *
+ * Checked against the whole file, since the class is the unit: epoll_create
+ * (:8) and epoll_pwait (:57) already translate and return -1, and
+ * epoll_create1/epoll_wait delegate to them, so epoll_ctl was the only carrier.
+ */
+static inline int __fbx_epoll_ctl_finish(__wasi_errno_t error)
+{
+    if (error != 0)
+    {
+        errno = __wasilibc_errno_from_wasi(error);
+        return -1;
+    }
+    return 0;
 }
 
 int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
@@ -48,9 +132,9 @@ int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
         ev2.data.fd = fd2;
         ev2.data.data1 = ev->data.u32;
         ev2.data.data2 = ev->data.u64;
-        return __wasi_epoll_ctl(fd, op, fd2, &ev2);
+        return __fbx_epoll_ctl_finish(__wasi_epoll_ctl(fd, op, fd2, &ev2));
     }
-    return __wasi_epoll_ctl(fd, op, fd2, NULL);
+    return __fbx_epoll_ctl_finish(__wasi_epoll_ctl(fd, op, fd2, NULL));
 }
 
 int epoll_pwait(int fd, struct epoll_event *ev, int cnt, int to, const sigset_t *sigs)
@@ -139,7 +223,7 @@ int epoll_pwait(int fd, struct epoll_event *ev, int cnt, int to, const sigset_t 
         }
         return (int)ret_val;
     }
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
 }
 

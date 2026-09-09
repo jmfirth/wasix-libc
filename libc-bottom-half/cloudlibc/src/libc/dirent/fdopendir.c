@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #include "dirent_impl.h"
+#include <wasi/libc.h>
 
 DIR *fdopendir(int fd) {
   // Allocate new directory object and read buffer.
@@ -29,7 +30,7 @@ DIR *fdopendir(int fd) {
                                 __WASI_DIRCOOKIE_START, &buffer_used);
   dirp->buffer_used = buffer_used;
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     free(dirp->buffer);
     free(dirp);
     return NULL;

@@ -1,4 +1,5 @@
 #include <termios.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include <sys/ioctl.h>
 #else
@@ -17,7 +18,7 @@ int tcgetattr(int fd, struct termios *tio)
 	__wasi_tty_t tty;
 	int r = __wasi_tty_get(&tty);
 	if (r != 0) {
-		errno = r;
+		errno = __wasilibc_errno_from_wasi(r);
 		return -1;
 	}
 

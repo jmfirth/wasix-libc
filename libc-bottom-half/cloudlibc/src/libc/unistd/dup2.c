@@ -6,7 +6,7 @@
 int dup2(int fd, int newfd) {
     __wasi_errno_t error = __wasi_fd_renumber(fd, newfd);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
     return newfd;

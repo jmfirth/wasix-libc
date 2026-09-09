@@ -9,6 +9,7 @@
 #include <unistd.h>
 #endif
 #include "pthread_impl.h"
+#include <wasi/libc.h>
 
 #ifndef __wasilibc_unmodified_upstream
 /* firebox SA_NODEFER synchronous self-raise (defined in sigaction.c).
@@ -93,7 +94,7 @@ int raise(int sig)
 	 * directly). Mirrors kill.c / sigqueue.c errno mapping. */
 	__wasi_errno_t e = __wasi_thread_signal(__pthread_self()->tid, (__wasi_signal_t)sig);
 	if (e != __WASI_ERRNO_SUCCESS) {
-		errno = (int)e;
+		errno = __wasilibc_errno_from_wasi((int)e);
 		return -1;
 	}
 	return 0;

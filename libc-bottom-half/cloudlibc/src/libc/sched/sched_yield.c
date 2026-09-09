@@ -5,11 +5,12 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <sched.h>
+#include <wasi/libc.h>
 
 int sched_yield(void) {
   __wasi_errno_t error = __wasi_sched_yield();
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;

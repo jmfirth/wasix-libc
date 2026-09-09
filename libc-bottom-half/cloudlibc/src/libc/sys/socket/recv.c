@@ -10,6 +10,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <stdint.h>
+#include <wasi/libc.h>
 
 ssize_t recv(int socket, void *restrict buffer, size_t length, int flags) {
   // Prepare input parameters.
@@ -40,7 +41,7 @@ ssize_t recv(int socket, void *restrict buffer, size_t length, int flags) {
     // call never discards what it already consumed. Never returns if a cancel
     // is pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return ro_datalen;

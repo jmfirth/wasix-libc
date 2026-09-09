@@ -14,6 +14,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <wasi/libc.h>
 
 /* Map our advisory-lock cmds onto fd_lock_range op codes that the
  * WASIX runtime understands. Keeping the libc-side constants close
@@ -31,7 +32,7 @@ int fcntl(int fildes, int cmd, ...) {
       __wasi_fdflagsext_t flags;
       __wasi_errno_t error = __wasi_fd_fdflags_get(fildes, &flags);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return flags & __WASI_FDFLAGSEXT_CLOEXEC ? FD_CLOEXEC : 0;
@@ -49,7 +50,7 @@ int fcntl(int fildes, int cmd, ...) {
       __wasi_errno_t error =
           __wasi_fd_fdflags_set(fildes, fd_flags);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return 0;
@@ -59,7 +60,7 @@ int fcntl(int fildes, int cmd, ...) {
       __wasi_fdstat_t fds;
       __wasi_errno_t error = __wasi_fd_fdstat_get(fildes, &fds);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
 
@@ -89,7 +90,7 @@ int fcntl(int fildes, int cmd, ...) {
       __wasi_errno_t error =
           __wasi_fd_fdstat_set_flags(fildes, fs_flags);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return 0;
@@ -105,7 +106,7 @@ int fcntl(int fildes, int cmd, ...) {
       __wasi_bool_t cloexec = cmd == F_DUPFD_CLOEXEC;
       __wasi_errno_t error = __wasi_fd_dup2(fildes, min_res_fd, cloexec, &fd);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return fd;
@@ -156,7 +157,7 @@ int fcntl(int fildes, int cmd, ...) {
             (__wasi_fd_t)fildes, l_type, whence,
             (int64_t)fl->l_start, (int64_t)fl->l_len, out);
         if (err != __WASI_ERRNO_SUCCESS) {
-          errno = (int)err;
+          errno = __wasilibc_errno_from_wasi((int)err);
           return -1;
         }
         /* out = {l_type (0=RDLCK,1=WRLCK,2=UNLCK), l_pid, l_start, l_len}. */
@@ -182,7 +183,7 @@ int fcntl(int fildes, int cmd, ...) {
           (__wasi_fd_t)fildes, op, l_type, whence,
           (int64_t)fl->l_start, (int64_t)fl->l_len);
       if (err != __WASI_ERRNO_SUCCESS) {
-        errno = (int)err;
+        errno = __wasilibc_errno_from_wasi((int)err);
         return -1;
       }
       return 0;

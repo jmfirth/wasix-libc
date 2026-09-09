@@ -7,6 +7,7 @@
 #include <string.h>
 #endif
 #include <errno.h>
+#include <wasi/libc.h>
 
 int tcsetattr(int fd, int act, const struct termios *tio)
 {
@@ -20,7 +21,7 @@ int tcsetattr(int fd, int act, const struct termios *tio)
 	__wasi_tty_t tty;
 	int r = __wasi_tty_get(&tty);
 	if (r != 0) {
-		errno = r;
+		errno = __wasilibc_errno_from_wasi(r);
 		return -1;
 	}
 
@@ -44,7 +45,7 @@ int tcsetattr(int fd, int act, const struct termios *tio)
 
 	r = __wasi_tty_set(&tty);
 	if (r != 0) {
-		errno = r;
+		errno = __wasilibc_errno_from_wasi(r);
 		return -1;
 	}
 

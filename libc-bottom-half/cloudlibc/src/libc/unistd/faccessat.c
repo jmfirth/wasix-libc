@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 _Static_assert(AT_EACCESS != 0,
                "AT_EACCESS must remain distinguishable from flags == 0");
@@ -29,7 +30,7 @@ int __wasilibc_nocwd_faccessat(int fd, const char *path, int amode, int flag) {
   __wasi_errno_t error =
       __wasix_path_access(fd, path, strlen(path), amode, flag);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;

@@ -57,7 +57,7 @@ int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
   __wasi_fdstat_t fsb_cur;
   __wasi_errno_t error = __wasi_fd_fdstat_get(fd, &fsb_cur);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 
@@ -86,7 +86,7 @@ int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
     // call never discards what it already consumed. Never returns if a cancel
     // is pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return newfd;

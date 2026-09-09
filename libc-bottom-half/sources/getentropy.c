@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <wasi/api.h>
+#include <wasi/libc.h>
 
 int __getentropy(void *buffer, size_t len) {
     if (len > 256) {
@@ -12,7 +13,7 @@ int __getentropy(void *buffer, size_t len) {
     int r = __wasi_random_get(buffer, len);
 
     if (r != 0) {
-        errno = r;
+        errno = __wasilibc_errno_from_wasi(r);
         return -1;
     }
 

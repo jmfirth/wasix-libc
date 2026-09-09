@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "dirent_impl.h"
+#include <wasi/libc.h>
 
 static_assert(DT_BLK == __WASI_FILETYPE_BLOCK_DEVICE, "Value mismatch");
 static_assert(DT_CHR == __WASI_FILETYPE_CHARACTER_DEVICE, "Value mismatch");
@@ -125,7 +126,7 @@ struct dirent *readdir(DIR *dirp) {
                                   dirp->cookie, &buffer_used);
     dirp->buffer_used = buffer_used;
     if (error != 0) {
-      errno = error;
+      errno = __wasilibc_errno_from_wasi(error);
       return NULL;
     }
     dirp->buffer_processed = 0;

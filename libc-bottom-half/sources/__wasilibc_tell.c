@@ -1,5 +1,6 @@
 #include <wasi/api.h>
 #include <errno.h>
+#include <wasi/libc.h>
 
 off_t __wasilibc_tell(int fildes) {
     __wasi_filesize_t offset;
@@ -7,7 +8,7 @@ off_t __wasilibc_tell(int fildes) {
     if (error != 0) {
         // lseek returns ESPIPE on when called on a pipe, socket, or fifo,
         // which on WASI would translate into ENOTCAPABLE.
-        errno = error == ENOTCAPABLE ? ESPIPE : error;
+        errno = error == __WASI_ERRNO_NOTCAPABLE ? ESPIPE : __wasilibc_errno_from_wasi(error);
         return -1;
     }
     return offset;

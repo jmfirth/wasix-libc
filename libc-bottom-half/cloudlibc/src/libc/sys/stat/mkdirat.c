@@ -7,11 +7,12 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 int __wasilibc_nocwd_mkdirat_nomode(int fd, const char *path) {
   __wasi_errno_t error = __wasi_path_create_directory(fd, path);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <wasi/libc.h>
 
 int poll(struct pollfd *fds, size_t nfds, int timeout) {
   // Construct events for poll().
@@ -107,7 +108,7 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     // the runtime reported — in particular `EINTR`, which is how an indefinite
     // wait ends when a signal handler runs (signal(7): poll is never
     // restarted).
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 

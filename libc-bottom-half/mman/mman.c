@@ -39,6 +39,7 @@
 // emulated-mman objects are not compiled with -I headers/private (only the
 // top-half objects are); getrlimit reaches the same table with no Makefile change.
 #include <sys/resource.h>
+#include <wasi/libc.h>
 
 // firebox#6ZJ: PIC-THIN errno routing — reach errno through __errno_location()
 // instead of the bare `errno` lvalue, so this object can be linked into a THIN
@@ -836,7 +837,7 @@ static int wasix_mmap_check_file_preconditions(int prot, int flags, int fd,
     __wasi_errno_t error = __wasi_fd_fdstat_get((__wasi_fd_t)fd, &fds);
     if (error != 0) {
         // Bad/closed fd surfaces as __WASI_ERRNO_BADF, which is EBADF.
-        errno = (int)error;
+        errno = __wasilibc_errno_from_wasi((int)error);
         return -1;
     }
 

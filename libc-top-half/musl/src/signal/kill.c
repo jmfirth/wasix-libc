@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 #else
@@ -95,7 +96,7 @@ int kill(pid_t pid, int sig)
 	}
 	__wasi_errno_t e = __wasi_proc_signal(pid, (__wasi_signal_t)sig);
 	if (e != __WASI_ERRNO_SUCCESS) {
-		errno = (int)e;
+		errno = __wasilibc_errno_from_wasi((int)e);
 		return -1;
 	}
 	return 0;

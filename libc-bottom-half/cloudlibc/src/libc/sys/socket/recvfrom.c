@@ -6,6 +6,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 #define MIN(a,b) ((a)<(b) ? (a) : (b))
 
@@ -31,10 +32,24 @@ ssize_t recvfrom(int socket, void* buffer, size_t length, int flags, struct sock
                                                &ro_flags,
                                                &peer_addr);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 
-  wasi_to_sockaddr(&peer_addr, addr, addrlen);
+  // firebox#9EJ — the conversion's errno was discarded. It is a guest `E*` and
+  // must not pass through __wasilibc_errno_from_wasi; see common/net.h.
+  //
+  // A NULL `addr` is legal here for the same reason it is legal in accept():
+  // recvfrom() with a NULL source address means the caller does not want it.
+  // The datagram has already been consumed at this point, but reporting the
+  // failure anyway is what Linux does -- __sys_recvfrom overwrites its return
+  // with move_addr_to_user's error.
+  if (addr != NULL) {
+    int guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
+    if (guest_error != 0) {
+      errno = guest_error;
+      return -1;
+    }
+  }
   return ro_datalen;
 }

@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <signal.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 #endif
@@ -61,7 +62,7 @@ pid_t __vfork_internal(int setjmp_result) {
     int ret = __wasi_proc_fork_env(&__child_pid);
     if (ret != 0) {
       // Fork failed
-      errno = ret;
+      errno = __wasilibc_errno_from_wasi(ret);
       return (pid_t)-1;
     }
 

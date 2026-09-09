@@ -145,4 +145,141 @@
 #define ERFKILL 253
 #define EHWPOISON 254
 
+// firebox#87F: the single source of truth for WASI errno -> guest errno.
+//
+// Every consumer of this relationship is generated from __FBX_ERRNO_MAP and
+// nothing else: the constant-expression macro below, the lookup table in
+// libc-bottom-half/cloudlibc/src/libc/errno/errno.c, and (later) the
+// regenerated constants in ../firebox-forks/libc-rs. That is why the map
+// lives in this header rather than next to the function -- this file is the
+// artifact the Rust side is regenerated FROM, so it has to be able to
+// describe the mapping without reference to any .c file.
+//
+// Right now every E* above is #defined to its __WASI_ERRNO_* counterpart, so
+// the map is the identity and __FBX_E_FROM_WASI(w) == w for every WASI errno.
+// That is deliberate: it lets the machinery land, be asserted, and be
+// reviewed while it provably cannot change any program's behaviour. When the
+// E* values are renumbered onto Linux uapi the map stops being the identity
+// and every one of those assertions starts carrying real weight, without a
+// single line of the machinery moving.
+//
+// A: an opaque pass-through argument. C macros cannot be partially applied,
+// so a consumer that needs per-row access to something outside the list (the
+// ternary chain needs the input expression) threads it through here. A
+// consumer that does not need it passes a placeholder and ignores it.
+#define __FBX_ERRNO_MAP(X, A) \
+  X(A, __WASI_ERRNO_2BIG,           E2BIG) \
+  X(A, __WASI_ERRNO_ACCES,          EACCES) \
+  X(A, __WASI_ERRNO_ADDRINUSE,      EADDRINUSE) \
+  X(A, __WASI_ERRNO_ADDRNOTAVAIL,   EADDRNOTAVAIL) \
+  X(A, __WASI_ERRNO_AFNOSUPPORT,    EAFNOSUPPORT) \
+  X(A, __WASI_ERRNO_AGAIN,          EAGAIN) \
+  X(A, __WASI_ERRNO_ALREADY,        EALREADY) \
+  X(A, __WASI_ERRNO_BADF,           EBADF) \
+  X(A, __WASI_ERRNO_BADMSG,         EBADMSG) \
+  X(A, __WASI_ERRNO_BUSY,           EBUSY) \
+  X(A, __WASI_ERRNO_CANCELED,       ECANCELED) \
+  X(A, __WASI_ERRNO_CHILD,          ECHILD) \
+  X(A, __WASI_ERRNO_CONNABORTED,    ECONNABORTED) \
+  X(A, __WASI_ERRNO_CONNREFUSED,    ECONNREFUSED) \
+  X(A, __WASI_ERRNO_CONNRESET,      ECONNRESET) \
+  X(A, __WASI_ERRNO_DEADLK,         EDEADLK) \
+  X(A, __WASI_ERRNO_DESTADDRREQ,    EDESTADDRREQ) \
+  X(A, __WASI_ERRNO_DOM,            EDOM) \
+  X(A, __WASI_ERRNO_DQUOT,          EDQUOT) \
+  X(A, __WASI_ERRNO_EXIST,          EEXIST) \
+  X(A, __WASI_ERRNO_FAULT,          EFAULT) \
+  X(A, __WASI_ERRNO_FBIG,           EFBIG) \
+  X(A, __WASI_ERRNO_HOSTUNREACH,    EHOSTUNREACH) \
+  X(A, __WASI_ERRNO_IDRM,           EIDRM) \
+  X(A, __WASI_ERRNO_ILSEQ,          EILSEQ) \
+  X(A, __WASI_ERRNO_INPROGRESS,     EINPROGRESS) \
+  X(A, __WASI_ERRNO_INTR,           EINTR) \
+  X(A, __WASI_ERRNO_INVAL,          EINVAL) \
+  X(A, __WASI_ERRNO_IO,             EIO) \
+  X(A, __WASI_ERRNO_ISCONN,         EISCONN) \
+  X(A, __WASI_ERRNO_ISDIR,          EISDIR) \
+  X(A, __WASI_ERRNO_LOOP,           ELOOP) \
+  X(A, __WASI_ERRNO_MFILE,          EMFILE) \
+  X(A, __WASI_ERRNO_MLINK,          EMLINK) \
+  X(A, __WASI_ERRNO_MSGSIZE,        EMSGSIZE) \
+  X(A, __WASI_ERRNO_MULTIHOP,       EMULTIHOP) \
+  X(A, __WASI_ERRNO_NAMETOOLONG,    ENAMETOOLONG) \
+  X(A, __WASI_ERRNO_NETDOWN,        ENETDOWN) \
+  X(A, __WASI_ERRNO_NETRESET,       ENETRESET) \
+  X(A, __WASI_ERRNO_NETUNREACH,     ENETUNREACH) \
+  X(A, __WASI_ERRNO_NFILE,          ENFILE) \
+  X(A, __WASI_ERRNO_NOBUFS,         ENOBUFS) \
+  X(A, __WASI_ERRNO_NODEV,          ENODEV) \
+  X(A, __WASI_ERRNO_NOENT,          ENOENT) \
+  X(A, __WASI_ERRNO_NOEXEC,         ENOEXEC) \
+  X(A, __WASI_ERRNO_NOLCK,          ENOLCK) \
+  X(A, __WASI_ERRNO_NOLINK,         ENOLINK) \
+  X(A, __WASI_ERRNO_NOMEM,          ENOMEM) \
+  X(A, __WASI_ERRNO_NOMSG,          ENOMSG) \
+  X(A, __WASI_ERRNO_NOPROTOOPT,     ENOPROTOOPT) \
+  X(A, __WASI_ERRNO_NOSPC,          ENOSPC) \
+  X(A, __WASI_ERRNO_NOSYS,          ENOSYS) \
+  X(A, __WASI_ERRNO_NOTCONN,        ENOTCONN) \
+  X(A, __WASI_ERRNO_NOTDIR,         ENOTDIR) \
+  X(A, __WASI_ERRNO_NOTEMPTY,       ENOTEMPTY) \
+  X(A, __WASI_ERRNO_NOTRECOVERABLE, ENOTRECOVERABLE) \
+  X(A, __WASI_ERRNO_NOTSOCK,        ENOTSOCK) \
+  X(A, __WASI_ERRNO_NOTSUP,         ENOTSUP) \
+  X(A, __WASI_ERRNO_NOTTY,          ENOTTY) \
+  X(A, __WASI_ERRNO_NXIO,           ENXIO) \
+  X(A, __WASI_ERRNO_OVERFLOW,       EOVERFLOW) \
+  X(A, __WASI_ERRNO_OWNERDEAD,      EOWNERDEAD) \
+  X(A, __WASI_ERRNO_PERM,           EPERM) \
+  X(A, __WASI_ERRNO_PIPE,           EPIPE) \
+  X(A, __WASI_ERRNO_PROTO,          EPROTO) \
+  X(A, __WASI_ERRNO_PROTONOSUPPORT, EPROTONOSUPPORT) \
+  X(A, __WASI_ERRNO_PROTOTYPE,      EPROTOTYPE) \
+  X(A, __WASI_ERRNO_RANGE,          ERANGE) \
+  X(A, __WASI_ERRNO_ROFS,           EROFS) \
+  X(A, __WASI_ERRNO_SPIPE,          ESPIPE) \
+  X(A, __WASI_ERRNO_SRCH,           ESRCH) \
+  X(A, __WASI_ERRNO_STALE,          ESTALE) \
+  X(A, __WASI_ERRNO_TIMEDOUT,       ETIMEDOUT) \
+  X(A, __WASI_ERRNO_TXTBSY,         ETXTBSY) \
+  X(A, __WASI_ERRNO_XDEV,           EXDEV) \
+  X(A, __WASI_ERRNO_NOTCAPABLE,     ENOTCAPABLE) \
+  X(A, __WASI_ERRNO_SHUTDOWN,       ESHUTDOWN) \
+  X(A, __WASI_ERRNO_MEMVIOLATION,   EMEMVIOLATION) \
+  X(A, __WASI_ERRNO_UNKNOWN,        EUNKNOWN) \
+  X(A, __WASI_ERRNO_PENDING,        EPENDING)
+
+// The largest WASI errno the map covers. The WASI errno space is dense over
+// [0, __FBX_ERRNO_WASI_MAX]; __WASI_ERRNO_SUCCESS (0) is not an error and has
+// no E* name, so it is not a row of the map.
+#define __FBX_ERRNO_WASI_MAX __WASI_ERRNO_PENDING
+
+// __FBX_E_FROM_WASI(w): the map as a constant expression.
+//
+// A ternary chain over integer constants is itself an integer constant
+// expression whenever its argument is one, which is the whole point: this is
+// the form that can appear inside static_assert, so the assertions in errno.c
+// can be re-aimed from "E* equals the WASI number" onto "E* equals what the
+// translation produces for the WASI number" and stay compile-time checked
+// across the renumbering.
+//
+// `w` is substituted once per row, so pass a side-effect-free expression.
+// Runtime callers should use __wasilibc_errno_from_wasi() instead, which
+// evaluates its argument once and indexes a table.
+//
+// A WASI value outside the map yields EUNKNOWN rather than passing the number
+// through: an unmapped guest number is indistinguishable from a real errno at
+// the call site, and a wrong-but-plausible errno is worse than an honest
+// "something failed and libc does not know what".
+//
+// __WASI_ERRNO_SUCCESS is handled ahead of the chain instead of being left to
+// fall through to EUNKNOWN. It is a real WASI value rather than an
+// out-of-range one, "no error" is its faithful translation, and the runtime
+// table has to store something at index 0 regardless -- letting the macro and
+// the table disagree there would be a trap with no upside.
+#define __FBX_ERRNO_TERNARY_ROW(__in, __w, __e) (__in) == (int)(__w) ? (int)(__e) :
+#define __FBX_E_FROM_WASI(w)                                    \
+  ((int)(w) == (int)(__WASI_ERRNO_SUCCESS) ? 0                  \
+   : (__FBX_ERRNO_MAP(__FBX_ERRNO_TERNARY_ROW, (w)) (int)(EUNKNOWN)))
+
 #endif

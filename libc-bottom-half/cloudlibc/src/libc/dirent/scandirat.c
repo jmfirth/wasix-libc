@@ -142,7 +142,7 @@ int __wasilibc_nocwd_scandirat(int dirfd, const char *dir, struct dirent ***name
     __wasi_errno_t error = __wasi_fd_readdir(fd, (uint8_t *)buffer, buffer_size,
                                                        cookie, &buffer_used);
     if (error != 0) {
-      errno = error;
+      errno = __wasilibc_errno_from_wasi(error);
       goto bad;
     }
     buffer_processed = 0;

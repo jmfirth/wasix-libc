@@ -17,7 +17,7 @@ int dup3(int fd, int newfd, int flags) {
     }
     __wasi_errno_t error = __wasi_fd_renumber(fd, newfd);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
     // The flags parameter was previously ignored entirely:
@@ -28,7 +28,7 @@ int dup3(int fd, int newfd, int flags) {
     if (flags & O_CLOEXEC) {
         error = __wasi_fd_fdflags_set(newfd, __WASI_FDFLAGSEXT_CLOEXEC);
         if (error != 0) {
-            errno = error;
+            errno = __wasilibc_errno_from_wasi(error);
             return -1;
         }
     }

@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <time.h>
+#include <wasi/libc.h>
 
 // firebox#QQN — defined in libc-top-half/musl/src/time/timer_create.c, which
 // owns the POSIX per-process timer manager and its static g_lock/g_cond. WEAK
@@ -36,7 +37,7 @@ int __clock_settime(clockid_t clock_id, const struct timespec *tp) {
   }
   __wasi_errno_t error = __wasi_clock_time_set(id, ts);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   // firebox#QQN — CLOCK_REALTIME just moved DISCONTINUOUSLY, so any armed

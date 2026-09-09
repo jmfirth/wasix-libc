@@ -8,12 +8,13 @@
 #include <errno.h>
 
 #include "stat_impl.h"
+#include <wasi/libc.h>
 
 int fstat(int fildes, struct stat *buf) {
   __wasi_filestat_t internal_stat;
   __wasi_errno_t error = __wasi_fd_filestat_get(fildes, &internal_stat);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   to_public_stat(&internal_stat, buf);

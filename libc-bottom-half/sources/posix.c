@@ -394,7 +394,7 @@ int chmod(const char *path, mode_t mode) {
 int fchmod(int fd, mode_t mode) {
     __wasi_errno_t error = __wasix_fd_chmod(fd, (uint32_t)mode);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
     return 0;
@@ -429,7 +429,7 @@ int fchmodat(int fd, const char *path, mode_t mode, int flag) {
         ? __wasix_path_lchmod(effective_fd, effective_path, path_len, (uint32_t)mode)
         : __wasix_path_chmod(effective_fd, effective_path, path_len, (uint32_t)mode);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
     return 0;
@@ -472,7 +472,7 @@ int chown(const char *path, uid_t owner, gid_t group) {
 int fchown(int fd, uid_t owner, gid_t group) {
     __wasi_errno_t error = __wasix_fd_chown(fd, (uint32_t)owner, (uint32_t)group);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
     return 0;
@@ -505,7 +505,7 @@ int fchownat(int fd, const char *path, uid_t owner, gid_t group, int flag) {
         ? __wasix_path_lchown(effective_fd, effective_path, path_len, (uint32_t)owner, (uint32_t)group)
         : __wasix_path_chown(effective_fd, effective_path, path_len, (uint32_t)owner, (uint32_t)group);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
     return 0;

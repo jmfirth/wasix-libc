@@ -18,6 +18,7 @@
 #include "pthread_impl.h"
 #include "fdop.h"
 #include "libc.h"
+#include <wasi/libc.h>
 
 #ifdef __wasilibc_unmodified_upstream
 #else
@@ -46,7 +47,7 @@ static int __sys_dup2(int old, int new)
 #else
 	__wasi_errno_t error = __wasi_fd_renumber(old, new);
 	if (error != 0) {
-		errno = error;
+		errno = __wasilibc_errno_from_wasi(error);
 		return -1;
 	}
 	return 0;
@@ -621,7 +622,10 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 		*res = ret_pid;
 	}
 
-	return err;
+	/* firebox#87F: posix_spawn reports through its RETURN VALUE (POSIX), and
+	 * `err` came straight back from __wasilibc_proc_spawn2_n, which is declared
+	 * __wasi_errno_t. Host space out, guest space in. */
+	return __wasilibc_errno_from_wasi(err);
 }
 
 int posix_spawn(pid_t *restrict res, const char *restrict path,
