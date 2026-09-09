@@ -3,147 +3,148 @@
 
 #include <wasi/api.h>
 
-#define E2BIG __WASI_ERRNO_2BIG
-#define EACCES __WASI_ERRNO_ACCES
-#define EADDRINUSE __WASI_ERRNO_ADDRINUSE
-#define EADDRNOTAVAIL __WASI_ERRNO_ADDRNOTAVAIL
-#define EAFNOSUPPORT __WASI_ERRNO_AFNOSUPPORT
-#define EAGAIN __WASI_ERRNO_AGAIN
-#define EALREADY __WASI_ERRNO_ALREADY
-#define EBADF __WASI_ERRNO_BADF
-#define EBADMSG __WASI_ERRNO_BADMSG
-#define EBUSY __WASI_ERRNO_BUSY
-#define ECANCELED __WASI_ERRNO_CANCELED
-#define ECHILD __WASI_ERRNO_CHILD
-#define ECONNABORTED __WASI_ERRNO_CONNABORTED
-#define ECONNREFUSED __WASI_ERRNO_CONNREFUSED
-#define ECONNRESET __WASI_ERRNO_CONNRESET
-#define EDEADLK __WASI_ERRNO_DEADLK
-#define EDESTADDRREQ __WASI_ERRNO_DESTADDRREQ
-#define EDOM __WASI_ERRNO_DOM
-#define EDQUOT __WASI_ERRNO_DQUOT
-#define EEXIST __WASI_ERRNO_EXIST
-#define EFAULT __WASI_ERRNO_FAULT
-#define EFBIG __WASI_ERRNO_FBIG
-#define EHOSTUNREACH __WASI_ERRNO_HOSTUNREACH
-#define EIDRM __WASI_ERRNO_IDRM
-#define EILSEQ __WASI_ERRNO_ILSEQ
-#define EINPROGRESS __WASI_ERRNO_INPROGRESS
-#define EINTR __WASI_ERRNO_INTR
-#define EINVAL __WASI_ERRNO_INVAL
-#define EIO __WASI_ERRNO_IO
-#define EISCONN __WASI_ERRNO_ISCONN
-#define EISDIR __WASI_ERRNO_ISDIR
-#define ELOOP __WASI_ERRNO_LOOP
-#define EMFILE __WASI_ERRNO_MFILE
-#define EMLINK __WASI_ERRNO_MLINK
-#define EMSGSIZE __WASI_ERRNO_MSGSIZE
-#define EMULTIHOP __WASI_ERRNO_MULTIHOP
-#define ENAMETOOLONG __WASI_ERRNO_NAMETOOLONG
-#define ENETDOWN __WASI_ERRNO_NETDOWN
-#define ENETRESET __WASI_ERRNO_NETRESET
-#define ENETUNREACH __WASI_ERRNO_NETUNREACH
-#define ENFILE __WASI_ERRNO_NFILE
-#define ENOBUFS __WASI_ERRNO_NOBUFS
-#define ENODEV __WASI_ERRNO_NODEV
-#define ENOENT __WASI_ERRNO_NOENT
-#define ENOEXEC __WASI_ERRNO_NOEXEC
-#define ENOLCK __WASI_ERRNO_NOLCK
-#define ENOLINK __WASI_ERRNO_NOLINK
-#define ENOMEM __WASI_ERRNO_NOMEM
-#define ENOMSG __WASI_ERRNO_NOMSG
-#define ENOPROTOOPT __WASI_ERRNO_NOPROTOOPT
-#define ENOSPC __WASI_ERRNO_NOSPC
-#define ENOSYS __WASI_ERRNO_NOSYS
-#define ENOTCONN __WASI_ERRNO_NOTCONN
-#define ESHUTDOWN __WASI_ERRNO_SHUTDOWN
-#define ENOTDIR __WASI_ERRNO_NOTDIR
-#define ENOTEMPTY __WASI_ERRNO_NOTEMPTY
-#define ENOTRECOVERABLE __WASI_ERRNO_NOTRECOVERABLE
-#define ENOTSOCK __WASI_ERRNO_NOTSOCK
-#define ENOTSUP __WASI_ERRNO_NOTSUP
-#define ENOTTY __WASI_ERRNO_NOTTY
-#define ENXIO __WASI_ERRNO_NXIO
-#define EOVERFLOW __WASI_ERRNO_OVERFLOW
-#define EOWNERDEAD __WASI_ERRNO_OWNERDEAD
-#define EPERM __WASI_ERRNO_PERM
-#define EPIPE __WASI_ERRNO_PIPE
-#define EPROTO __WASI_ERRNO_PROTO
-#define EPROTONOSUPPORT __WASI_ERRNO_PROTONOSUPPORT
-#define EPROTOTYPE __WASI_ERRNO_PROTOTYPE
-#define ERANGE __WASI_ERRNO_RANGE
-#define EROFS __WASI_ERRNO_ROFS
-#define ESPIPE __WASI_ERRNO_SPIPE
-#define ESRCH __WASI_ERRNO_SRCH
-#define ESTALE __WASI_ERRNO_STALE
-#define ETIMEDOUT __WASI_ERRNO_TIMEDOUT
-#define ETXTBSY __WASI_ERRNO_TXTBSY
-#define EXDEV __WASI_ERRNO_XDEV
-#define ENOTCAPABLE __WASI_ERRNO_NOTCAPABLE
-#define EMEMVIOLATION __WASI_ERRNO_MEMVIOLATION
-#define EUNKNOWN __WASI_ERRNO_UNKNOWN
+#define E2BIG            7
+#define EACCES           13
+#define EADDRINUSE       98
+#define EADDRNOTAVAIL    99
+#define EAFNOSUPPORT     97
+#define EAGAIN           11
+#define EALREADY         114
+#define EBADF            9
+#define EBADMSG          74
+#define EBUSY            16
+#define ECANCELED        125
+#define ECHILD           10
+#define ECONNABORTED     103
+#define ECONNREFUSED     111
+#define ECONNRESET       104
+#define EDEADLK          35
+#define EDESTADDRREQ     89
+#define EDOM             33
+#define EDQUOT           122
+#define EEXIST           17
+#define EFAULT           14
+#define EFBIG            27
+#define EHOSTUNREACH     113
+#define EIDRM            43
+#define EILSEQ           84
+#define EINPROGRESS      115
+#define EINTR            4
+#define EINVAL           22
+#define EIO              5
+#define EISCONN          106
+#define EISDIR           21
+#define ELOOP            40
+#define EMFILE           24
+#define EMLINK           31
+#define EMSGSIZE         90
+#define EMULTIHOP        72
+#define ENAMETOOLONG     36
+#define ENETDOWN         100
+#define ENETRESET        102
+#define ENETUNREACH      101
+#define ENFILE           23
+#define ENOBUFS          105
+#define ENODEV           19
+#define ENOENT           2
+#define ENOEXEC          8
+#define ENOLCK           37
+#define ENOLINK          67
+#define ENOMEM           12
+#define ENOMSG           42
+#define ENOPROTOOPT      92
+#define ENOSPC           28
+#define ENOSYS           38
+#define ENOTCONN         107
+#define ESHUTDOWN        108
+#define ENOTDIR          20
+#define ENOTEMPTY        39
+#define ENOTRECOVERABLE  131
+#define ENOTSOCK         88
+#define ENOTSUP          95
+#define ENOTTY           25
+#define ENXIO            6
+#define EOVERFLOW        75
+#define EOWNERDEAD       130
+#define EPERM            1
+#define EPIPE            32
+#define EPROTO           71
+#define EPROTONOSUPPORT  93
+#define EPROTOTYPE       91
+#define ERANGE           34
+#define EROFS            30
+#define ESPIPE           29
+#define ESRCH            3
+#define ESTALE           116
+#define ETIMEDOUT        110
+#define ETXTBSY          26
+#define EXDEV            18
+#define ENOTCAPABLE      134
+#define EMEMVIOLATION    135
+#define EUNKNOWN         136
 
-#define EPENDING __WASI_ERRNO_PENDING
+#define EPENDING         137
 #define EOPNOTSUPP ENOTSUP
 #define EWOULDBLOCK EAGAIN
+#define EDEADLOCK EDEADLK
 
 // The defines below are unused and only provided for compatibility with the error codes defined in common libc implementations.
 // If we start using an errorcode, it will be changed to an actual error code.
-#define ENOTBLK 200
-#define ECHRNG 201
-#define EL2NSYNC 202
-#define EL3HLT 203
-#define EL3RST 204
-#define ELNRNG 205
-#define EUNATCH 206
-#define ENOCSI 207
-#define EL2HLT 208
-#define EBADE 209
-#define EBADR 210
-#define EXFULL 211
-#define ENOANO 212
-#define EBADRQC 213
-#define EBADSLT 214
-#define EBFONT 215
-#define ENOSTR 216
-#define ENODATA 217
-#define ETIME 218
-#define ENOSR 219
-#define ENONET 220
-#define ENOPKG 221
-#define EREMOTE 222
-#define EADV 223
-#define ESRMNT 224
-#define ECOMM 225
-#define EDOTDOT 226
-#define ENOTUNIQ 227
-#define EBADFD 228
-#define EREMCHG 229
-#define ELIBACC 230
-#define ELIBBAD 231
-#define ELIBSCN 232
-#define ELIBMAX 233
-#define ELIBEXEC 234
-#define ERESTART 235
-#define ESTRPIPE 236
-#define EUSERS 237
-#define ESOCKTNOSUPPORT 238
-#define EPFNOSUPPORT 239
-#define ETOOMANYREFS 240
-#define EHOSTDOWN 241
-#define EUCLEAN 242
-#define ENOTNAM 243
-#define ENAVAIL 244
-#define EISNAM 245
-#define EREMOTEIO 246
-#define ENOMEDIUM 247
-#define EMEDIUMTYPE 248
-#define ENOKEY 249
-#define EKEYEXPIRED 250
-#define EKEYREVOKED 251
-#define EKEYREJECTED 252
-#define ERFKILL 253
-#define EHWPOISON 254
+#define ENOTBLK          15
+#define ECHRNG           44
+#define EL2NSYNC         45
+#define EL3HLT           46
+#define EL3RST           47
+#define ELNRNG           48
+#define EUNATCH          49
+#define ENOCSI           50
+#define EL2HLT           51
+#define EBADE            52
+#define EBADR            53
+#define EXFULL           54
+#define ENOANO           55
+#define EBADRQC          56
+#define EBADSLT          57
+#define EBFONT           59
+#define ENOSTR           60
+#define ENODATA          61
+#define ETIME            62
+#define ENOSR            63
+#define ENONET           64
+#define ENOPKG           65
+#define EREMOTE          66
+#define EADV             68
+#define ESRMNT           69
+#define ECOMM            70
+#define EDOTDOT          73
+#define ENOTUNIQ         76
+#define EBADFD           77
+#define EREMCHG          78
+#define ELIBACC          79
+#define ELIBBAD          80
+#define ELIBSCN          81
+#define ELIBMAX          82
+#define ELIBEXEC         83
+#define ERESTART         85
+#define ESTRPIPE         86
+#define EUSERS           87
+#define ESOCKTNOSUPPORT  94
+#define EPFNOSUPPORT     96
+#define ETOOMANYREFS     109
+#define EHOSTDOWN        112
+#define EUCLEAN          117
+#define ENOTNAM          118
+#define ENAVAIL          119
+#define EISNAM           120
+#define EREMOTEIO        121
+#define ENOMEDIUM        123
+#define EMEDIUMTYPE      124
+#define ENOKEY           126
+#define EKEYEXPIRED      127
+#define EKEYREVOKED      128
+#define EKEYREJECTED     129
+#define ERFKILL          132
+#define EHWPOISON        133
 
 // firebox#87F: the single source of truth for WASI errno -> guest errno.
 //
@@ -155,13 +156,11 @@
 // artifact the Rust side is regenerated FROM, so it has to be able to
 // describe the mapping without reference to any .c file.
 //
-// Right now every E* above is #defined to its __WASI_ERRNO_* counterpart, so
-// the map is the identity and __FBX_E_FROM_WASI(w) == w for every WASI errno.
-// That is deliberate: it lets the machinery land, be asserted, and be
-// reviewed while it provably cannot change any program's behaviour. When the
-// E* values are renumbered onto Linux uapi the map stops being the identity
-// and every one of those assertions starts carrying real weight, without a
-// single line of the machinery moving.
+// The map was landed while every E* above was still #defined to its
+// __WASI_ERRNO_* counterpart, so it was the identity and could not change any
+// program's behaviour; the call sites were converted under that identity. The
+// renumbering below is the step that made the map real, and it moved no line
+// of the machinery -- only the numbers the right-hand column resolves to.
 //
 // A: an opaque pass-through argument. C macros cannot be partially applied,
 // so a consumer that needs per-row access to something outside the list (the
