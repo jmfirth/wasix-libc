@@ -64,8 +64,14 @@ int fcntl(int fildes, int cmd, ...) {
         return -1;
       }
 
+      // firebox#87F — fds.fs_flags is a __wasi_fdflags_t in WIRE numbering.
+      // It used to be assignable straight into an int because the guest O_*
+      // names WERE those bits; under Linux numbering it must be decoded, or
+      // F_GETFL reports O_WRONLY(1) for a host APPEND flag and O_RDWR(2) for
+      // DSYNC. This is the only decode direction in the libc.
+      //
       // Roughly approximate the access mode by converting the rights.
-      int oflags = fds.fs_flags;
+      int oflags = __wasilibc_fdflags_from_wasi(fds.fs_flags);
       if ((fds.fs_rights_base &
            (__WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR)) != 0) {
         if ((fds.fs_rights_base & __WASI_RIGHTS_FD_WRITE) != 0)
@@ -86,7 +92,9 @@ int fcntl(int fildes, int cmd, ...) {
       int flags = va_arg(ap, int);
       va_end(ap);
 
-      __wasi_fdflags_t fs_flags = flags & 0xfff;
+      // firebox#87F — the third wire encoder. It was `flags & 0xfff`, which
+      // after the renumber would send O_WRONLY as APPEND.
+      __wasi_fdflags_t fs_flags = __wasilibc_fdflags_to_wasi(flags);
       __wasi_errno_t error =
           __wasi_fd_fdstat_set_flags(fildes, fs_flags);
       if (error != 0) {

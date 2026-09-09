@@ -375,9 +375,13 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 				lookup_flags |= __WASI_LOOKUPFLAGS_SYMLINK_FOLLOW;
 
 			// Open file with appropriate rights.
-			__wasi_fdflags_t fs_flags = op->oflag & 0xfff;
-			__wasi_oflags_t oflags = (op->oflag >> 12) & 0xfff;
-			__wasi_fdflagsext_t fd_flags = (op->oflag >> 30) & 0x03;
+			// firebox#87F — the second wire encoder. Was a shift and a
+			// mask, which only worked while the guest O_* names WERE the
+			// wire bits. Routed through the one translator so a renumber
+			// cannot leave this site behind silently appending.
+			__wasi_fdflags_t fs_flags = __wasilibc_fdflags_to_wasi(op->oflag);
+			__wasi_oflags_t oflags = __wasilibc_oflags_to_wasi(op->oflag);
+			__wasi_fdflagsext_t fd_flags = __wasilibc_fdflagsext_to_wasi(op->oflag);
 
 			__wasi_rights_t rights =
 				~(__WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_READ |

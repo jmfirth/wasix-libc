@@ -49,6 +49,22 @@ void __wasilibc_initialize_environ(void);
 /// -- becomes EUNKNOWN. __WASI_ERRNO_SUCCESS becomes 0.
 int __wasilibc_errno_from_wasi(__wasi_errno_t code);
 
+/// firebox#87F: the ONLY translation between guest open(2) flags and the WASI
+/// wire fields, and the only one back.
+///
+/// The guest O_* names used to BE the wire encoding, so callers encoded with a
+/// shift and a mask. Once O_* carries Linux numbering that arithmetic is not
+/// merely wrong, it is SILENTLY wrong: Linux O_WRONLY(1)/O_RDWR(2) are exactly
+/// __WASI_FDFLAGS_APPEND/__WASI_FDFLAGS_DSYNC, so a surviving `oflag & 0xfff`
+/// appends every write instead of failing. Every encoder must route here.
+///
+/// Implementation and the O_SYNC/O_RSYNC subtlety:
+/// libc-bottom-half/cloudlibc/src/libc/fcntl/openflags.c.
+__wasi_fdflags_t __wasilibc_fdflags_to_wasi(int oflag);
+__wasi_oflags_t __wasilibc_oflags_to_wasi(int oflag);
+__wasi_fdflagsext_t __wasilibc_fdflagsext_to_wasi(int oflag);
+int __wasilibc_fdflags_from_wasi(__wasi_fdflags_t fdflags);
+
 /// Used for accessing the stack pointers
 void* __wasilibc_get_stack_pointer(void);
 void __wasilibc_set_stack_pointer(void *val);
