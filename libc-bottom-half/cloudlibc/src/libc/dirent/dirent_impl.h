@@ -14,9 +14,12 @@ struct dirent;
 // firebox#1DX: translate a raw `__wasi_filetype_t` off `fd_readdir` into this
 // libc's `DT_*` space. Callers used to assign `entry.d_type` to `d_type`
 // directly, which is only correct while every `DT_*` happens to be spelled as
-// the numerically equal WASI filetype -- and it is not: `DT_SOCK` is 255, a
-// value outside the filetype space entirely, and no `DT_*` spells
-// `__WASI_FILETYPE_FIFO`, `_SOCKET_RAW` or `_SOCKET_SEQPACKET` at all.
+// the numerically equal WASI filetype -- and it never was. When this was
+// written `DT_SOCK` was 255, outside the filetype space entirely, and no
+// `DT_*` spelled `__WASI_FILETYPE_FIFO`, `_SOCKET_RAW` or `_SOCKET_SEQPACKET`
+// at all. Since firebox#4TY the two spaces are unrelated by construction:
+// `DT_*` holds Linux's values, so this function is the whole translation
+// rather than a mostly-identity one.
 //
 // The raw path is unreachable today only because wasmer's `fd_readdir` returns
 // `d_ino == 0` for every entry, which sends every caller down the `fstatat`

@@ -18,13 +18,22 @@
 #include "dirent_impl.h"
 #include <wasi/libc.h>
 
-static_assert(DT_BLK == __WASI_FILETYPE_BLOCK_DEVICE, "Value mismatch");
-static_assert(DT_CHR == __WASI_FILETYPE_CHARACTER_DEVICE, "Value mismatch");
-static_assert(DT_DIR == __WASI_FILETYPE_DIRECTORY, "Value mismatch");
-static_assert(DT_FIFO == __WASI_FILETYPE_SOCKET_STREAM, "Value mismatch");
-static_assert(DT_LNK == __WASI_FILETYPE_SYMBOLIC_LINK, "Value mismatch");
-static_assert(DT_REG == __WASI_FILETYPE_REGULAR_FILE, "Value mismatch");
-static_assert(DT_UNKNOWN == __WASI_FILETYPE_UNKNOWN, "Value mismatch");
+// firebox#4TY deleted seven `static_assert(DT_x == __WASI_FILETYPE_y)` lines
+// that stood here. They asserted the very thing this task removes: that a
+// `DT_*` constant is numerically a WASI filetype. That premise let callers
+// assign `entry.d_type` straight to `d_type`; firebox#1DX replaced the last of
+// those assignments with `__wasilibc_filetype_to_dt`, and firebox#4TY put the
+// `DT_*` table on Linux's values. Five of the seven are now outright false;
+// the translation function is what makes the two spaces meet, and it is
+// symbolic.
+//
+// Worth naming so it is not reintroduced: those asserts constrained the
+// *pairing* of the two namespaces, not the *values* in either. `DT_FIFO`
+// spelled as `__WASI_FILETYPE_SOCKET_STREAM` satisfied its own assert
+// perfectly while being 6 where Linux says 1. An assert written from the
+// header under test cannot catch a wrong number in that header. The authority
+// for these values is Linux's `uapi/linux/fs.h`; the oracle is a probe that
+// compares against hardcoded literals.
 
 // Grows a buffer to be large enough to hold a certain amount of data.
 #define GROW(buffer, buffer_size, target_size)      \

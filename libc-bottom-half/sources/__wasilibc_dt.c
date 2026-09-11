@@ -27,11 +27,21 @@ int __wasilibc_dttoif(int x) {
 #ifdef DT_SOCK
         case DT_SOCK: return S_IFSOCK;
 #endif
-        /* WASI has two socket filetypes and only DT_FIFO aliases one of them
-         * (__WASI_FILETYPE_SOCKET_STREAM), so a datagram socket's d_type
-         * reaches here as a bare filetype with no DT_* spelling. It IS a
-         * socket; say so explicitly rather than let the default arm answer. */
-        case __WASI_FILETYPE_SOCKET_DGRAM: return S_IFSOCK;
+        /* firebox#4TY removed a `case __WASI_FILETYPE_SOCKET_DGRAM` arm that
+         * used to sit here. It existed because a bare WASI filetype could
+         * reach this switch as a `d_type`, back when `DT_*` WAS the filetype
+         * space. Two things ended it: firebox#1DX routed every filetype
+         * through `__wasilibc_filetype_to_dt` so nothing but a real `DT_*`
+         * arrives here, and firebox#4TY made `DT_*` Linux's space rather than
+         * WASI's, so the filetype it names is no longer a `d_type` value at
+         * all. Left in place it would be worse than dead: 5 spells no `DT_*`,
+         * so an argument of 5 would get a confident `S_IFSOCK` back -- the
+         * same fabrication firebox#Z64 removed from the `DT_UNKNOWN` arm. The
+         * honest answer for an unrecognised value is the default arm's 0.
+         *
+         * (Measured, not assumed: 5 does not collide with any Linux `DT_*`, so
+         * the compiler would NOT have caught this. A mutation control that
+         * reinstated the arm compiled clean.) */
         /* firebox#Z64: DT_UNKNOWN means "the filesystem did not tell me what
          * this is". Answering S_IFSOCK converts that admission of ignorance
          * into a confident wrong type, and every caller that does
