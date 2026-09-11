@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <wasi/api.h>
 #include <errno.h>
+#include "pthread_impl.h"
 #endif
 
 pid_t waitpid(pid_t pid, int *status, int options)
@@ -30,7 +31,32 @@ pid_t waitpid(pid_t pid, int *status, int options)
 	}
 
 	__wasi_join_status_t code;
+	/* Firebox (#XH1): bracket the join in an INLINE-DELIVERY WINDOW.
+	 *
+	 * A blocking proc_join parks inside the host's block_on, where firebox#VHC
+	 * fences guest dispatch by construction. firebox#XH1's PROC_JOIN_EINTR
+	 * then resolves the join with EINTR and firebox#EE1's
+	 * dispatch_fence_deferred_signals runs the handler in the syscall's own
+	 * epilogue — a NESTED host invocation, made before this call has returned.
+	 * bash's `trap … TERM` ends in sh_longjmp(wait_intr_buf), which must unwind
+	 * PAST this frame; out of a nested invocation it would have to cross a host
+	 * frame to do it, so pid 1's trap never ran even though #FWP had already
+	 * fixed the routing that gets the signal here.
+	 *
+	 * With the window open, that nested __wasm_signal PENDS instead (the same
+	 * outcome a blocked signal already gets), and end() dispatches it from HERE
+	 * — ordinary guest code inside _start's own invocation, where the longjmp
+	 * is an ordinary guest longjmp.
+	 *
+	 * end() is called on BOTH exits, before errno is read, because a join that
+	 * completed normally can still have pended a signal inside the window. It
+	 * may not return (that is the point), so nothing that must happen is
+	 * sequenced after it. Other blocking wrappers that can return EINTR want
+	 * the same bracket; adopting it site by site is owed, and the bracket is
+	 * the shared mechanism that makes each adoption one line. */
+	__wasm_inline_delivery_begin();
 	int ret = __wasi_proc_join((__wasi_option_pid_t*)&opid, flags, &code);
+	__wasm_inline_delivery_end();
 	if (ret != 0) {
 		errno = ret;
 		return -1;

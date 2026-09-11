@@ -275,6 +275,60 @@ static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 #define __WASM_PENDING_WORDS ((_NSIG + 31) / 32)
 volatile int __wasm_pending_sigs[__WASM_PENDING_WORDS];
 
+/* firebox#XH1 — THE INLINE-DELIVERY WINDOW: depth of nested
+ * __wasm_inline_delivery_begin() brackets currently open on THIS thread.
+ *
+ * ── WHAT IT IS ────────────────────────────────────────────────────────────
+ * A bracket a blocking libc syscall wrapper wraps around its host call. While
+ * the bracket is open, a host-initiated __wasm_signal() does NOT run the
+ * handler — it PENDS the signal and returns. The matching
+ * __wasm_inline_delivery_end() then dispatches everything that pended, by
+ * calling __wasm_signal() DIRECTLY from guest code, on the guest stack, inside
+ * _start's own invocation.
+ *
+ * ── THE DEFECT IT CLOSES (firebox#XH1 / #EE1 / #FWP) ──────────────────────
+ * A blocking syscall (`waitpid` -> __wasi_proc_join) parks in the host's
+ * block_on. firebox#VHC fences guest dispatch there by construction, so a
+ * signal that arrives is refused a dispatch and the syscall resolves EINTR.
+ * firebox#EE1's `dispatch_fence_deferred_signals` then runs the handler in the
+ * syscall's own epilogue — a NESTED host invocation of __wasm_signal, made
+ * from inside the host frame that has not yet returned to the guest.
+ *
+ * For a handler that RETURNS, that nested invocation is fine and is what #EE1
+ * measured working. For a handler that does NOT return it is not: bash's
+ * `trap … TERM` ends in sh_longjmp(wait_intr_buf), which must unwind past the
+ * waitpid frame. Out of a nested invocation that longjmp has to cross a host
+ * frame; out of an ordinary guest call it is a plain guest longjmp. So the
+ * signal reaches pid 1 (#FWP fixed the routing) and STILL never runs its trap.
+ *
+ * ── WHY THIS SHAPE, AND NOT __wasm_pending_sigs' OWN DRAINER ──────────────
+ * __wasm_drain_pending_sigs (above) looks like the answer and is not: it
+ * re-raises each pending bit through __wasi_thread_signal, and the host SKIPS
+ * do_pending_operations for a self-targeted nudge (wasmer
+ * thread_signal.rs) — so the re-raise only re-QUEUES, and the eventual
+ * dispatch is a host-side nested invocation again, i.e. the exact shape above.
+ *
+ * The working precedent is __wasm_deliver_pending_rt_inline (below), which
+ * calls __wasm_signal(s) DIRECTLY from guest code for exactly this reason and
+ * says so in its own comment. This generalises that precedent off the RT
+ * signal range and onto the EINTR-return boundary; it is that named shape
+ * widened, not a new mechanism.
+ *
+ * ── WHY TLS, NOT `struct pthread` ─────────────────────────────────────────
+ * Identical argument to __fbx_altstack_depth (firebox_altstack.h): growing
+ * `struct pthread` changes its size/ABI for every TU that allocates or walks
+ * it, so a partial rebuild of only the signal TUs would read past the end of a
+ * pthread allocated by the un-rebuilt allocator. TLS carries the storage in
+ * the per-thread TLS block instead, independent of that layout — and the host
+ * reads `struct pthread` field offsets (__fbx_pending_off,
+ * __fbx_blocked_off, __fbx_sigsuspend_off) by offsetof, so a layout change
+ * here would also be a host-visible ABI break.
+ *
+ * A DEPTH, not a flag, so a nested bracket (a wrapper whose retry re-enters
+ * another bracketed wrapper) only dispatches when the OUTERMOST one closes.
+ * Zero-initialised TLS => "no window open", correct for every new thread. */
+__FBX_THREAD_LOCAL int __fbx_inline_delivery_depth;
+
 /* firebox#R3M — WHICH signal's SIG_DFL default action is terminating this
  * process. 0 == "no default-action polyfill has run", i.e. any process exit
  * you observe is the program's OWN exit.
@@ -1417,6 +1471,24 @@ void __wasm_signal(int sig) {
 		}
 	}
 
+	/* firebox#XH1 — INLINE-DELIVERY WINDOW. A bracketed blocking wrapper
+	 * (see __fbx_inline_delivery_depth) has claimed responsibility for
+	 * dispatching this signal itself, from GUEST code, the moment its host
+	 * call returns. Pend it and return: running the handler here would run it
+	 * on a nested host invocation made from inside the not-yet-returned
+	 * syscall frame, and a handler that longjmps out (bash's
+	 * `trap … TERM` -> sh_longjmp(wait_intr_buf)) cannot cross that frame.
+	 *
+	 * Checked AFTER the sigwait arm (a sigwait-accepted signal belongs to the
+	 * waiter, not to the bracket) and BEFORE the block tests, which pend the
+	 * same way — so the pend bookkeeping, the sigsuspend_tick wake, and
+	 * sigpending(2)'s view are byte-identical to the already-supported
+	 * "blocked -> pended" outcome. __wasm_inline_delivery_end() drains it. */
+	if (__fbx_inline_delivery_depth > 0) {
+		__wasm_pend_signal(sig);
+		return;
+	}
+
 	/* Per-thread block — from pthread_sigmask, from a running handler's
 	 * applied sa_mask, or from __block_all_sigs/__block_app_sigs (which
 	 * firebox#35F folded into this same per-thread mask; they used to set a
@@ -1778,6 +1850,79 @@ void __wasm_deliver_pending_rt_inline(void) {
 		if (__wasm_thread_sig_blocked(s)) continue;
 		__wasm_signal(s);
 	}
+}
+
+/* firebox#XH1 — deliver every signal PENDED on this thread, synchronously in
+ * guest code. The EINTR-return-boundary generalisation of
+ * __wasm_deliver_pending_rt_inline above: same direct __wasm_signal(s) call
+ * for the same reason, widened off the RT range onto the whole signal set and
+ * driven by the per-thread pending bitmask rather than the RT rings.
+ *
+ * The exclusions mirror __wasm_signal's own early returns exactly, so a signal
+ * this skips is one __wasm_signal would have pended anyway and stays pending:
+ *   - sigwait_set: accepted by a parked sigwait on this thread, never
+ *     delivered to a handler (POSIX sigwaitinfo/3-1). The waiter claims it.
+ *   - __wasm_in_handler[s]: this signal's own non-SA_NODEFER handler is
+ *     already on the stack; re-entering it is exactly what that guard forbids.
+ *   - __wasm_thread_sig_blocked(s): blocked signals PEND, they do not deliver.
+ *     __restore_sigs / pthread_sigmask(SIG_UNBLOCK) drain them later.
+ * The reserved 32..34 range is dropped because __wasm_signal drops it.
+ *
+ * The pend bit is cleared BEFORE the dispatch, in the same atomic class the
+ * guest uses everywhere for these words (a_and against a_or), so a handler
+ * that re-raises the same signal re-pends cleanly rather than being swallowed
+ * by a clear that happened after it. Both the per-thread bit and the
+ * process-wide __wasm_pending_sigs mirror are cleared together — sigpending(2)
+ * must not keep reporting a signal whose handler is running.
+ *
+ * The RT rings carry queued DEPTH that no single bit can represent, so the
+ * ring-driven precedent runs too, after the bitmask pass. */
+void __wasm_deliver_pending_inline(void) {
+	struct pthread *self = __pthread_self();
+	if (!self) return;
+	for (int s = 1; s < _NSIG; s++) {
+		if (s - 32U < 3) continue;
+		int word = (s - 1) / 32;
+		int bit = 1 << ((s - 1) % 32);
+		if (!(self->pending_sigs[word] & bit)) continue;
+		if (self->sigwait_set[word] & bit) continue;
+		if (__wasm_in_handler[s] > 0) continue;
+		if (__wasm_thread_sig_blocked(s)) continue;
+		a_and((volatile int *)&self->pending_sigs[word], ~bit);
+		a_and(&__wasm_pending_sigs[word], ~bit);
+		__wasm_signal(s);
+	}
+	__wasm_deliver_pending_rt_inline();
+}
+
+/* firebox#XH1 — open an inline-delivery window on this thread. A blocking libc
+ * wrapper brackets its host call with begin()/end() to take ownership of
+ * dispatching any signal that arrives during the call. See
+ * __fbx_inline_delivery_depth for the whole argument. */
+void __wasm_inline_delivery_begin(void) {
+	__fbx_inline_delivery_depth++;
+}
+
+/* firebox#XH1 — close the window and dispatch what pended inside it.
+ *
+ * THE DECREMENT HAPPENS FIRST, AND THAT IS LOAD-BEARING: the handler this
+ * drains may not return (bash's TERM trap longjmps straight out of the
+ * waitpid frame). Decrementing after the drain would leave the depth stuck >0
+ * for the rest of the thread's life, silently converting every later signal
+ * on this thread into a pend that nothing drains — a fail-open worse than the
+ * defect. Decrementing first also means the drained handler runs with the
+ * window CLOSED, so a signal it raises is dispatched normally rather than
+ * being held behind our own bracket.
+ *
+ * Called unconditionally on EVERY exit from the bracket, not only the EINTR
+ * one: a syscall that completed normally can still have pended a signal
+ * inside the window, and that signal would otherwise wait for an unrelated
+ * mask restore that may never come. */
+void __wasm_inline_delivery_end(void) {
+	if (__fbx_inline_delivery_depth > 0)
+		__fbx_inline_delivery_depth--;
+	if (__fbx_inline_delivery_depth == 0)
+		__wasm_deliver_pending_inline();
 }
 
 /* firebox in-handler self-raise — the raise()/pthread_kill() fast path

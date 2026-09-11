@@ -327,6 +327,16 @@ extern hidden volatile size_t __pthread_tsd_size;
 extern hidden void *__pthread_tsd_main[];
 extern hidden volatile int __eintr_valid_flag;
 
+/* firebox#XH1 — the inline-delivery bracket. A blocking libc wrapper wraps its
+ * host call in begin()/end() so a signal that arrives during the call is
+ * PENDED by __wasm_signal and then dispatched from GUEST code once the call
+ * returns, rather than on a nested host invocation the handler cannot longjmp
+ * out of. Definitions and the full argument: src/signal/sigaction.c
+ * (§__fbx_inline_delivery_depth). Not `hidden`-only by accident — these are
+ * libc-internal, same posture as __eintr_valid_flag above. */
+hidden void __wasm_inline_delivery_begin(void);
+hidden void __wasm_inline_delivery_end(void);
+
 #if defined(__wasilibc_unmodified_upstream) || !defined(__wasm_exception_handling__)
 hidden int __clone(int (*)(void *), void *, int, void *, ...);
 #endif
