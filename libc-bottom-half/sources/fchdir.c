@@ -43,6 +43,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <wasi/api_firebox.h>
+#include <wasi/libc.h>
 
 /* Defined in chdir.c, which owns the __wasilibc_cwd mirror and its lock. */
 int __wasilibc_resync_cwd(void);
@@ -56,7 +57,7 @@ int fchdir(int fd)
 
     __wasi_errno_t error = __wasix_fd_chdir((__wasi_fd_t)fd);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
 

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include <sys/wait.h>
 #include "syscall.h"
@@ -58,7 +59,7 @@ pid_t waitpid(pid_t pid, int *status, int options)
 	int ret = __wasi_proc_join((__wasi_option_pid_t*)&opid, flags, &code);
 	__wasm_inline_delivery_end();
 	if (ret != 0) {
-		errno = ret;
+		errno = __wasilibc_errno_from_wasi(ret);
 		return -1;
 	} else {
 		// Firebox (#72N): POSIX `waitpid(-1, ..., WNOHANG)` on a

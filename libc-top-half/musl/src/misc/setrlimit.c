@@ -5,6 +5,7 @@
 #include "syscall.h"
 #endif
 #include "libc.h"
+#include <wasi/libc.h>
 #ifndef __wasilibc_unmodified_upstream
 #include <__wasilibc_rlimit.h>
 // firebox#1GJ: __wasix_resource_set_nofile + __WASI_ERRNO_* (api.h pulls in
@@ -179,7 +180,7 @@ int setrlimit(int resource, const struct rlimit *rlim)
 			// The firebox sysroot aliases the POSIX errno macros to the
 			// __WASI_ERRNO_* numbers, so the raw host errno matches <errno.h>
 			// (sched_impl.h relies on the same aliasing).
-			errno = (int)e;
+			errno = __wasilibc_errno_from_wasi((int)e);
 			return -1;
 		}
 	}

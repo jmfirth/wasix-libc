@@ -6,6 +6,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 ssize_t write(int fildes, const void *buf, size_t nbyte) {
   // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an
@@ -22,7 +23,7 @@ ssize_t write(int fildes, const void *buf, size_t nbyte) {
     // discards bytes it already consumed. Never returns if a cancel is
     // pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error == ENOTCAPABLE ? EBADF : error;
+    errno = error == __WASI_ERRNO_NOTCAPABLE ? EBADF : __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return bytes_written;

@@ -1,5 +1,6 @@
 #include <sys/time.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 #else
@@ -50,7 +51,7 @@ int getitimer(int which, struct itimerval *old)
 	uint64_t buf[4] = {0, 0, 0, 0};
 	__wasi_errno_t e = __wasix_itimer_get((uint32_t)sig, buf);
 	if (e != 0) {
-		errno = (int)e;
+		errno = __wasilibc_errno_from_wasi((int)e);
 		return -1;
 	}
 	old->it_value.tv_sec     = (time_t)buf[0];

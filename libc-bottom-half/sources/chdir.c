@@ -248,7 +248,7 @@ int chdir(const char *path)
     // otherwise we let the operating system know we are changing the current path
     __wasi_errno_t error = __wasi_chdir(path);
     if (error != 0) {
-      errno = error;
+      errno = __wasilibc_errno_from_wasi(error);
       return -1;
     }
     return 0;

@@ -6,11 +6,12 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 int __wasilibc_nocwd_renameat(int oldfd, const char *old, int newfd, const char *new) {
   __wasi_errno_t error = __wasi_path_rename(oldfd, old, newfd, new);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;

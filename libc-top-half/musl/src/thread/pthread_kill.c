@@ -4,6 +4,7 @@
 #ifdef __wasilibc_unmodified_upstream
 #else
 #include <wasi/api.h>
+#include <wasi/libc.h>
 #include "signal.h"
 #include <string.h>
 #include <unistd.h>
@@ -68,6 +69,9 @@ int pthread_kill(pthread_t t, int sig)
 	}
 	int r = __wasi_thread_signal(t->tid, (__wasi_signal_t)sig);
 	__restore_sigs(&set);
-	return r;
+	/* firebox#87F: pthread_kill returns an ERRNO, not -1/errno -- the EINVAL
+	 * guard at the top of this branch is already in guest space, and `r` is the
+	 * host's. Translate so both exits speak the same numbering. */
+	return __wasilibc_errno_from_wasi(r);
 }
 #endif

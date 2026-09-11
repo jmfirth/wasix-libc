@@ -6,6 +6,7 @@
 #include "syscall.h"
 #endif
 #include "pthread_impl.h"
+#include <wasi/libc.h>
 #ifndef __wasilibc_unmodified_upstream
 #include <wasi/api.h>
 /* firebox#C2Q/#HPT — guest-side RT-signal siginfo FIFO (defined in
@@ -109,7 +110,7 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 		 * signal) and map its errno (ESRCH for a nonexistent pid). */
 		__wasi_errno_t e = __wasi_proc_signal((__wasi_pid_t)pid,
 		                                      (__wasi_signal_t)0);
-		if (e != 0) { errno = (int)e; return -1; }
+		if (e != 0) { errno = __wasilibc_errno_from_wasi((int)e); return -1; }
 		return 0;
 	}
 	{
@@ -152,7 +153,7 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 			e = __wasi_proc_signal((__wasi_pid_t)pid,
 			                       (__wasi_signal_t)sig);
 		}
-		if (e != 0) { errno = (int)e; return -1; }
+		if (e != 0) { errno = __wasilibc_errno_from_wasi((int)e); return -1; }
 		return 0;
 	}
 #endif

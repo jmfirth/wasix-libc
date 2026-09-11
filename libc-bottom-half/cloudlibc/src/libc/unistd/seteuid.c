@@ -1,6 +1,7 @@
 #include <wasi/api_firebox.h>
 #include <errno.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 /* firebox#K9N — seteuid(3) via the #BDY proc_setcred import. musl idiom:
  * seteuid(e) is the library function setresuid(-1, e, -1) — there is
@@ -11,7 +12,7 @@ int seteuid(uid_t euid) {
     __wasi_errno_t err =
         __wasix_proc_setcred(2, (uint32_t)-1, (uint32_t)euid, (uint32_t)-1);
     if (err != __WASI_ERRNO_SUCCESS) {
-        errno = (int)err;
+        errno = __wasilibc_errno_from_wasi((int)err);
         return -1;
     }
     return 0;

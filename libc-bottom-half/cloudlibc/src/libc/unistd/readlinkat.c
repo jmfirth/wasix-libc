@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 ssize_t __wasilibc_nocwd_readlinkat(int fd, const char *restrict path, char *restrict buf,
                                     size_t bufsize) {
@@ -14,7 +15,7 @@ ssize_t __wasilibc_nocwd_readlinkat(int fd, const char *restrict path, char *res
   __wasi_errno_t error = __wasi_path_readlink(fd, path,
                                                       (uint8_t*)buf, bufsize, &bufused);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return bufused;

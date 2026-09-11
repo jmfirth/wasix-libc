@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <__struct_if_addrs.h>
+#include <wasi/libc.h>
 
 void freeif_addrs(struct if_addrs *restrict ifa);
 
@@ -21,7 +22,7 @@ int getif_addrs(struct if_addrs **restrict ifap) {
   memset(ips_heap, 0, sizeof(struct __wasi_addr_cidr_t) * nips);
   
   __wasi_errno_t error = __wasi_port_addr_list(ips_heap, &nips);
-  if (error == EOVERFLOW) {
+  if (error == __WASI_ERRNO_OVERFLOW) {
     free(ips_heap);
     ips_heap = malloc(sizeof(struct __wasi_addr_cidr_t) * nips);
     if (ips_heap == NULL) {
@@ -35,7 +36,7 @@ int getif_addrs(struct if_addrs **restrict ifap) {
   }
   if (error != 0) {
     free(ips_heap);
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 

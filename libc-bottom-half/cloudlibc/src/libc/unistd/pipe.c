@@ -9,7 +9,7 @@ int pipe(int fd[2])
 	int fd2;
     __wasi_errno_t error = __wasi_fd_pipe(&fd1, &fd2);
     if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
     }
 	fd[0] = fd1;

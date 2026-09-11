@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 int socket(int domain, int ty, int protocol) {
   int fd;
@@ -35,7 +36,7 @@ int socket(int domain, int ty, int protocol) {
   }
   __wasi_errno_t error = __wasi_sock_open(domain, ty, protocol, &fd);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
 

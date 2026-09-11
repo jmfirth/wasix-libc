@@ -7,6 +7,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 ssize_t sendfile(int socket, int in_fd, off_t *__ofs, size_t __count) {
   __wasi_errno_t error;
@@ -17,7 +18,7 @@ ssize_t sendfile(int socket, int in_fd, off_t *__ofs, size_t __count) {
   } else {
     error = __wasi_fd_tell(in_fd, &ofs);
     if (error != 0) {
-      errno = error;
+      errno = __wasilibc_errno_from_wasi(error);
       return -1;
     }
   }
@@ -26,7 +27,7 @@ ssize_t sendfile(int socket, int in_fd, off_t *__ofs, size_t __count) {
   uint64_t so_datalen = 0;
   error = __wasi_sock_send_file(socket, in_fd, ofs, count, &so_datalen);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return (ssize_t)so_datalen;

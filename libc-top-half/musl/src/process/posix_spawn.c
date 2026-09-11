@@ -18,6 +18,7 @@
 #include "pthread_impl.h"
 #include "fdop.h"
 #include "libc.h"
+#include <wasi/libc.h>
 
 #ifdef __wasilibc_unmodified_upstream
 #else
@@ -46,7 +47,7 @@ static int __sys_dup2(int old, int new)
 #else
 	__wasi_errno_t error = __wasi_fd_renumber(old, new);
 	if (error != 0) {
-		errno = error;
+		errno = __wasilibc_errno_from_wasi(error);
 		return -1;
 	}
 	return 0;
@@ -374,29 +375,42 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 				lookup_flags |= __WASI_LOOKUPFLAGS_SYMLINK_FOLLOW;
 
 			// Open file with appropriate rights.
-			__wasi_fdflags_t fs_flags = op->oflag & 0xfff;
-			__wasi_oflags_t oflags = (op->oflag >> 12) & 0xfff;
-			__wasi_fdflagsext_t fd_flags = (op->oflag >> 30) & 0x03;
+			// firebox#87F — the second wire encoder. Was a shift and a
+			// mask, which only worked while the guest O_* names WERE the
+			// wire bits. Routed through the one translator so a renumber
+			// cannot leave this site behind silently appending.
+			__wasi_fdflags_t fs_flags = __wasilibc_fdflags_to_wasi(op->oflag);
+			__wasi_oflags_t oflags = __wasilibc_oflags_to_wasi(op->oflag);
+			__wasi_fdflagsext_t fd_flags = __wasilibc_fdflagsext_to_wasi(op->oflag);
 
 			__wasi_rights_t rights =
 				~(__WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_READ |
 				  __WASI_RIGHTS_FD_WRITE | __WASI_RIGHTS_FD_ALLOCATE |
 				  __WASI_RIGHTS_FD_READDIR | __WASI_RIGHTS_FD_FILESTAT_SET_SIZE);
+			// firebox#87F — access mode by VALUE, not by bit. Same reasoning as
+			// libc-bottom-half/cloudlibc/src/libc/fcntl/openat.c: this block is
+			// the second wire encoder for O_*, and `(oflag & O_RDONLY) != 0` is
+			// only ever true because our O_RDONLY is 0x04000000. Under Linux
+			// numbering O_RDONLY is 0 and the test dies silently, granting an
+			// O_RDONLY spawn-open no FD_READ — a fail-open on the rights side to
+			// match the O_APPEND fail-open on the flags side. Note the `default`
+			// here is a bare `break`, NOT the EINVAL openat() returns; that
+			// difference is pre-existing and deliberately preserved.
 			switch (op->oflag & O_ACCMODE)
 			{
 			case O_RDONLY:
-			case O_RDWR:
+				rights |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR;
+				break;
 			case O_WRONLY:
-				if ((op->oflag & O_RDONLY) != 0)
-				{
-					rights |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR;
-				}
-				if ((op->oflag & O_WRONLY) != 0)
-				{
-					rights |= __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
-							  __WASI_RIGHTS_FD_ALLOCATE |
-							  __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
-				}
+				rights |= __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
+						  __WASI_RIGHTS_FD_ALLOCATE |
+						  __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
+				break;
+			case O_RDWR:
+				rights |= __WASI_RIGHTS_FD_READ | __WASI_RIGHTS_FD_READDIR |
+						  __WASI_RIGHTS_FD_DATASYNC | __WASI_RIGHTS_FD_WRITE |
+						  __WASI_RIGHTS_FD_ALLOCATE |
+						  __WASI_RIGHTS_FD_FILESTAT_SET_SIZE;
 				break;
 			default:
 				break;
@@ -621,7 +635,10 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 		*res = ret_pid;
 	}
 
-	return err;
+	/* firebox#87F: posix_spawn reports through its RETURN VALUE (POSIX), and
+	 * `err` came straight back from __wasilibc_proc_spawn2_n, which is declared
+	 * __wasi_errno_t. Host space out, guest space in. */
+	return __wasilibc_errno_from_wasi(err);
 }
 
 int posix_spawn(pid_t *restrict res, const char *restrict path,

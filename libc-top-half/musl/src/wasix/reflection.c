@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <wasix/reflection.h>
+#include <wasi/libc.h>
 
 int wasix_reflect_signature(wasix_function_pointer_t function_id,
                             wasix_value_type_t *argument_types,
@@ -26,7 +27,7 @@ int wasix_reflect_signature(wasix_function_pointer_t function_id,
                                result_types, result_types_len, result);
 
   if (err != __WASI_ERRNO_SUCCESS) {
-    errno = err;
+    errno = __wasilibc_errno_from_wasi(err);
     return -1;
   }
 

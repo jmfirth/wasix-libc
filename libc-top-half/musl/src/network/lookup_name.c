@@ -14,6 +14,7 @@
 #include "lookup.h"
 #include "stdio_impl.h"
 #include "syscall.h"
+#include <wasi/libc.h>
 
 static int is_valid_hostname(const char *host)
 {
@@ -124,7 +125,7 @@ static int name_from_dns_search(struct address buf[static MAXADDRS], char canon[
 
   __wasi_errno_t error = __wasi_resolve(name, 0, addrs, MAXADDRS, &naddrs);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     rv = EAI_NONAME;
     goto cleanup;
   }

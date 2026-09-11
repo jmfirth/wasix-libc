@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <wasi/api.h>
 #include <errno.h>
+#include <wasi/libc.h>
 
 static_assert(SHUT_RD == __WASI_SDFLAGS_RD, "Value mismatch");
 static_assert(SHUT_WR == __WASI_SDFLAGS_WR, "Value mismatch");
@@ -20,7 +21,7 @@ int shutdown(int socket, int how) {
 
   __wasi_errno_t error = __wasi_sock_shutdown(socket, how);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return error;

@@ -12,12 +12,13 @@
 #include <errno.h>
 #include <sys/file.h>
 #include <wasi/api_firebox.h> /* firebox#800: __wasix_fd_lock decl moved out of the generated api_wasix.h */
+#include <wasi/libc.h>
 
 int flock(int fd, int op)
 {
     __wasi_errno_t err = __wasix_fd_lock((__wasi_fd_t)fd, (uint32_t)op);
     if (err != __WASI_ERRNO_SUCCESS) {
-        errno = (int)err;
+        errno = __wasilibc_errno_from_wasi((int)err);
         return -1;
     }
     return 0;

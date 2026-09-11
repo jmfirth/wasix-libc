@@ -9,6 +9,7 @@
 #include <wasi/api.h>
 #include <errno.h>
 #include <string.h>
+#include <wasi/libc.h>
 
 ssize_t sendmsg(int socket, const struct msghdr* msg, int flags) {
   if (msg->msg_iov == NULL) {
@@ -35,9 +36,13 @@ ssize_t sendmsg(int socket, const struct msghdr* msg, int flags) {
     struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
     socklen_t addrlen = msg->msg_namelen;
     __wasi_addr_port_t peer_addr;
-    error = sockaddr_to_wasi(addr, addrlen, &peer_addr);
-    if (error != 0) {
-      errno = error;
+    // firebox#EK0 — a guest `E*`, in its own variable of its own type, so it
+    // cannot reach the `__wasilibc_errno_from_wasi` at the bottom of this
+    // function. `error` holds the host's code and only the host's code.
+    // See the note in common/net.h.
+    int guest_error = sockaddr_to_wasi(addr, addrlen, &peer_addr);
+    if (guest_error != 0) {
+      errno = guest_error;
       return -1;
     }
     error = __wasi_sock_send_to(socket, si_data, si_data_len, si_flags, &peer_addr, &so_datalen);
@@ -49,7 +54,7 @@ ssize_t sendmsg(int socket, const struct msghdr* msg, int flags) {
     // call never discards what it already consumed. Never returns if a cancel
     // is pending and enabled.
     __cloudlibc_testcancel_if_intr(error);
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return so_datalen;

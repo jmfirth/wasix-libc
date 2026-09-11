@@ -1,5 +1,6 @@
 #include <sys/time.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 #else
@@ -93,7 +94,7 @@ int setitimer(int which, const struct itimerval *restrict new, struct itimerval 
 
 	int ret = __wasi_proc_raise_interval(sig, ts, repeat);
 	if (ret != 0) {
-		errno = ret;
+		errno = __wasilibc_errno_from_wasi(ret);
 		return -1;
 	}
 	return 0;

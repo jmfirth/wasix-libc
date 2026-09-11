@@ -2,6 +2,7 @@
 #include <wasi/api_firebox.h>
 #include <errno.h>
 #include <unistd.h>
+#include <wasi/libc.h>
 
 /* firebox#K9N — getresuid(2) via the #MHZ proc_getcred import: the uid triple
  * is indices {0,1,2} of the pinned {ruid, euid, suid, rgid, egid, sgid}.
@@ -11,7 +12,7 @@ int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid) {
     uint32_t cred[6];
     __wasi_errno_t err = __wasix_proc_getcred(cred);
     if (err != __WASI_ERRNO_SUCCESS) {
-        errno = (int)err;
+        errno = __wasilibc_errno_from_wasi((int)err);
         return -1;
     }
     *ruid = (uid_t)cred[0];

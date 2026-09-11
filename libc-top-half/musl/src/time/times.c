@@ -6,6 +6,7 @@
 #include <stdint.h>
 #endif
 #include <errno.h>
+#include <wasi/libc.h>
 
 #define NSEC_PER_SEC 1000000000ULL
 
@@ -82,7 +83,7 @@ clock_t times(struct tms *tms)
 	__wasi_errno_t error =
 	    __wasi_clock_time_get(__WASI_CLOCKID_MONOTONIC, 1, &mono);
 	if (error != 0) {
-		errno = error;
+		errno = __wasilibc_errno_from_wasi(error);
 		return (clock_t)-1;
 	}
 	return (clock_t)(mono / NSEC_PER_TICK);

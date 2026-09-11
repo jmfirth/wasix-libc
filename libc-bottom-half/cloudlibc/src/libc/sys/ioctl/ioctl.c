@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <memory.h>
 #include <termios.h>
+#include <wasi/libc.h>
 
 int ioctl(int fildes, int request, ...) {
   switch (request) {
@@ -25,7 +26,7 @@ int ioctl(int fildes, int request, ...) {
       __wasi_errno_t error = __wasi_poll_oneoff(
           subscriptions, events, __arraycount(subscriptions), &nevents);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
 
@@ -39,7 +40,7 @@ int ioctl(int fildes, int request, ...) {
       for (size_t i = 0; i < nevents; ++i) {
         __wasi_event_t *event = &events[i];
         if (event->error != 0) {
-          errno = event->error;
+          errno = __wasilibc_errno_from_wasi(event->error);
           return -1;
         }
         if (event->type == __WASI_EVENTTYPE_FD_READ) {
@@ -57,7 +58,7 @@ int ioctl(int fildes, int request, ...) {
       __wasi_fdstat_t fds;
       __wasi_errno_t error = __wasi_fd_fdstat_get(fildes, &fds);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
 
@@ -73,7 +74,7 @@ int ioctl(int fildes, int request, ...) {
       // Update the file descriptor flags.
       error = __wasi_fd_fdstat_set_flags(fildes, fds.fs_flags);
       if (error != 0) {
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       return 0;
@@ -87,7 +88,7 @@ int ioctl(int fildes, int request, ...) {
       __wasi_tty_t tty;
       int r = __wasi_tty_get(&tty);
       if (r != 0) {
-        errno = r;
+        errno = __wasilibc_errno_from_wasi(r);
         return -1;
       }
 
@@ -113,7 +114,7 @@ int ioctl(int fildes, int request, ...) {
       // Set the updated TTY settings
       int r = __wasi_tty_set(&tty);
       if (r != 0) {
-        errno = r;
+        errno = __wasilibc_errno_from_wasi(r);
         return -1;
       }
       return 0;
@@ -152,7 +153,7 @@ int ioctl(int fildes, int request, ...) {
         // Linux ioctl() reports failure as -1 with errno set. A device that
         // doesn't implement the request yields ENOTTY ("inappropriate ioctl
         // for device"), exactly as on Linux.
-        errno = error;
+        errno = __wasilibc_errno_from_wasi(error);
         return -1;
       }
       // Success: return the driver's integer result (0 for the fb getters).

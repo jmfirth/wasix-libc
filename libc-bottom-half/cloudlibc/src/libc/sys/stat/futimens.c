@@ -8,6 +8,7 @@
 #include <errno.h>
 
 #include "stat_impl.h"
+#include <wasi/libc.h>
 
 int futimens(int fd, const struct timespec *times) {
   errno = 0;
@@ -23,7 +24,7 @@ int futimens(int fd, const struct timespec *times) {
   // Perform system call.
   __wasi_errno_t error = __wasi_fd_filestat_set_times(fd, st_atim, st_mtim, flags);
   if (error != 0) {
-    errno = error;
+    errno = __wasilibc_errno_from_wasi(error);
     return -1;
   }
   return 0;

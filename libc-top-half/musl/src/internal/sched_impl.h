@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <wasi/api.h> /* firebox#R63 — __wasix_sched_check_owner + __WASI_ERRNO_* */
+#include <wasi/libc.h> /* firebox#87F — __wasilibc_errno_from_wasi */
 
 /* The scheduling policies Linux accepts. SCHED_DEADLINE is intentionally not a
  * settable policy through sched_setscheduler(2) (it needs sched_setattr), so it
@@ -142,11 +143,11 @@ static inline int __sched_pid_check_write(pid_t pid)
 	__wasi_errno_t e = __wasix_sched_check_owner((uint32_t)pid);
 	if (e == __WASI_ERRNO_SUCCESS)
 		return 0;
-	/* Host verdict: EPERM (foreign owner) or ESRCH (missing/reaped). The
-	 * firebox sysroot aliases the POSIX errno macros to the __WASI_ERRNO_*
-	 * numbers, so storing the raw host errno matches <errno.h> (kill.c relies
-	 * on the same aliasing). */
-	errno = (int)e;
+	/* Host verdict: EPERM (foreign owner) or ESRCH (missing/reaped).
+	 * firebox#87F: this used to store the raw host code and lean on the
+	 * sysroot aliasing the POSIX errno macros to the __WASI_ERRNO_* numbers.
+	 * That aliasing is being retired, so translate instead of relying on it. */
+	errno = __wasilibc_errno_from_wasi((int)e);
 	return -1;
 }
 
