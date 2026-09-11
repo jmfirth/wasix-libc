@@ -1117,6 +1117,45 @@ static void __default_handler(int sig) {
 		case SIGPWR:
 			terminate_handler(sig);
 			break;
+
+		/* firebox#6Q5 — Default behavior for a REALTIME signal: "terminate".
+		 *
+		 * signal(7): every signal in SIGRTMIN..SIGRTMAX has default action
+		 * Term. There is no RT signal whose default is Ign, so before this arm
+		 * existed an RT signal at SIG_DFL matched no case, fell out of the
+		 * switch, and this function simply RETURNED — the process survived a
+		 * signal Linux kills it with, indistinguishable from a signal never
+		 * sent. Invariant 0's false-success branch; a lost signal, not a wrong
+		 * status.
+		 *
+		 * ⛔ `case SIGRTMIN ... SIGRTMAX:` DOES NOT COMPILE: <signal.h> defines
+		 * both as calls to __libc_current_sigrtmin()/__libc_current_sigrtmax(),
+		 * which are not constant expressions. Use the same __FBX_RTSIG_MIN /
+		 * __FBX_RTSIG_MAX pair and __fbx_sig_is_rt() predicate that the #VYD RT
+		 * queue above already keys on, so the two never drift apart.
+		 *
+		 * ⛔ This arm is deliberately NOT a blanket `default: terminate_handler`,
+		 * even though fail-closed is the usual shape for a catch-all. Signals
+		 * 32/33/34 are musl-RESERVED (SIGTIMER/SIGCANCEL/SIGSYNCCALL,
+		 * src/internal/pthread_impl.h), and under wasix musl installs NO handler
+		 * for them — init_cancellation()/cancel_handler() in
+		 * src/thread/pthread_cancel.c are both inside
+		 * `#ifdef __wasilibc_unmodified_upstream`. pthread_cancel() sends
+		 * SIGCANCEL cross-thread purely for its WAKE side effect and relies on
+		 * this switch dropping it ("SIGCANCEL itself is dropped by the guest
+		 * dispatcher (musl-reserved 33); the wake is the load-bearing effect").
+		 * A blanket default: would therefore turn every cross-thread
+		 * pthread_cancel() into process termination. Terminating exactly
+		 * 35..64 leaves the three reserved numbers on their existing path.
+		 *
+		 * Routing through terminate_handler() inherits its #AQH getpid()==1
+		 * return (SIGNAL_UNKILLABLE for init) and its #R3M
+		 * __fbx_note_terminating(sig) attribution, which is what lets the host
+		 * report WIFSIGNALED/WTERMSIG==signo instead of the abort() 127. */
+		default:
+			if (__fbx_sig_is_rt(sig))
+				terminate_handler(sig);
+			break;
 	}
 }
 #endif
