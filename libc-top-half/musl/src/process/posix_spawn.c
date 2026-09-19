@@ -328,6 +328,73 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 	const posix_spawnattr_t __fbx_default_attr = {0};
 	if (!attr) attr = &__fbx_default_attr;
 
+	/* firebox#7K0 — POSIX_SPAWN_SETSID and POSIX_SPAWN_RESETIDS.
+	 *
+	 * Both flags are read ONLY in the `__wasilibc_unmodified_upstream` block
+	 * above (the SETSID read and the RESETIDS read that sit beside the fork
+	 * path's SETPGROUP). This — the live `proc_spawn2` path — read neither, so
+	 * a caller set the flag, got 0 back, and received a child in the parent's
+	 * session under the parent's effective ids with nothing anywhere saying so.
+	 * That is the false success invariant 0 forbids outright: an honest ENOSYS
+	 * is faithful, a fabricated 0 never is. Invariant 4 adds that an absent
+	 * capability must be discoverable through a standard POSIX mechanism, and
+	 * `posix_spawn`'s is its RETURN VALUE — it reports the error number
+	 * directly and does not set `errno`.
+	 *
+	 * Refused HERE, at the top, before `fdops` is allocated and before any
+	 * host call: POSIX lets the implementation fail the call outright, and a
+	 * caller that asked for a guarantee we cannot give is better served by no
+	 * child at all than by a half-configured one it believes is correct.
+	 *
+	 * ⛔ THE TWO FLAGS ARE REFUSED TOGETHER BUT THEY ARE NOT THE SAME CLASS,
+	 * and the retirement criteria differ. MEASURED in the wasmer fork, 2026-09-19:
+	 *
+	 *   SETSID   — genuinely unmodelled host-side. There is no session (`sid`)
+	 *              concept at all: `syscalls/wasix/proc_set_pgid.rs` says
+	 *              "`setsid`/`getsid` remain unmodelled" and
+	 *              `syscalls/wasix/proc_signal.rs` reasons from "there is no
+	 *              `setsid`, so sender and target always share a session".
+	 *              RETIRES when the host grows a session model.
+	 *
+	 *   RESETIDS — NOT "no primitive exists"; that framing is REFUTED. The host
+	 *              carries the full POSIX id triple (`os/task/process.rs`:
+	 *              `Credential { ruid, euid, suid, rgid, egid, sgid, groups }`)
+	 *              with real `setuid`/`setreuid`/`setresuid` transitions and
+	 *              `proc_getcred`/`proc_setcred` syscalls, all landed by
+	 *              firebox#MHZ/#BDY. What is missing is the WIRING: `proc_spawn2`
+	 *              contains ZERO references to `cred`/`Credential`, so there is
+	 *              no channel on which the parent could ask for the child's
+	 *              effective ids to be reset to the parent's real ids. This is
+	 *              the firebox#BZ5 class — a wiring gap, not an absent mechanism
+	 *              — and it RETIRES the same way #BZ5 did, via a staging call on
+	 *              the calling `WasiThread` that `proc_spawn2` consumes before
+	 *              dispatch. It is refused rather than staged today only because
+	 *              no such channel exists yet.
+	 *
+	 * ⛔ DO NOT FOLD IN SETSCHEDPARAM / SETSCHEDULER / USEVFORK. musl upstream
+	 * ignores those in BOTH paths, so silence there MATCHES the reference
+	 * implementation; refusing them would be a divergence FROM musl dressed up
+	 * as faithfulness, and would break callers that pass them harmlessly today.
+	 *
+	 * BLAST RADIUS, censused over shipped `packages/**` before this landed
+	 * (2026-09-19): every `posix_spawnattr_setflags` call site in the tree sets
+	 * a LITERAL that excludes both flags — `packages/tini/tini.c`
+	 * (SETSIGMASK|SETSIGDEF), cmake's vendored libuv patch (SETSIGDEF|SETSIGMASK,
+	 * and it already returns ENOSYS itself for UV_PROCESS_DETACHED rather than
+	 * requesting SETSID), cmake's kwsys patch (SETSIGDEF alone), and ccache's
+	 * patched `execute.c`, which passes a NULL `attrp` outright. The two
+	 * conditional carriers cannot reach it on this target either: rust std
+	 * (`packages/rust-src/.../process/unix/unix.rs`) gates SETSID on
+	 * `cfg(all(target_os = "linux", target_env = "gnu"))` and otherwise returns
+	 * `Ok(None)` to fall back to fork, and CPython's `posixmodule.c` sets either
+	 * flag only when a Python caller passes `setsid=True`/`resetids=True` to
+	 * `os.posix_spawn` — an opt-in whose documented contract is already an
+	 * error, not a silent no-op. So no shipped artifact's default path changes
+	 * behaviour here; what changes is that a caller who explicitly asks now
+	 * learns the truth. */
+	if (attr->__flags & (POSIX_SPAWN_SETSID | POSIX_SPAWN_RESETIDS))
+		return ENOSYS;
+
 	int nfdops = 0;
 	__wasi_proc_spawn_fd_op_t *fdops = NULL;
 
