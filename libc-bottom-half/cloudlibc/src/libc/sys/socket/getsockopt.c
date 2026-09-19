@@ -47,7 +47,28 @@ int getsockopt(int socket, int level, int option_name,
       return 0;
     }
     case SO_ERROR: {
-      int value = 0;
+      // firebox#H8V: this used to write a literal 0 and return success without
+      // ever asking the runtime, so every socket in every state reported "the
+      // connection succeeded". That is the completion check of the standard
+      // non-blocking connect idiom -- connect() -> EINPROGRESS, poll(POLLOUT),
+      // getsockopt(SO_ERROR) -- so a guest that got the idiom right was still
+      // told a dead socket was healthy: broken state indistinguishable from
+      // working state.
+      //
+      // SO_ERROR is __WASI_SOCK_OPTION_LAST_ERROR, which the runtime answers
+      // through sock_get_opt_size. The value travels as the wasi errno number
+      // (0 == no pending error), so convert it back to a POSIX errno for the
+      // caller. The error is consumed by this read, exactly as Linux clears
+      // sk->sk_err.
+      __wasi_filesize_t pending = 0;
+      __wasi_errno_t error = __wasi_sock_get_opt_size(socket, option_name, &pending);
+      if (error != 0) {
+        errno = __wasilibc_errno_from_wasi(error);
+        return -1;
+      }
+      int value = pending == 0
+                      ? 0
+                      : __wasilibc_errno_from_wasi((__wasi_errno_t)pending);
       memcpy(option_value, &value, *option_len < sizeof(int) ? *option_len : sizeof(int));
       *option_len = sizeof(int);
       return 0;
