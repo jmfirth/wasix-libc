@@ -35,11 +35,40 @@ void _start(void) {
 	__wasi_init_tp();
 #endif
 
+    /* firebox#R0A — signal state is established BEFORE constructors run,
+     * because that is the order Linux has.
+     *
+     * On Linux the kernel installs the process signal mask (inherited, or
+     * `attr->__mask` for POSIX_SPAWN_SETSIGMASK) and resets catchable
+     * dispositions as part of `exec`, before the dynamic loader and before any
+     * `.init_array` entry. A constructor therefore runs ON TOP of the final
+     * signal state and its changes survive into `main`.
+     *
+     * With `__wasi_init_signals()` after `__wasm_call_ctors()` the opposite
+     * held, and BOTH halves of it were destructive — MEASURED 2026-09-19 in a
+     * spawned child whose constructor blocked SIGPIPE and installed a SIGUSR2
+     * handler:
+     *   - the `pthread_sigmask(SIG_SETMASK, ...)` that adopts the spawned mask
+     *     (firebox#1QR) ERASED the constructor's block — observed mask was the
+     *     requested {SIGTERM} alone, not {SIGTERM, SIGPIPE};
+     *   - the inherited-disposition replay OVERWROTE the constructor's handler
+     *     with the parent's SIG_IGN.
+     * Neither is exotic: a constructor blocking SIGPIPE and a C++ static
+     * initialiser installing a handler are ordinary Linux idioms, and both
+     * failed silently — the guest saw a plausible mask, not an error.
+     *
+     * ⛔ Safe here and not merely earlier: `__wasi_init_tp()` above has already
+     * established TLS, which is all `pthread_sigmask` and musl's
+     * self-initialising malloc need. Data relocations are NOT a hazard either —
+     * for a PIE main module the HOST applies them before `_start` is entered
+     * (`__wasm_apply_data_relocs` / `__wasm_apply_tls_relocs` are called from
+     * the wasix linker's main-module path and from `WasiEnv` instance init),
+     * not from `__wasm_call_ctors`, so every pointer `__wasi_init_signals`
+     * touches is already relocated. */
+    __wasi_init_signals();
+
     // The linker synthesizes this to call constructors.
     __wasm_call_ctors();
-
-    // Initialize signals with host-provided actions.
-    __wasi_init_signals();
 
     // Call `__main_void` which will either be the application's zero-argument
     // `__main_void` function or a libc routine which obtains the command-line
