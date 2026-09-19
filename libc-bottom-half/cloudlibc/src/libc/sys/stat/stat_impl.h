@@ -21,6 +21,11 @@ static_assert(S_ISLNK(S_IFLNK), "Value mismatch");
 static_assert(S_ISREG(S_IFREG), "Value mismatch");
 static_assert(S_ISSOCK(S_IFSOCK), "Value mismatch");
 
+// firebox#SJF -- "the runtime supplied a mode" flag in the WASIX
+// mode-in-dev channel. Set by wasmer-wasix `encode_stat_mode`
+// (lib/wasix/src/fs/mod.rs); read ONLY by to_public_stat below.
+#define FIREBOX_STAT_MODE_PRESENT ((__wasi_device_t)1 << 16)
+
 static inline void to_public_stat(const __wasi_filestat_t *in,
                                   struct stat *out) {
   // Ensure that we don't truncate any values.
@@ -77,12 +82,29 @@ static inline void to_public_stat(const __wasi_filestat_t *in,
   // WASI preview1's filestat has no mode field. Firebox's runtime encodes
   // Unix permission bits (0o7777 -- owner/group/other rwx plus setuid,
   // setgid, sticky) in the low 12 bits of the dev (device ID) field.
-  // A dev value of 0 means the runtime did not provide mode information;
-  // in that case fall back to sensible defaults (0755 for directories,
-  // 0644 for regular files) so that ls -l always shows something useful.
+  //
+  // firebox#SJF -- PRESENCE IS A BIT, NOT "NONZERO". Before this, a dev whose
+  // low 12 bits were 0 was read as "the runtime supplied no mode" and replaced
+  // with a default. That made mode 0 unrepresentable: `chmod(path, 0000)`
+  // returned success, the runtime stored 0 faithfully (MEASURED: the host file
+  // really is `----------` on disk), and this decoder handed the guest 0644
+  // back. A false success, which invariant 0 forbids. The zero cannot be
+  // rescued inside the 12 bits -- no other 12-bit value decodes to 0 -- so the
+  // runtime now sets FIREBOX_STAT_MODE_PRESENT, one bit above anything any
+  // reader has ever looked at, and this is the only place that reads it.
+  //
+  // The legacy `perm != 0` rule is KEPT as the second arm, not replaced: a new
+  // libc must still decode correctly against a runtime that predates the flag,
+  // where every nonzero mode is still exactly as trustworthy as it was. Only
+  // when neither arm applies -- no flag AND no bits -- do the defaults stand,
+  // which is still the right answer for the two Filestats the runtime leaves
+  // genuinely unset (the root inode and the stdio/special-fd stamp).
   {
     mode_t perm = (mode_t)(in->dev & 07777);
-    if (perm != 0) {
+    if ((in->dev & FIREBOX_STAT_MODE_PRESENT) != 0) {
+      // Authoritative, INCLUDING 0.
+      out->st_mode |= perm;
+    } else if (perm != 0) {
       out->st_mode |= perm;
     } else {
       // Default permissions when the runtime provides none.
