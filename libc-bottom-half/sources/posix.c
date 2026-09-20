@@ -665,7 +665,16 @@ __wasilibc_link(const char *oldpath, const char *newpath, int flags)
 {
     char *old_relative_path;
     char *new_relative_path;
-    int old_dirfd = find_relpath(oldpath, &old_relative_path);
+    // firebox#K1A: the old path MUST resolve through `find_relpath_alt`.
+    // `find_relpath` hands back a pointer into a single thread-local buffer
+    // that the next `find_relpath` call overwrites, so resolving both
+    // endpoints through it left `old_relative_path` and `new_relative_path`
+    // aliasing the SAME buffer, holding the NEW path. Every guest hard link
+    // therefore reached `path_link` as link(new, new) and died ENOENT on a
+    // destination that does not exist yet. `link()` and `rename()` above
+    // already pair `_alt` with the plain one for exactly this reason; this
+    // sibling was the one that did not, and `linkat()` routes here.
+    int old_dirfd = find_relpath_alt(oldpath, &old_relative_path);
     int new_dirfd = find_relpath(newpath, &new_relative_path);
 
     // If we can't find a preopen for it, fail as if we can't find the path.
