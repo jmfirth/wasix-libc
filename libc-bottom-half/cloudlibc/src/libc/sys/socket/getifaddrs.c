@@ -1,3 +1,24 @@
+/* firebox#YZN: these two files implement the POSIX interface-enumeration pair
+   over __wasi_port_addr_list, but they used to DEFINE them as `getif_addrs` /
+   `freeif_addrs` over a private `struct if_addrs`, while <ifaddrs.h> shipped in
+   the very same sysroot declared the POSIX spellings. The result was a header
+   that promised a symbol no archive defined: every caller compiled and then
+   died at link with `undefined symbol: getifaddrs`, indistinguishable from the
+   capability being absent, even though the working implementation was sitting
+   in libc.a under a name nothing calls. `struct if_addrs`
+   (<__struct_if_addrs.h>, reached via <sys/socket.h>) is field-for-field
+   identical to musl's `struct ifaddrs`, so binding to the declared name is a
+   pure rename, not an ABI change. The private struct is deliberately left in
+   place: it is public header surface, and a removal is the class that breaks
+   consumers.
+
+   musl's own network/getifaddrs.c is NOT the fix here and must not be put on
+   the allow-list: it enumerates over netlink, which WASIX does not provide.
+   This implementation asks the runtime. Where the runtime's network backend
+   does not implement ip_list the call returns -1 with errno set from the WASI
+   errno (ENOTSUP today on every backend but loopback) — an honest POSIX
+   failure, not a silent empty list.  */
+
 #include <errno.h>
 #include <common/net.h>
 #include <sys/socket.h>
@@ -7,12 +28,12 @@
 #include <errno.h>
 #include <string.h>
 
-#include <__struct_if_addrs.h>
+#include <ifaddrs.h>
 #include <wasi/libc.h>
 
-void freeif_addrs(struct if_addrs *restrict ifa);
+void freeifaddrs(struct ifaddrs *ifa);
 
-int getif_addrs(struct if_addrs **restrict ifap) {
+int getifaddrs(struct ifaddrs **ifap) {
   __wasi_size_t nips = 10;
   struct __wasi_addr_cidr_t *ips_heap = malloc(sizeof(struct __wasi_addr_cidr_t) * nips);
   if (ips_heap == NULL) {
@@ -40,24 +61,24 @@ int getif_addrs(struct if_addrs **restrict ifap) {
     return -1;
   }
 
-  struct if_addrs *last = NULL;
+  struct ifaddrs *last = NULL;
   *ifap = NULL;
   for (__wasi_size_t n = 0; n < nips; n++) {
-    struct if_addrs *ifa = malloc(sizeof(struct if_addrs));
+    struct ifaddrs *ifa = malloc(sizeof(struct ifaddrs));
     if (ifa == NULL) {
-      freeif_addrs(*ifap);
+      freeifaddrs(*ifap);
       *ifap = NULL;
       free(ips_heap);
       errno = ENOMEM;
       return -1;
     }
-    memset(ifa, 0, sizeof(struct if_addrs));
+    memset(ifa, 0, sizeof(struct ifaddrs));
 
     struct __wasi_addr_cidr_t * ip = &ips_heap[n];
     if (ip->tag == __WASI_ADDRESS_FAMILY_INET4) {
       struct sockaddr_in *addr4 = malloc(sizeof(struct sockaddr_in));
       if (addr4 == NULL) {
-        freeif_addrs(ifa);
+        freeifaddrs(ifa);
         continue;
       }
       addr4->sin_family = AF_INET;
@@ -67,7 +88,7 @@ int getif_addrs(struct if_addrs **restrict ifap) {
     } else if (ip->tag == __WASI_ADDRESS_FAMILY_INET6) {
       struct sockaddr_in6 *addr6 = malloc(sizeof(struct sockaddr_in6));
       if (addr6 == NULL) {
-        freeif_addrs(ifa);
+        freeifaddrs(ifa);
         continue;
       }
       addr6->sin6_family = AF_INET6;
@@ -77,7 +98,7 @@ int getif_addrs(struct if_addrs **restrict ifap) {
       memcpy(&addr6->sin6_addr.s6_addr, &ip->u.inet6.addr, sizeof(struct in6_addr));
       ifa->ifa_addr = (struct sockaddr*)addr6; 
     } else {
-      freeif_addrs(ifa);
+      freeifaddrs(ifa);
       continue;
     }
 
