@@ -2336,8 +2336,16 @@ int __wasm_sigaction(int sig, int action) {
  * in ALL variants. (mknodat below keeps `()` — no conflicting prototype is in
  * scope for it, so it does not error; only address-taken for force-link.) */
 #include <setjmp.h>
-extern int sigsetjmp(sigjmp_buf, int);
-extern _Noreturn void siglongjmp(sigjmp_buf, int);
+/* firebox#SGG: the declared names are PARENTHESIZED. On the EH shelves
+ * <setjmp.h> now makes `sigsetjmp` and `siglongjmp` function-like MACROS, and
+ * `sigsetjmp(sigjmp_buf, int)` here is a macro invocation by the preprocessor's
+ * only rule — name followed by `(` — so the declaration expanded into
+ * `extern int (__firebox_sigsetjmp_record(...), setjmp(...));` and the EH libc
+ * stopped compiling. `(sigsetjmp)` is not followed by `(`, so it never expands,
+ * while still declaring exactly the prototype #FD6 requires. The `&sigsetjmp`
+ * uses in the force-link array below were already safe for the same reason. */
+extern int (sigsetjmp)(sigjmp_buf, int);
+extern _Noreturn void (siglongjmp)(sigjmp_buf, int);
 extern int mknodat();
 extern int __fbx_signal_poll(void);
 __attribute__((used))
