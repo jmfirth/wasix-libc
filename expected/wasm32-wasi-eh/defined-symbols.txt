@@ -75,6 +75,8 @@ __fclose_ca
 __fdopen
 __fesetround
 __fgetwc_unlocked
+__firebox_siglongjmp_restore
+__firebox_sigsetjmp_record
 __flbf
 __floatscan
 __fmodeflags

@@ -6936,7 +6936,9 @@
 #define sendfile64 sendfile
 #define setbit(x,i) __bitop(x,i,|=)
 #define setjmp setjmp
+#define siglongjmp(buf,val) (__firebox_siglongjmp_restore((void *)(buf)), longjmp(buf, val))
 #define signbit(x) (__builtin_signbit(x))
+#define sigsetjmp(buf,savesigs) (__firebox_sigsetjmp_record((void *)(buf), (savesigs)), setjmp(buf))
 #define sin(x) __tg_real_complex(sin, (x))
 #define sinh(x) __tg_real_complex(sinh, (x))
 #define sqrt(x) __tg_real_complex(sqrt, (x))
