@@ -4,6 +4,7 @@
 #ifdef __wasilibc_unmodified_upstream
 #else
 #include <wasi/api.h>
+#include <wasi/libc.h>
 #include <errno.h>
 #include <sys/resource.h>
 #include <__wasilibc_rlimit.h>
@@ -84,7 +85,45 @@ pid_t _Fork(int copy_mem)
 	__wasi_pid_t pid = -1;
     int err = __wasi_proc_fork(copy_mem, &pid);
 	if (err != 0) {
-		ret = -err;
+		/* firebox#87F/#XBX — TRANSLATE the WASI errno into the guest's own
+		 * numbering before it becomes `errno`. `__wasi_proc_fork` returns a
+		 * `__wasi_errno_t`; `__syscall_ret` stores whatever it is handed
+		 * verbatim. Handing it the raw WASI number published a value that is
+		 * NOT AN ERRNO in this guest: the host's refusal of fork() on a
+		 * non-snapshottable module is `Errno::Notsup` = WASI 58, and this
+		 * libc's errno space is Linux-numbered (`ENOTSUP` is 95; 58 is not
+		 * defined at all, MEASURED in arch/generic/bits/errno.h). musl's
+		 * `strerror` has no row for 58, so it fell through to the index-0
+		 * row and EVERY refused fork() reported
+		 *
+		 *     fork() returned -1, and perror said "Success"
+		 *
+		 * on BOTH link postures — the static atom and the Route C / PIC thin
+		 * main alike. That is the fail-open invariant 3 admits no deferral
+		 * for: broken state indistinguishable from working state, reachable
+		 * by any portable program that branches on `errno`. GNU tar's
+		 * `xfork`/`call_arg_fatal` prints it as
+		 * `child process: Cannot fork: Success`.
+		 *
+		 * It also defeated every value test a caller could write:
+		 * `errno == ENOTSUP`, `== EAGAIN` and `== ENOSYS` were all false, so
+		 * a retry loop and a graceful-degradation branch were equally dead.
+		 *
+		 * This is the same carrier class #XBX fixed in `epoll_ctl`
+		 * (src/linux/epoll.c), and `vfork.c`'s `__vfork_internal` already
+		 * translates its `__wasi_proc_fork_env` result the same way — _Fork
+		 * was the surviving raw-propagation site in the fork family, and the
+		 * only `ret = -err` in musl's tree. The rule it broke is stated at
+		 * `libc-bottom-half/headers/public/__errno_values.h`: runtime callers
+		 * use `__wasilibc_errno_from_wasi()`, and an unmapped guest number is
+		 * indistinguishable from a real errno at the call site.
+		 *
+		 * NOT decorative and NOT identity: the map sends
+		 * `__WASI_ERRNO_NOTSUP` (58) to `ENOTSUP` (95).
+		 *
+		 * The RLIMIT_NPROC admission arm above needs no such care — it sets
+		 * `errno = EAGAIN` directly, already in the guest's numbering. */
+		ret = -__wasilibc_errno_from_wasi((__wasi_errno_t)err);
 	} else {
 		ret = (int)pid;
 	}
