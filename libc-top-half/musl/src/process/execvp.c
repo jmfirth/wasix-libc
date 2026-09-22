@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <wasi/api.h>
+#include <wasi/libc.h>
 
 extern char **__wasilibc_environ;
 
@@ -199,7 +200,51 @@ int __execvpe(const char *path, char *const argv[], char *const envp[], uint8_t 
 	free(combined_env);
 
 	// A return from proc_exec automatically means it failed
-	errno = e;
+	/* firebox#87F/#XBX — TRANSLATE the WASI errno into the guest's own
+	 * numbering before it becomes `errno`. `__wasilibc_proc_exec3_n` is
+	 * DECLARED `__wasi_errno_t` (line 174 above, defined in
+	 * libc-bottom-half/sources/__wasixlibc_real.c, which hands back
+	 * `(uint16_t) ret` straight off the `wasix_64v1::proc_exec3` import) — so
+	 * `e` holds a HOST value, and assigning `int e` from it is only a type
+	 * laundering, not a conversion. Publishing it raw put a number that is NOT
+	 * AN ERRNO in this guest into `errno`, because #87F moved this libc's errno
+	 * space onto Linux values while the wire stayed WASI-numbered:
+	 *
+	 *     binary not found   host NOENT  = 44 -> guest 44 is ECHRNG, which has
+	 *                        no row in musl's __strerror.h, so perror falls
+	 *                        through to the index-0 row and prints "Success"
+	 *     not executable     host ACCES  =  2 -> guest ENOENT, so perror prints
+	 *                        "No such file or directory" for a PERMISSION error
+	 *     bad format         host NOEXEC = 45 -> no row -> "Success"
+	 *
+	 * The first and third are the `Cannot fork: Success` fail-open again, now on
+	 * exec: a FAILING call reports success and invariant 3 admits no deferral
+	 * for it. The second is worse, and is #XBX's prediction word for word —
+	 * "a plausible wrong errno with nothing to flag it". A shell that tells
+	 * "command not found" from "permission denied" by `errno == ENOENT` takes
+	 * the wrong branch in silence, and its 127-vs-126 exit codes invert.
+	 *
+	 * This is the same carrier class #XBX fixed in `epoll_ctl` (src/linux/epoll.c)
+	 * and that `_Fork.c` carried; the sibling wrapper one file over,
+	 * `__wasilibc_proc_spawn2_n`, was already translated at posix_spawn.c's
+	 * `return __wasilibc_errno_from_wasi(err)`. The rule broken here is stated at
+	 * `libc-bottom-half/headers/public/__errno_values.h`: runtime callers use
+	 * `__wasilibc_errno_from_wasi()`, because an unmapped guest number is
+	 * indistinguishable from a real errno at the call site.
+	 *
+	 * Translating HERE and not at the call above is deliberate: the
+	 * `__wasm_exception_handling__` arm compares `e == 0`, and SUCCESS is 0 in
+	 * both spaces, so `e` stays host-space for exactly as long as it is only
+	 * tested against success. `errno` is the one place it crosses.
+	 *
+	 * Blast radius, all of it inheriting this one line: `execve` (execve.c
+	 * forwards here with use_path=0), `execv`, `execvp`, `execvpe`, and
+	 * `posix_spawn`/`posix_spawnp` — whose child frame does `ret = -errno`
+	 * (posix_spawn.c) on the errno THIS line sets, which is what `system()` and
+	 * `popen()` then report. Those three sites are already guest-space and
+	 * correct; they were reporting a host number only because this one handed
+	 * them one. */
+	errno = __wasilibc_errno_from_wasi((__wasi_errno_t)e);
 	return -1;
 }
 #endif
