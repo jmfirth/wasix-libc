@@ -735,6 +735,25 @@ static void wasix_window_release(uintptr_t addr) {
     }
 }
 
+// firebox#6Q8: widen the host protection of every WASIX_MMAN_HOST_PAGE_SIZE unit
+// that [start, start+len) touches back to read-write. Rounding OUTWARD is the only
+// safe direction for a widen: it can lose a fault in a partially-covered unit, but
+// it can never forge one. An enforced (#SAH) mapping owns its 64 KiB units alone,
+// so the units rounded over belong either to the range's own mapping or to memory
+// that was read-write already. A -1 from the host (browser: no page protection at
+// all, declared by sysconf(_SC_MEMORY_PROTECTION) == -1) means nothing was ever
+// enforced there, so it is ignored.
+static void wasix_host_widen_rw(uintptr_t start, size_t len) {
+    const uintptr_t unit = (uintptr_t)WASIX_MMAN_HOST_PAGE_SIZE;
+    uintptr_t end;
+    if (len == 0 || __builtin_add_overflow(start, (uintptr_t)len, &end) ||
+        __builtin_add_overflow(end, unit - 1, &end))
+        return;
+    const uintptr_t lo = start & ~(unit - 1);
+    const uintptr_t hi = end & ~(unit - 1);
+    (void)__wasilibc_mprotect_host(lo, hi - lo, PROT_READ | PROT_WRITE);
+}
+
 static int wasix_fixed_is_registered(uintptr_t addr) {
     for (int i = 0; i < g_fixed_count; i++) {
         if (g_fixed_maps[i].addr == addr) return 1;
@@ -745,6 +764,12 @@ static int wasix_fixed_is_registered(uintptr_t addr) {
 static int wasix_fixed_unregister(uintptr_t addr) {
     for (int i = 0; i < g_fixed_count; i++) {
         if (g_fixed_maps[i].addr == addr) {
+            // firebox#6Q8: a fixed mapping may have host-protected whole units of
+            // itself (its own sub-RW prot). The memory is not released (wasm
+            // memory cannot shrink), so it stays addressable to whatever mapping
+            // contains it or reuses it next — lift the protection so a later
+            // legal access does not fault on a dead mapping's prot.
+            wasix_host_widen_rw(addr, g_fixed_maps[i].len);
             g_fixed_maps[i] = g_fixed_maps[--g_fixed_count];
             return 1;
         }
@@ -752,8 +777,8 @@ static int wasix_fixed_unregister(uintptr_t addr) {
     return 0;
 }
 
-static void *wasix_mmap_fixed(void *addr, size_t length, int flags, int fd,
-                              off_t offset) {
+static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
+                              int fd, off_t offset) {
     uintptr_t target = (uintptr_t)addr;
     size_t need;
     if (__builtin_add_overflow(target, length, &need)) {
@@ -769,6 +794,17 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int flags, int fd,
             return MAP_FAILED;
         }
     }
+    // firebox#6Q8: MAP_FIXED REPLACES whatever was mapped at [addr, addr+length)
+    // — on Linux the new mapping carries its OWN protection and the old mapping's
+    // protection does not constrain it. ld-musl loads every shared library that
+    // way: it reserves the whole span file-backed with the first segment's prot
+    // (PROT_READ), then MAP_FIXEDs each later segment (R-X text, RW data, anon
+    // bss) inside it. Since #SAH that PROT_READ reservation is really read-only on
+    // the host, and the fill below is a HOST write (pread → EIO, memset → trap)
+    // into pages the OLD mapping protected. So first retire the old mapping's
+    // protection over the range (the "replace" half of MAP_FIXED); the new
+    // mapping's own protection is applied after the fill (below).
+    wasix_host_widen_rw(target, length);
     if ((flags & MAP_ANON) == 0) {
         char *body = (char *)addr;
         size_t rem = length;
@@ -789,6 +825,23 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int flags, int fd,
         }
     } else {
         memset(addr, 0, length);
+    }
+    // firebox#6Q8: the new mapping's own protection — the other half of MAP_FIXED
+    // replace. Before #6Q8 a fixed mapping ignored `prot` entirely, so a PROT_READ
+    // MAP_FIXED segment accepted writes. The host protects whole 64 KiB units while
+    // the POSIX page is 4 KiB, so only the units lying WHOLLY inside the range get
+    // the requested protection; a partial unit at either edge is shared with a
+    // neighbour and stays read-write (widened above) — over-granting loses a fault,
+    // narrowing would forge one. This is the same routing the blink64 mprotect
+    // bridge (#86C) applies to a guest mprotect. PROT_EXEC is dropped: wasm never
+    // executes linear memory, so it is meaningless to the host pages.
+    if (wasix_prot_needs_enforcement(prot)) {
+        const uintptr_t unit = (uintptr_t)WASIX_MMAN_HOST_PAGE_SIZE;
+        const uintptr_t lo = (target + unit - 1) & ~(unit - 1);
+        const uintptr_t hi = (uintptr_t)need & ~(unit - 1);
+        if (lo >= target && lo < hi)
+            (void)__wasilibc_mprotect_host(lo, hi - lo,
+                                           prot & (PROT_READ | PROT_WRITE));
     }
     if (!wasix_fixed_is_registered(target) && g_fixed_count < WASIX_MMAN_FIXED_MAX) {
         g_fixed_maps[g_fixed_count].addr = target;
@@ -919,7 +972,7 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             errno = EINVAL;
             return MAP_FAILED;
         }
-        return wasix_mmap_fixed(addr, length, flags, fd, offset);
+        return wasix_mmap_fixed(addr, length, prot, flags, fd, offset);
     }
     // Check for unsupported flags.
     if ((flags & (MAP_PRIVATE | MAP_SHARED)) == 0 ||
@@ -1556,6 +1609,19 @@ int munmap(void *addr, size_t length) {
         return -1;
     }
 
+    // firebox#SAH + #6Q8: restore the body's host pages to RW before msync()
+    // reads them and before free() hands them back. A host-protected mapping left
+    // at PROT_READ/PROT_NONE would, once malloc hands those pages to a later
+    // allocation, fault a perfectly normal access — so the protection must be
+    // lifted before the memory re-enters the allocator. Since #6Q8 this is
+    // UNCONDITIONAL, not just for host_protected: a MAP_FIXED segment placed
+    // inside an ordinary read-write mapping (ld-musl's library load, blink's
+    // linear mapping) may have protected whole 64 KiB units of this body with
+    // its own prot, and nothing else would ever lift them. For a host_protected
+    // mapping addr and body_len are 64 KiB-aligned, so this is exactly the
+    // pre-#6Q8 call.
+    wasix_host_widen_rw((uintptr_t)addr, map->body_len);
+
     // Write the data back to the backing file and close the file handle.
     //
     // firebox#7C5: a MAP_PRIVATE mapping is COPY-ON-WRITE — POSIX mandates that
@@ -1572,19 +1638,6 @@ int munmap(void *addr, size_t length) {
         }
 
         close(map->fd);
-    }
-
-    // firebox#SAH: restore the body's host pages to RW before free(). A
-    // host-protected mapping left at PROT_READ/PROT_NONE would, once malloc hands
-    // those pages to a later allocation, fault a perfectly normal access — so the
-    // protection must be lifted before the memory re-enters the allocator.
-    // `map->body_len` is the WASIX_MMAN_HOST_PAGE_SIZE-aligned (64 KiB) extent that
-    // was protected — host_protected is only ever set on the enforce path, which
-    // rounds body_len to the host page. (No-op for a legacy RW mapping:
-    // host_protected == 0.)
-    if (map->host_protected) {
-        __wasilibc_mprotect_host((uintptr_t)addr, map->body_len,
-                                 PROT_READ | PROT_WRITE);
     }
 
     // firebox#7KH: poison the header BEFORE releasing, so a second munmap of this
