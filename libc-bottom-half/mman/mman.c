@@ -608,15 +608,20 @@ static void *wasix_res_alloc(size_t align, size_t size, int *needs_zero) {
 // memory to cover [addr, addr+len), fill it (file pread or zero), and return
 // addr. This makes the guest's emulated address space coincide with linear-
 // memory offsets — the whole point of the wasm64 port (collapses the software
-// MMU). NOTE (#796 PoC): correctness for arbitrary workloads still requires
-// blink's own malloc heap to be disjoint from the guest vaspace (a layout
-// redesign — see task 796); small static ELFs whose fixed segments fall in
-// otherwise-unused linear memory work today. munmap of a fixed mapping is a
-// no-op (wasm memory can't shrink; blink tracks guest maps itself). A small
+// MMU). Blink's heap and the guest vaspace share this one linear memory; what
+// keeps them apart is MAP_FIXED_NOREPLACE refusing any range mman cannot prove
+// unowned (firebox#RZA, see mmap() below) — blink then treats the refusal as a
+// collision. munmap of a fixed mapping cannot shrink wasm memory; an OWNED range
+// goes back on the hole list, anything else is simply forgotten. A small
 // registry records fixed ranges so munmap/msync distinguish them from the
 // malloc-backed mappings (whose header lives one page below the user addr).
 #define WASIX_MMAN_FIXED_MAX 4096
-static struct { uintptr_t addr; size_t len; } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
+// `owned` (firebox#RZA): 1 iff mman PROVED the range unowned when it mapped it
+// (a MAP_FIXED_NOREPLACE success, or a MAP_FIXED that landed wholly in fresh
+// growth / a tracked hole). Only an owned range is handed back to the hole list
+// on munmap — donating memory mman never owned would let the reservation
+// allocator hand out someone else's live bytes.
+static struct { uintptr_t addr; size_t len; int owned; } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
 static int g_fixed_count;
 
 // firebox#V12 gap #3 (inode-lifetime pinning): a window-routed mmap of a
@@ -754,6 +759,81 @@ static void wasix_host_widen_rw(uintptr_t start, size_t len) {
     (void)__wasilibc_mprotect_host(lo, hi - lo, PROT_READ | PROT_WRITE);
 }
 
+// firebox#RZA: does any registered fixed mapping intersect [a, b)?
+static int wasix_fixed_overlaps(uintptr_t a, uintptr_t b) {
+    for (int i = 0; i < g_fixed_count; i++) {
+        uintptr_t fa = g_fixed_maps[i].addr;
+        uintptr_t fb = fa + g_fixed_maps[i].len;
+        if (fa < b && a < fb) return 1;
+    }
+    return 0;
+}
+
+// firebox#RZA: remove [a, b) from the hole list iff it lies WHOLLY inside ONE
+// free extent — the only case in which mman can prove nobody owns it. Returns 1
+// on success (the range now belongs to the caller), 0 otherwise (list
+// untouched). a and b are WASIX_MMAN_PAGE_SIZE-aligned, as is every extent, so a
+// non-empty splinter is >= 4096 >= sizeof(node). Caller holds g_res_lock.
+static int wasix_res_take_range(uintptr_t a, uintptr_t b) {
+    struct wasix_res_node **pp = &g_res_free_head;
+    struct wasix_res_node *n;
+    while ((n = *pp) != NULL) {
+        uintptr_t nbase = (uintptr_t)n;
+        uintptr_t nend = nbase + n->len;
+        if (nbase > a) return 0;              // address-ordered: nothing further can contain a
+        if (a < nend) {
+            if (b > nend) return 0;           // runs past this extent into owned memory
+            struct wasix_res_node *chain = n->next;
+            if (nend > b) {
+                struct wasix_res_node *t = (struct wasix_res_node *)b;
+                t->len = (size_t)(nend - b);
+                t->next = chain;
+                chain = t;
+            }
+            if (a > nbase) {
+                n->len = (size_t)(a - nbase);
+                n->next = chain;
+                chain = n;
+            }
+            *pp = chain;
+            return 1;
+        }
+        pp = &n->next;
+    }
+    return 0;
+}
+
+// firebox#RZA: remove EVERY part of [a, b) from the hole list, whatever else it
+// overlaps. A plain MAP_FIXED overwrites what is there (Linux semantics), and the
+// bytes it now occupies must never be carved out again by the reservation
+// allocator. Caller holds g_res_lock.
+static void wasix_res_take_overlap(uintptr_t a, uintptr_t b) {
+    struct wasix_res_node **pp = &g_res_free_head;
+    struct wasix_res_node *n;
+    while ((n = *pp) != NULL) {
+        uintptr_t nbase = (uintptr_t)n;
+        uintptr_t nend = nbase + n->len;
+        if (nbase >= b) return;
+        if (nend <= a) { pp = &n->next; continue; }
+        struct wasix_res_node *chain = n->next;
+        struct wasix_res_node **next_pp = pp;
+        if (nend > b) {
+            struct wasix_res_node *t = (struct wasix_res_node *)b;
+            t->len = (size_t)(nend - b);
+            t->next = chain;
+            chain = t;
+        }
+        if (a > nbase) {
+            n->len = (size_t)(a - nbase);
+            n->next = chain;
+            chain = n;
+            next_pp = &n->next;
+        }
+        *pp = chain;
+        pp = next_pp;
+    }
+}
+
 static int wasix_fixed_is_registered(uintptr_t addr) {
     for (int i = 0; i < g_fixed_count; i++) {
         if (g_fixed_maps[i].addr == addr) return 1;
@@ -770,7 +850,21 @@ static int wasix_fixed_unregister(uintptr_t addr) {
             // contains it or reuses it next — lift the protection so a later
             // legal access does not fault on a dead mapping's prot.
             wasix_host_widen_rw(addr, g_fixed_maps[i].len);
+            uintptr_t a = addr;
+            uintptr_t b = (addr + g_fixed_maps[i].len + WASIX_MMAN_PAGE_SIZE - 1) &
+                          ~(uintptr_t)(WASIX_MMAN_PAGE_SIZE - 1);
+            int owned = g_fixed_maps[i].owned;
             g_fixed_maps[i] = g_fixed_maps[--g_fixed_count];
+            // firebox#RZA: an OWNED range goes back on the hole list, so a later
+            // MAP_FIXED_NOREPLACE (or anon reservation) may reuse it — but only if
+            // no other live fixed mapping still covers any of it (an ld-musl
+            // span-then-segments layout registers nested ranges).
+            if (owned) {
+                wasix_res_lock_acquire();
+                if (!wasix_fixed_overlaps(a, b))
+                    wasix_res_free_insert(a, (size_t)(b - a));
+                wasix_res_lock_release();
+            }
             return 1;
         }
     }
@@ -785,15 +879,59 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    // Grow the single wasm linear memory to cover [target, target+length).
-    size_t have = (size_t)__builtin_wasm_memory_size(0) * (size_t)65536;
-    if (need > have) {
-        size_t grow_pages = (need - have + 65535) / 65536;
-        if (__builtin_wasm_memory_grow(0, grow_pages) == (size_t)-1) {
+    // firebox#RZA: decide OWNERSHIP before touching a byte. The page-rounded span
+    // [target, span_end) is what the mapping occupies.
+    uintptr_t span_end;
+    if (__builtin_add_overflow((uintptr_t)need, (uintptr_t)WASIX_MMAN_PAGE_SIZE - 1,
+                               &span_end)) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    span_end &= ~(uintptr_t)(WASIX_MMAN_PAGE_SIZE - 1);
+    int noreplace = 0;
+#ifdef MAP_FIXED_NOREPLACE
+    noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;   // wins over MAP_FIXED, as on Linux
+#endif
+    int owned;
+    wasix_res_lock_acquire();
+    // A live fixed mapping is occupied by definition.
+    if (noreplace && wasix_fixed_overlaps(target, span_end)) {
+        wasix_res_lock_release();
+        errno = EEXIST;
+        return MAP_FAILED;
+    }
+    // Grow the single wasm linear memory to cover the span. The grown extent is
+    // mman's own until something takes it, so it goes on the hole list; a grow
+    // interleaved by someone else (sbrk, the dynamic linker) returns a base above
+    // the size we read, and the gap between is THEIRS — never assumed ours.
+    size_t have = wasix_res_mem_end();
+    if ((size_t)span_end > have) {
+        size_t grow_pages = ((size_t)span_end - have + 65535) / 65536;
+        uintptr_t got = wasix_res_grow(grow_pages);
+        if (got == (uintptr_t)-1) {
+            wasix_res_lock_release();
             errno = ENOMEM;
             return MAP_FAILED;
         }
+        wasix_res_free_insert(got, grow_pages * (size_t)65536);
     }
+    // PROOF OF UNOWNERSHIP: the span lies wholly inside ONE hole mman tracks —
+    // fresh growth, a munmap'd owned fixed range, or a reservation it got back.
+    owned = wasix_res_take_range(target, span_end);
+    if (!owned) {
+        if (noreplace) {
+            // Owned or unknown is OCCUPIED: a spurious EEXIST is honest and
+            // recoverable (the caller picks another address or falls back); a
+            // false success silently overwrites live memory (invariant 0).
+            wasix_res_lock_release();
+            errno = EEXIST;
+            return MAP_FAILED;
+        }
+        // Plain MAP_FIXED overwrites (Linux semantics). Whatever part of the span
+        // was a hole is taken off the list so it is never handed out twice.
+        wasix_res_take_overlap(target, span_end);
+    }
+    wasix_res_lock_release();
     // firebox#6Q8: MAP_FIXED REPLACES whatever was mapped at [addr, addr+length)
     // — on Linux the new mapping carries its OWN protection and the old mapping's
     // protection does not constrain it. ld-musl loads every shared library that
@@ -846,6 +984,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     if (!wasix_fixed_is_registered(target) && g_fixed_count < WASIX_MMAN_FIXED_MAX) {
         g_fixed_maps[g_fixed_count].addr = target;
         g_fixed_maps[g_fixed_count].len = length;
+        g_fixed_maps[g_fixed_count].owned = owned;
         g_fixed_count++;
     }
     return addr;
@@ -946,14 +1085,18 @@ static int wasix_mmap_check_file_preconditions(int prot, int flags, int fd,
 void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset) {
     // firebox#796: a fixed-address request (blink's wasm64 linear mapping) is
-    // placed AT addr rather than malloc'd. Blink's MAP_FIXED maps to the host's
-    // MAP_FIXED (0x10); its MAP_DEMAND ("place here but don't clobber existing")
-    // maps to MAP_FIXED_NOREPLACE (0x100000) — both mean "the mapping MUST land
-    // at addr", which is exactly the linear-mapping requirement. (We don't honor
-    // the NOREPLACE "fail if occupied" semantics for the PoC; blink's loader
-    // targets free guest VA.) PROT_EXEC is allowed (blink maps executable guest
-    // segments PROT_READ|PROT_EXEC; on wasm the page is data either way — the JIT
-    // executes via the host, not guest page perms).
+    // placed AT addr rather than malloc'd. MAP_FIXED overwrites whatever is at
+    // [addr, addr+len), as on Linux. firebox#RZA: MAP_FIXED_NOREPLACE succeeds
+    // ONLY when mman can PROVE the whole range unowned — it lies at or above the
+    // current linear-memory size (the grow owns it) or inside a hole mman itself
+    // tracks (a munmap'd owned range, or a reservation it got back). Everything
+    // else — the malloc heap, the stack, static data, a live mapping, anything
+    // mman cannot vouch for — fails EEXIST, the Linux answer. Blink's MAP_DEMAND
+    // is MAP_FIXED_NOREPLACE, and its guest brk growth into the host's own heap
+    // used to "succeed" here and overwrite live memory (#YAB). PROT_EXEC is
+    // allowed (blink maps executable guest segments PROT_READ|PROT_EXEC; on wasm
+    // the page is data either way — the JIT executes via the host, not guest
+    // page perms).
     int fixed_req = (flags & MAP_FIXED) != 0;
 #ifdef MAP_FIXED_NOREPLACE
     fixed_req = fixed_req || (flags & MAP_FIXED_NOREPLACE) != 0;
