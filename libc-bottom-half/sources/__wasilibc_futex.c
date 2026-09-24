@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <wasi/libc.h>
 
 int __wasilibc_futex_wait_wasix(volatile void *addr, int op, int expected, int64_t max_wait_ns) {
   if ((((intptr_t)addr) & 3) != 0) {
@@ -58,15 +59,23 @@ int __wasilibc_futex_wait_wasix(volatile void *addr, int op, int expected, int64
 int __wasilibc_futex_wake_wasix(int* futex, int cnt) {
   __wasi_bool_t woken = __WASI_BOOL_FALSE;
   if (cnt == INT_MAX) {
-    int ret = __wasi_futex_wake_all((uint32_t*)futex, &woken);
+    __wasi_errno_t ret = __wasi_futex_wake_all((uint32_t*)futex, &woken);
     if (ret != 0) {
-      return -ret;
+      /* firebox#Y3V/#ND6 — translate: `ret` is a HOST (WASI-numbered) errno
+       * and this function's contract is a negated GUEST errno, the same
+       * space as the -EINVAL/-ETIMEDOUT the wait half returns. Returning it
+       * raw was the last open site of the class _Fork.c and execvp.c
+       * carried, found by a type-keyed census (every function declared
+       * `__wasi_errno_t`, and where its value is published). LATENT today:
+       * the sole caller, `__wake` (pthread_impl.h), is void and discards it. */
+      return -__wasilibc_errno_from_wasi(ret);
     }
   } else {
     for (int n = 0; n < cnt; n++) {
-      int ret = __wasi_futex_wake((uint32_t*)futex, &woken);
+      __wasi_errno_t ret = __wasi_futex_wake((uint32_t*)futex, &woken);
       if (ret != 0) {
-        return -ret;
+        /* firebox#Y3V/#ND6 — see the wake_all arm above. */
+        return -__wasilibc_errno_from_wasi(ret);
       }
     }
   }
