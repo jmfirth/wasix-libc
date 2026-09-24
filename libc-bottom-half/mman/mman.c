@@ -77,10 +77,10 @@
 // switched ON only by scripts/wasix-libc/build-picthin-mman.sh, which emits the
 // separately-named libwasi-emulated-mman-picthin.a.
 //
-// ⚠️ NEVER LINK BOTH ARCHIVES INTO ONE ARTIFACT. g_fixed_maps/g_fixed_count
-// below are file-static MAP_FIXED registry state; two copies of this object in
-// one module means two divergent registries and a mapping registered in one
-// that the other cannot find.
+// ⚠️ NEVER LINK BOTH ARCHIVES INTO ONE ARTIFACT. g_fixed_maps and g_frags
+// below are file-static mapping registries; two copies of this object in one
+// module means two divergent registries and a mapping registered in one that
+// the other cannot find.
 #ifdef __FIREBOX_MMAN_PIC_THIN__
 int *__errno_location(void);
 #undef errno
@@ -188,10 +188,11 @@ static int wasix_prot_needs_enforcement(int prot) {
 // Cost: one wasted page (4 KiB) per mmap — accepted as the price of
 // POSIX compliance for the emulated path.
 //
-// munmap()/msync() recover the header via
-// `(struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE)`. free() takes the
-// base pointer (= addr - page), which is exactly what aligned_alloc
-// returned. aligned_alloc lives in
+// firebox#FWX: munmap()/msync() find a mapping's header through the private
+// fragment table (see g_frags), never by reading below an arbitrary addr; the
+// header is still `(struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE)` for the
+// mapping's FIRST byte. free() takes the base pointer (= addr - page), which is
+// exactly what aligned_alloc returned. aligned_alloc lives in
 // libc-top-half/musl/src/malloc/mallocng/aligned_alloc.c — it does NOT
 // require the length argument to be a multiple of the alignment, so we
 // don't round up explicitly.
@@ -340,10 +341,12 @@ static int wasix_range_unmapped(const void *addr, size_t len) {
 #define WASIX_MMAN_BACKING_DLMALLOC 0
 #define WASIX_MMAN_BACKING_RESERVE  1
 
-// firebox#7KH: a struct-tail poison marking an already-unmapped header, so a
-// REPEATED munmap of a not-yet-reused range is a DEFINED silent `return 0` (Linux
-// munmap of an unmapped range succeeds) instead of a double-free / trap. It lives
-// at the END of struct map (see the munmap double-unmap note) precisely so it
+// firebox#7KH: a struct-tail poison marking an already-unmapped header. Before
+// #FWX it made a REPEATED munmap of a not-yet-reused range a DEFINED silent
+// `return 0` (Linux munmap of an unmapped range succeeds) instead of a
+// double-free / trap; since #FWX munmap never reads a header — an unmapped range
+// simply has no fragment — and the poison is kept only as a marker. It lives
+// at the END of struct map precisely so it
 // survives a free-list node clobbering the payload start (reservation release) or
 // dlfree linkage written into the payload (dlmalloc release). `dead_magic` is only
 // ever 0 (live, set explicitly at map time) or WASIX_MMAN_DEAD (poisoned), so the
@@ -355,7 +358,7 @@ struct map {
     int prot;
     int flags;
     off_t offset;
-    size_t length;     // user-requested mapping length (what munmap() must match)
+    size_t length;     // user-requested mapping length
     size_t body_len;   // allocated user-visible body = round_up(length, body page):
                        // the 4096 POSIX page for an ordinary mapping, the 64 KiB
                        // host page (WASIX_MMAN_HOST_PAGE_SIZE) for an enforced one
@@ -381,6 +384,13 @@ struct map {
     // dead_magic. Neither crosses the libc boundary — struct map is file-local to
     // mman.c (no ABI change, no exported symbol added).
     int backing;         // WASIX_MMAN_BACKING_{DLMALLOC,RESERVE}
+    // firebox#FWX: fragment accounting, both guarded by g_vma_lock. `nfrags` is
+    // how many fragment-table entries point at this header; `inflight` how many
+    // pieces taken out of those fragments are still being released (or pinned by
+    // msync) outside the lock. The backing is released exactly once, by whoever
+    // drops the pair to (0, 0).
+    size_t nfrags;
+    size_t inflight;
     size_t dead_magic;   // 0 while live; WASIX_MMAN_DEAD once unmapped
 };
 
@@ -614,15 +624,60 @@ static void *wasix_res_alloc(size_t align, size_t size, int *needs_zero) {
 // collision. munmap of a fixed mapping cannot shrink wasm memory; an OWNED range
 // goes back on the hole list, anything else is simply forgotten. A small
 // registry records fixed ranges so munmap/msync distinguish them from the
-// malloc-backed mappings (whose header lives one page below the user addr).
+// malloc-backed mappings.
+//
+// firebox#FWX: entries are page-granular RANGES, trimmed and split by munmap
+// exactly as Linux trims and splits a VMA — munmap of any page-aligned range
+// unmaps whatever part of each entry it covers and leaves the rest mapped. Before
+// #FWX an entry was keyed by its start address alone: munmap of a sub-range that
+// did not begin at a start fell through to the malloc-header path and failed
+// EINVAL (jemalloc's chunk trim and blink's FreeVirtual under blink64 linear
+// mode, #FWX), and munmap of a HEAD sub-range dropped the WHOLE entry and donated
+// the still-live tail to the hole list, where the next NOREPLACE or anonymous
+// reservation could hand it out a second time. Entries never overlap each other:
+// a plain MAP_FIXED first unmaps whatever fixed range it replaces.
 #define WASIX_MMAN_FIXED_MAX 4096
 // `owned` (firebox#RZA): 1 iff mman PROVED the range unowned when it mapped it
 // (a MAP_FIXED_NOREPLACE success, or a MAP_FIXED that landed wholly in fresh
 // growth / a tracked hole). Only an owned range is handed back to the hole list
 // on munmap — donating memory mman never owned would let the reservation
-// allocator hand out someone else's live bytes.
+// allocator hand out someone else's live bytes. `len` is page-rounded.
 static struct { uintptr_t addr; size_t len; int owned; } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
 static int g_fixed_count;
+
+// firebox#FWX: the lock over both mapping registries (g_fixed_maps and the
+// private fragment table below). Lock order is g_vma_lock, then g_res_lock;
+// nothing that holds g_res_lock takes g_vma_lock. No syscall runs under it.
+static volatile int g_vma_lock;
+static void wasix_vma_lock_acquire(void) {
+    while (__atomic_exchange_n(&g_vma_lock, 1, __ATOMIC_ACQUIRE)) { /* spin */ }
+}
+static void wasix_vma_lock_release(void) {
+    __atomic_store_n(&g_vma_lock, 0, __ATOMIC_RELEASE);
+}
+
+// ── firebox#FWX: the private-mapping fragment table ──────────────────────────
+// A malloc-/reservation-backed mapping keeps its struct map header in-band, one
+// page below its first byte, and before #FWX munmap/msync found it ONLY from
+// there — so they could act on a mapping only at its exact start, and munmap
+// refused every other range with EINVAL ("We don't support partial munmapping").
+// Linux unmaps any page-aligned range: a sub-range, a range spanning several
+// mappings, a range with unmapped holes in it. Finding the mapping that covers an
+// arbitrary address needs an out-of-band index, so every live private mapping is
+// recorded here as one or more FRAGMENTS — [start, end) page ranges that all
+// point at the mapping's single header. munmap trims, removes or splits
+// fragments; the backing itself is released when its last fragment is gone and
+// no release of one of its pieces is still in flight (struct map nfrags/inflight).
+// The table's storage comes from the reservation allocator (never malloc), and it
+// grows by doubling. Unsorted: lookups are linear, as g_fixed_maps' always were.
+struct wasix_frag {
+    uintptr_t start;
+    uintptr_t end;
+    struct map *hdr;
+};
+static struct wasix_frag *g_frags;
+static size_t g_frag_count;
+static size_t g_frag_cap;
 
 // firebox#V12 gap #3 (inode-lifetime pinning): a window-routed mmap of a
 // /dev/shm object must keep that object's INODE alive as long as the mapping
@@ -834,38 +889,66 @@ static void wasix_res_take_overlap(uintptr_t a, uintptr_t b) {
     }
 }
 
-static int wasix_fixed_is_registered(uintptr_t addr) {
+// firebox#FWX: does a fixed mapping cover `addr`? Caller holds g_vma_lock.
+static int wasix_fixed_contains(uintptr_t addr) {
     for (int i = 0; i < g_fixed_count; i++) {
-        if (g_fixed_maps[i].addr == addr) return 1;
+        uintptr_t fa = g_fixed_maps[i].addr;
+        if (fa <= addr && addr - fa < g_fixed_maps[i].len) return 1;
     }
     return 0;
 }
 
-static int wasix_fixed_unregister(uintptr_t addr) {
+// firebox#FWX: unmap the page range [a, b) from the fixed registry, as Linux
+// unmaps it from its VMAs: an entry wholly inside is removed, one that overlaps
+// an edge is trimmed, and one that strictly contains the range is split in two.
+// At most one entry can strictly contain the range (entries never overlap), so at
+// most one new slot is needed; if the registry is full that is ENOMEM — the Linux
+// answer when a split would exceed the mapping limit — and nothing is changed.
+// Returns 0, or -1 for that ENOMEM. Caller holds g_vma_lock (not g_res_lock).
+static int wasix_fixed_unmap_locked(uintptr_t a, uintptr_t b) {
     for (int i = 0; i < g_fixed_count; i++) {
-        if (g_fixed_maps[i].addr == addr) {
-            // firebox#6Q8: a fixed mapping may have host-protected whole units of
-            // itself (its own sub-RW prot). The memory is not released (wasm
-            // memory cannot shrink), so it stays addressable to whatever mapping
-            // contains it or reuses it next — lift the protection so a later
-            // legal access does not fault on a dead mapping's prot.
-            wasix_host_widen_rw(addr, g_fixed_maps[i].len);
-            uintptr_t a = addr;
-            uintptr_t b = (addr + g_fixed_maps[i].len + WASIX_MMAN_PAGE_SIZE - 1) &
-                          ~(uintptr_t)(WASIX_MMAN_PAGE_SIZE - 1);
-            int owned = g_fixed_maps[i].owned;
-            g_fixed_maps[i] = g_fixed_maps[--g_fixed_count];
-            // firebox#RZA: an OWNED range goes back on the hole list, so a later
-            // MAP_FIXED_NOREPLACE (or anon reservation) may reuse it — but only if
-            // no other live fixed mapping still covers any of it (an ld-musl
-            // span-then-segments layout registers nested ranges).
-            if (owned) {
-                wasix_res_lock_acquire();
-                if (!wasix_fixed_overlaps(a, b))
-                    wasix_res_free_insert(a, (size_t)(b - a));
-                wasix_res_lock_release();
+        uintptr_t fa = g_fixed_maps[i].addr;
+        uintptr_t fb = fa + g_fixed_maps[i].len;
+        if (fa < a && b < fb && g_fixed_count >= WASIX_MMAN_FIXED_MAX) return -1;
+    }
+    for (int i = 0; i < g_fixed_count;) {
+        uintptr_t fa = g_fixed_maps[i].addr;
+        uintptr_t fb = fa + g_fixed_maps[i].len;
+        if (!(fa < b && a < fb)) { i++; continue; }
+        uintptr_t s = fa > a ? fa : a;
+        uintptr_t e = fb < b ? fb : b;
+        int owned = g_fixed_maps[i].owned;
+        if (s == fa && e == fb) {
+            g_fixed_maps[i] = g_fixed_maps[--g_fixed_count];   // re-examine slot i
+        } else {
+            if (s == fa) {                                     // head unmapped
+                g_fixed_maps[i].addr = e;
+                g_fixed_maps[i].len = (size_t)(fb - e);
+            } else {                                           // tail (and maybe middle)
+                g_fixed_maps[i].len = (size_t)(s - fa);
+                if (e != fb) {                                 // middle: split off the tail
+                    g_fixed_maps[g_fixed_count].addr = e;
+                    g_fixed_maps[g_fixed_count].len = (size_t)(fb - e);
+                    g_fixed_maps[g_fixed_count].owned = owned;
+                    g_fixed_count++;
+                }
             }
-            return 1;
+            i++;
+        }
+        // firebox#6Q8: a fixed mapping may have host-protected whole units of
+        // itself (its own sub-RW prot). The memory is not released (wasm memory
+        // cannot shrink), so it stays addressable to whatever mapping contains it
+        // or reuses it next — lift the protection over the unmapped piece so a
+        // later legal access does not fault on a dead mapping's prot.
+        wasix_host_widen_rw(s, (size_t)(e - s));
+        // firebox#RZA: an OWNED piece goes back on the hole list, so a later
+        // MAP_FIXED_NOREPLACE (or anon reservation) may reuse it — but only if no
+        // other live fixed mapping still covers any of it.
+        if (owned) {
+            wasix_res_lock_acquire();
+            if (!wasix_fixed_overlaps(s, e))
+                wasix_res_free_insert(s, (size_t)(e - s));
+            wasix_res_lock_release();
         }
     }
     return 0;
@@ -893,13 +976,24 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;   // wins over MAP_FIXED, as on Linux
 #endif
     int owned;
-    wasix_res_lock_acquire();
+    wasix_vma_lock_acquire();
     // A live fixed mapping is occupied by definition.
     if (noreplace && wasix_fixed_overlaps(target, span_end)) {
-        wasix_res_lock_release();
+        wasix_vma_lock_release();
         errno = EEXIST;
         return MAP_FAILED;
     }
+    // firebox#FWX: a plain MAP_FIXED REPLACES the fixed mappings under it — it
+    // unmaps them first, as Linux does, so registry entries never overlap and
+    // the replaced range can never be unmapped twice. An owned piece goes back on
+    // the hole list here, so a MAP_FIXED over mman's own earlier fixed mapping is
+    // proved unowned by the take below and stays owned.
+    if (!noreplace && wasix_fixed_unmap_locked(target, span_end) != 0) {
+        wasix_vma_lock_release();
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    wasix_res_lock_acquire();
     // Grow the single wasm linear memory to cover the span. The grown extent is
     // mman's own until something takes it, so it goes on the hole list; a grow
     // interleaved by someone else (sbrk, the dynamic linker) returns a base above
@@ -910,6 +1004,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         uintptr_t got = wasix_res_grow(grow_pages);
         if (got == (uintptr_t)-1) {
             wasix_res_lock_release();
+            wasix_vma_lock_release();
             errno = ENOMEM;
             return MAP_FAILED;
         }
@@ -924,6 +1019,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
             // recoverable (the caller picks another address or falls back); a
             // false success silently overwrites live memory (invariant 0).
             wasix_res_lock_release();
+            wasix_vma_lock_release();
             errno = EEXIST;
             return MAP_FAILED;
         }
@@ -932,6 +1028,17 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         wasix_res_take_overlap(target, span_end);
     }
     wasix_res_lock_release();
+    // Register the page-rounded range while still under g_vma_lock, so no other
+    // thread can NOREPLACE into it between the take above and the fill below.
+    // (A full registry leaves the mapping unregistered, as it always has: munmap
+    // then finds nothing to trim and it is never donated.)
+    if (g_fixed_count < WASIX_MMAN_FIXED_MAX) {
+        g_fixed_maps[g_fixed_count].addr = target;
+        g_fixed_maps[g_fixed_count].len = (size_t)(span_end - target);
+        g_fixed_maps[g_fixed_count].owned = owned;
+        g_fixed_count++;
+    }
+    wasix_vma_lock_release();
     // firebox#6Q8: MAP_FIXED REPLACES whatever was mapped at [addr, addr+length)
     // — on Linux the new mapping carries its OWN protection and the old mapping's
     // protection does not constrain it. ld-musl loads every shared library that
@@ -951,6 +1058,11 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
             const ssize_t n = pread(fd, body, rem, off);
             if (n < 0) {
                 if (errno == EINTR) continue;
+                // firebox#FWX: undo the registration (an owned range goes back
+                // on the hole list) and keep pread's errno.
+                const int e = errno;
+                (void)munmap(addr, length);
+                errno = e;
                 return MAP_FAILED;
             }
             if (n == 0) {           // short file — zero-fill the remainder
@@ -980,12 +1092,6 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         if (lo >= target && lo < hi)
             (void)__wasilibc_mprotect_host(lo, hi - lo,
                                            prot & (PROT_READ | PROT_WRITE));
-    }
-    if (!wasix_fixed_is_registered(target) && g_fixed_count < WASIX_MMAN_FIXED_MAX) {
-        g_fixed_maps[g_fixed_count].addr = target;
-        g_fixed_maps[g_fixed_count].len = length;
-        g_fixed_maps[g_fixed_count].owned = owned;
-        g_fixed_count++;
     }
     return addr;
 }
@@ -1080,6 +1186,218 @@ static int wasix_mmap_check_file_preconditions(int prot, int flags, int fd,
     }
 
     return 0;
+}
+
+// ── firebox#FWX: private-fragment helpers (see the table note above) ─────────
+
+// The mapping's first byte: its header sits one WASIX_MMAN_PAGE_SIZE below it.
+static uintptr_t wasix_map_addr0(const struct map *m) {
+    return (uintptr_t)m + WASIX_MMAN_PAGE_SIZE;
+}
+
+// The POSIX extent of a mapping: its length rounded up to the 4096 page. An
+// enforced mapping's body runs on to the 64 KiB host page (body_len); that slack
+// is never a fragment — it belongs to the backing and goes with it.
+static size_t wasix_map_extent(const struct map *m) {
+    return (m->length + (WASIX_MMAN_SYS_PAGE_SIZE - 1)) & ~(WASIX_MMAN_SYS_PAGE_SIZE - 1);
+}
+
+// Make room for `extra` more fragments. Caller holds g_vma_lock; takes g_res_lock.
+// Returns 0, or -1 when the reservation allocator is exhausted.
+static int wasix_frags_reserve(size_t extra) {
+    if (g_frag_count + extra <= g_frag_cap) return 0;
+    size_t ncap = g_frag_cap ? g_frag_cap : 256;
+    while (ncap < g_frag_count + extra) {
+        if (__builtin_mul_overflow(ncap, (size_t)2, &ncap)) return -1;
+    }
+    size_t bytes;
+    if (__builtin_mul_overflow(ncap, sizeof(struct wasix_frag), &bytes)) return -1;
+    int needs_zero;
+    struct wasix_frag *n = wasix_res_alloc(WASIX_MMAN_PAGE_SIZE, bytes, &needs_zero);
+    if (n == NULL) return -1;
+    if (g_frag_count) memcpy(n, g_frags, g_frag_count * sizeof(struct wasix_frag));
+    if (g_frags != NULL) {
+        size_t old = (g_frag_cap * sizeof(struct wasix_frag) + WASIX_MMAN_PAGE_SIZE - 1) &
+                     ~(size_t)(WASIX_MMAN_PAGE_SIZE - 1);
+        wasix_res_lock_acquire();
+        wasix_res_free_insert((uintptr_t)g_frags, old);
+        wasix_res_lock_release();
+    }
+    g_frags = n;
+    g_frag_cap = ncap;
+    return 0;
+}
+
+// Record a new mapping as one fragment. Caller holds g_vma_lock and has reserved.
+static void wasix_frag_add_locked(uintptr_t start, uintptr_t end, struct map *m) {
+    g_frags[g_frag_count].start = start;
+    g_frags[g_frag_count].end = end;
+    g_frags[g_frag_count].hdr = m;
+    g_frag_count++;
+    m->nfrags++;
+    wasix_map_count_inc();   // firebox#9VY-24: every fragment is a VMA
+}
+
+// A piece taken out of a fragment, released outside the lock.
+struct wasix_piece {
+    uintptr_t start;
+    uintptr_t end;
+    struct map *hdr;
+};
+
+// Take ONE piece of [a, b) out of the fragment table: remove, trim or split the
+// first fragment that overlaps it, pin its header (inflight), and return 1; or 0
+// when nothing in [a, b) is mapped. A split needs one free slot, which the caller
+// reserved before its first take. Caller holds g_vma_lock.
+static int wasix_frags_take_locked(uintptr_t a, uintptr_t b, struct wasix_piece *pc) {
+    for (size_t i = 0; i < g_frag_count; i++) {
+        struct wasix_frag *f = &g_frags[i];
+        if (!(f->start < b && a < f->end)) continue;
+        uintptr_t s = f->start > a ? f->start : a;
+        uintptr_t e = f->end < b ? f->end : b;
+        struct map *m = f->hdr;
+        if (s == f->start && e == f->end) {
+            *f = g_frags[--g_frag_count];
+            m->nfrags--;
+            wasix_map_count_dec();
+        } else if (s == f->start) {
+            f->start = e;
+        } else if (e == f->end) {
+            f->end = s;
+        } else {
+            uintptr_t tail_end = f->end;
+            f->end = s;
+            wasix_frag_add_locked(e, tail_end, m);
+        }
+        m->inflight++;
+        pc->start = s;
+        pc->end = e;
+        pc->hdr = m;
+        return 1;
+    }
+    return 0;
+}
+
+// Would unmapping [a, b) split a fragment (one strictly contains the range)?
+static int wasix_frags_would_split_locked(uintptr_t a, uintptr_t b) {
+    for (size_t i = 0; i < g_frag_count; i++) {
+        if (g_frags[i].start < a && b < g_frags[i].end) return 1;
+    }
+    return 0;
+}
+
+// The fragment containing `addr`, pinned (inflight) so its header outlives a
+// concurrent munmap; NULL when no private mapping covers it. *end receives the
+// fragment's end. Caller holds g_vma_lock.
+static struct map *wasix_frags_pin_locked(uintptr_t addr, uintptr_t *end) {
+    for (size_t i = 0; i < g_frag_count; i++) {
+        if (g_frags[i].start <= addr && addr < g_frags[i].end) {
+            *end = g_frags[i].end;
+            g_frags[i].hdr->inflight++;
+            return g_frags[i].hdr;
+        }
+    }
+    return NULL;
+}
+
+// Write [start, end) of a MAP_SHARED writable file mapping back to its file,
+// never past the mapping's length (the zero-filled partial-page tail is not the
+// file's). firebox#7C5: a MAP_PRIVATE mapping never writes back (mmap/7-2,
+// munmap/4-1). Returns 0, or -1 with errno from pwrite.
+static int wasix_map_writeback(const struct map *m, uintptr_t start, uintptr_t end) {
+    if (m->fd < 0 || (m->prot & PROT_WRITE) == 0 || (m->flags & MAP_PRIVATE) != 0 ||
+        (m->flags & MAP_ANON) != 0)
+        return 0;
+    const uintptr_t addr0 = wasix_map_addr0(m);
+    if (end > addr0 + m->length) end = addr0 + m->length;
+    const char *body = (const char *)start;
+    size_t len = start < end ? (size_t)(end - start) : 0;
+    off_t off = m->offset + (off_t)(start - addr0);
+    while (len > 0) {
+        const ssize_t n = pwrite(m->fd, body, len, off);
+        if (n > 0) {
+            len -= (size_t)n;
+            off += n;
+            body += (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Release the backing once no fragment and no in-flight piece remains. Every
+// fragment piece was already released on its own (a reservation piece straight
+// back to the hole list); what is left is the header prefix, the enforced
+// mapping's host-page slack, the dup'd fd, or — for an aligned_alloc backing,
+// which cannot be freed piecewise — the whole allocation.
+static void wasix_map_finalize(struct map *m) {
+    const uintptr_t addr0 = wasix_map_addr0(m);
+    const size_t prefix = m->prefix;
+    const int fd = m->fd;
+    // firebox#7KH: poison the header before releasing it (see WASIX_MMAN_DEAD).
+    m->dead_magic = WASIX_MMAN_DEAD;
+    if (m->backing == WASIX_MMAN_BACKING_RESERVE) {
+        const size_t ext = wasix_map_extent(m);
+        const size_t body_len = m->body_len;
+        // firebox#SAH: the slack was host-protected with the body; lift it before
+        // the allocator can hand it out again. The prefix never was protected.
+        if (body_len > ext) wasix_host_widen_rw(addr0 + ext, body_len - ext);
+        wasix_res_lock_acquire();
+        if (body_len > ext) wasix_res_free_insert(addr0 + ext, body_len - ext);
+        wasix_res_free_insert(addr0 - prefix, prefix);
+        wasix_res_lock_release();
+    } else {
+        // An aligned_alloc backing is freed whole, so a piece munmap'd earlier
+        // stayed inside the allocation — and a plain MAP_FIXED may since have
+        // been placed into that hole. Handing the allocation to malloc would put
+        // that live mapping's bytes on the heap; leaking it is the safe answer.
+        wasix_vma_lock_acquire();
+        const int covered = wasix_fixed_overlaps(addr0 - prefix, addr0 + m->body_len);
+        wasix_vma_lock_release();
+        if (!covered) {
+            // firebox#SAH + #6Q8: restore the body's host pages to RW before
+            // free() hands them back — a host-protected mapping, or a MAP_FIXED
+            // segment once placed inside it with its own prot, would otherwise
+            // leave pages that fault a perfectly normal access once malloc
+            // reuses them.
+            wasix_host_widen_rw(addr0, m->body_len);
+            free((char *)addr0 - prefix);
+        }
+    }
+    if (fd >= 0) close(fd);
+}
+
+// Release one piece taken by wasix_frags_take_locked, then drop its pin and
+// finalize the backing if that was the last reference. Takes g_vma_lock.
+static void wasix_piece_release(const struct wasix_piece *pc) {
+    struct map *m = pc->hdr;
+    // Linux writes a shared mapping's dirty pages back when they are unmapped.
+    (void)wasix_map_writeback(m, pc->start, pc->end);
+    if (m->backing == WASIX_MMAN_BACKING_RESERVE) {
+        // The piece's pages are the reservation allocator's again, right now —
+        // this is what lets a later MAP_FIXED_NOREPLACE into the freed sub-range
+        // succeed (#RZA's rule). Lift any host protection first: the free-list
+        // node is written into the piece, and the next owner expects RW.
+        wasix_host_widen_rw(pc->start, (size_t)(pc->end - pc->start));
+        wasix_res_lock_acquire();
+        wasix_res_free_insert(pc->start, (size_t)(pc->end - pc->start));
+        wasix_res_lock_release();
+    }
+    wasix_vma_lock_acquire();
+    int last = --m->inflight == 0 && m->nfrags == 0;
+    wasix_vma_lock_release();
+    if (last) wasix_map_finalize(m);
+}
+
+// Drop an msync pin; finalize if a munmap emptied the mapping meanwhile.
+static void wasix_map_unpin(struct map *m) {
+    wasix_vma_lock_acquire();
+    int last = --m->inflight == 0 && m->nfrags == 0;
+    wasix_vma_lock_release();
+    if (last) wasix_map_finalize(m);
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags,
@@ -1543,6 +1861,8 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     map->host_protected = 0;
     map->backing = reserve_backed ? WASIX_MMAN_BACKING_RESERVE
                                   : WASIX_MMAN_BACKING_DLMALLOC;
+    map->nfrags = 0;                  // firebox#FWX: registered below, once seeded
+    map->inflight = 0;
     map->dead_magic = 0;              // live (poisoned to WASIX_MMAN_DEAD in munmap)
 
     // firebox#7C5/#7KH: zero the ENTIRE body up front so the partial-page tail
@@ -1645,20 +1965,29 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         map->host_protected = 1;
     }
 
-    // firebox#9VY-24: count this private (file-backed or ANON) mapping toward
-    // vm.max_map_count. Balanced by the decrement in munmap()'s private path.
-    wasix_map_count_inc();
+    // firebox#FWX: record the mapping in the fragment table, so munmap/msync can
+    // find it from ANY address inside it. firebox#9VY-24: the fragment counts
+    // toward vm.max_map_count (wasix_frag_add_locked); its removal balances it.
+    // A table that cannot grow fails the mapping ENOMEM, releasing what was built.
+    wasix_vma_lock_acquire();
+    if (wasix_frags_reserve(1) != 0) {
+        wasix_vma_lock_release();
+        map->inflight = 1;   // no fragment was ever added: finalize directly
+        struct wasix_piece whole = { (uintptr_t)addr,
+                                     (uintptr_t)addr + wasix_map_extent(map), map };
+        const int held_fd = map->fd;
+        map->fd = -1;        // nothing to write back; the fd is closed below
+        wasix_piece_release(&whole);
+        if (held_fd >= 0) close(held_fd);
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    wasix_frag_add_locked((uintptr_t)addr, (uintptr_t)addr + wasix_map_extent(map), map);
+    wasix_vma_lock_release();
     return addr;
 }
 
 int munmap(void *addr, size_t length) {
-    // firebox#796: a fixed mapping (blink wasm64 linear mapping) has no
-    // malloc backing — the wasm linear memory can't shrink, and blink tracks
-    // the guest's maps itself, so just drop the registry entry and succeed.
-    if (wasix_fixed_unregister((uintptr_t)addr)) {
-        return 0;
-    }
-
     // firebox#61X: a window mapping (addr >= SHM_BASE, above the grow-capped
     // heap) has no malloc header — the host owns the segment via the inode
     // registry — so guest munmap is a successful no-op, like a fixed mapping.
@@ -1711,108 +2040,83 @@ int munmap(void *addr, size_t length) {
         return 0;
     }
 
-    // firebox#TTB: POSIX munmap EINVAL preconditions, validated BEFORE we
-    // recover and dereference the header one page below addr — otherwise an
-    // invalid addr (e.g. (void *)-1 in munmap/8-1) computes a wild `base` and
-    // the `map->length` read traps with an out-of-bounds memory access instead
-    // of returning EINVAL. POSIX: addr must be a multiple of the page size, len
-    // must be non-zero, and [addr, addr+len) must lie within the process
-    // address space.
-    uintptr_t a = (uintptr_t)addr;
-    size_t mem_bytes = (size_t)__builtin_wasm_memory_size(0) * (size_t)65536;
-    if (length == 0 ||                                  // empty range
-        (a & (WASIX_MMAN_PAGE_SIZE - 1)) != 0 ||        // addr not page-aligned
-        a < WASIX_MMAN_PAGE_SIZE ||                     // no room for the header
-        a >= mem_bytes ||                               // addr past linear memory
-        length > mem_bytes - a) {                       // range escapes memory
-        errno = EINVAL;
-        return -1;
-    }
-
-    // Recover the header that lives one WASIX_MMAN_PAGE_SIZE below the user
-    // address (uniform across the legacy 4 KiB prefix and the #SAH 64 KiB
-    // prefix — see the mmap layout note).
-    struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
-
-    // firebox#7KH: DEFINED double-munmap. A repeated munmap of a not-yet-reused
-    // range returns 0 (Linux munmap of an already-unmapped range succeeds). The
-    // dead_magic poison lives at the struct tail, so it survives the reservation
-    // free-list node (or dlfree bin linkage) that clobbers the payload start on
-    // the first unmap. This is placed BEFORE the length check: a double-unmap must
-    // return 0, not EINVAL, and the length field may itself have been clobbered.
-    // NO trap of any kind here — this turns an accidentally-benign UB corner into
-    // a defined no-op (the opposite of the #W7T ghost regression).
-    if (map->dead_magic == WASIX_MMAN_DEAD) {
-        return 0;
-    }
-
-    // We don't support partial munmapping.
-    if (map->length != length) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    // firebox#SAH + #6Q8: restore the body's host pages to RW before msync()
-    // reads them and before free() hands them back. A host-protected mapping left
-    // at PROT_READ/PROT_NONE would, once malloc hands those pages to a later
-    // allocation, fault a perfectly normal access — so the protection must be
-    // lifted before the memory re-enters the allocator. Since #6Q8 this is
-    // UNCONDITIONAL, not just for host_protected: a MAP_FIXED segment placed
-    // inside an ordinary read-write mapping (ld-musl's library load, blink's
-    // linear mapping) may have protected whole 64 KiB units of this body with
-    // its own prot, and nothing else would ever lift them. For a host_protected
-    // mapping addr and body_len are 64 KiB-aligned, so this is exactly the
-    // pre-#6Q8 call.
-    wasix_host_widen_rw((uintptr_t)addr, map->body_len);
-
-    // Write the data back to the backing file and close the file handle.
+    // POSIX/Linux munmap EINVAL preconditions: addr must be a multiple of the
+    // page size, len must be non-zero, and the range must not wrap the address
+    // space (Linux: `len > TASK_SIZE || addr > TASK_SIZE - len`). munmap/3-1,
+    // 8-1 and 9-1 hold these. Nothing else is an error.
     //
-    // firebox#7C5: a MAP_PRIVATE mapping is COPY-ON-WRITE — POSIX mandates that
-    // modifications through a MAP_PRIVATE mapping are NEVER carried through to
-    // the underlying file (mmap/7-2, munmap/4-1). The pre-#7C5 code flushed any
-    // PROT_WRITE file-backed mapping on unmap, leaking private edits into the
-    // file. Gate the writeback on MAP_SHARED (i.e. NOT MAP_PRIVATE): only a
-    // shared, writable mapping syncs back. msync() carries the same guard, so
-    // even though this calls msync() the gate is enforced in both places.
-    if (map->fd > 0) {
-        if ((map->prot & PROT_WRITE) != 0 &&
-            (map->flags & MAP_PRIVATE) == 0) {
-            msync(addr, length, MS_SYNC);
+    // firebox#FWX: munmap unmaps ANY page-aligned range, as on Linux — a
+    // sub-range of one mapping (head, tail or middle), a range spanning several
+    // mappings, and a range with unmapped holes in it, all return 0 and leave
+    // every page outside the range mapped with its contents and protection. A
+    // range that covers nothing mman mapped (never mapped, already unmapped,
+    // above the linear-memory size) is a successful no-op, as on Linux. Before
+    // #FWX only a whole mapping at its exact start could be unmapped, and the
+    // mapping was found by reading a header one page below `addr` — any other
+    // range read user bytes as a header and failed EINVAL (or, for a fixed
+    // mapping, dropped all of it). Mappings are now found through the fixed
+    // registry and the private fragment table, never by reading below addr.
+    uintptr_t a = (uintptr_t)addr, b;
+    if (length == 0 ||                                       // empty range
+        (a & (WASIX_MMAN_SYS_PAGE_SIZE - 1)) != 0 ||         // addr not page-aligned
+        __builtin_add_overflow(a, (uintptr_t)length, &b) ||  // range wraps
+        __builtin_add_overflow(b, (uintptr_t)WASIX_MMAN_SYS_PAGE_SIZE - 1, &b)) {
+        errno = EINVAL;
+        return -1;
+    }
+    b &= ~(uintptr_t)(WASIX_MMAN_SYS_PAGE_SIZE - 1);
+
+    // Everything mapped in [a, b) is taken out of both registries under ONE lock
+    // hold, so the unmap is atomic: no other thread can map into a piece this
+    // call has freed and then have this call unmap it as well. The fixed registry
+    // is trimmed in place (bookkeeping, plus the owned pieces' return to the hole
+    // list). The private pieces are collected — into a stack buffer, or one from
+    // the reservation allocator when many fragments overlap — and released after
+    // the lock is dropped: write-back, the host-protection lift, the hole-list
+    // return and the backing's final release run syscalls and free(). Every
+    // shortfall (a split slot, the piece buffer) is ENOMEM before anything has
+    // changed — the Linux answer when a split would exceed the mapping limit.
+    struct wasix_piece stack_pcs[8];
+    struct wasix_piece *pcs = stack_pcs;
+    size_t pcs_bytes = 0, n = 0, k = 0;
+    wasix_vma_lock_acquire();
+    for (size_t i = 0; i < g_frag_count; i++)
+        if (g_frags[i].start < b && a < g_frags[i].end) n++;
+    if (wasix_frags_would_split_locked(a, b) && wasix_frags_reserve(1) != 0) {
+        wasix_vma_lock_release();
+        errno = ENOMEM;
+        return -1;
+    }
+    if (n > sizeof stack_pcs / sizeof stack_pcs[0]) {
+        int needs_zero;
+        pcs_bytes = (n * sizeof(struct wasix_piece) + WASIX_MMAN_PAGE_SIZE - 1) &
+                    ~(size_t)(WASIX_MMAN_PAGE_SIZE - 1);
+        pcs = wasix_res_alloc(WASIX_MMAN_PAGE_SIZE, pcs_bytes, &needs_zero);
+        if (pcs == NULL) {
+            wasix_vma_lock_release();
+            errno = ENOMEM;
+            return -1;
         }
-
-        close(map->fd);
     }
-
-    // firebox#7KH: poison the header BEFORE releasing, so a second munmap of this
-    // not-yet-reused range hits the dead_magic guard above and returns 0. The
-    // reservation free-list node clobbers only the payload start (dead_magic is at
-    // the struct tail, untouched).
-    map->dead_magic = WASIX_MMAN_DEAD;
-
-    // Release the backing. A reservation-backed ANON mapping goes back to the
-    // reservation free list (NEVER to dlmalloc) — the whole point is that ANON
-    // churn stays out of the dlmalloc arena. A file-backed mapping frees the
-    // aligned_alloc base exactly as before. free()/the free list see the same
-    // pointer the backing returned — addr - prefix (== the header for a legacy
-    // 4 KiB mapping, or the 64 KiB prefix base for a host-protected mapping).
-    if (map->backing == WASIX_MMAN_BACKING_RESERVE) {
-        // ext == buf_len == prefix + body_len — the exact extent wasix_res_alloc
-        // carved. Both are page-granular (4 KiB for an ordinary mapping, 64 KiB for
-        // an enforced one), hence always a multiple of WASIX_MMAN_PAGE_SIZE, so the
-        // round_up below is identity but kept explicit.
-        size_t ext = map->prefix + map->body_len;
-        ext = (ext + (WASIX_MMAN_PAGE_SIZE - 1)) & ~(WASIX_MMAN_PAGE_SIZE - 1);
+    if (wasix_fixed_unmap_locked(a, b) != 0) {
+        wasix_vma_lock_release();
+        if (pcs_bytes) {
+            wasix_res_lock_acquire();
+            wasix_res_free_insert((uintptr_t)pcs, pcs_bytes);
+            wasix_res_lock_release();
+        }
+        errno = ENOMEM;
+        return -1;
+    }
+    // Each take removes that fragment's overlap with [a, b), so exactly n succeed.
+    while (k < n && wasix_frags_take_locked(a, b, &pcs[k])) k++;
+    wasix_vma_lock_release();
+    for (size_t i = 0; i < k; i++) wasix_piece_release(&pcs[i]);
+    if (pcs_bytes) {
         wasix_res_lock_acquire();
-        wasix_res_free_insert((uintptr_t)addr - map->prefix, ext);
+        wasix_res_free_insert((uintptr_t)pcs, pcs_bytes);
         wasix_res_lock_release();
-    } else {
-        free((char *)addr - map->prefix);
     }
-
-    // firebox#9VY-24: balance the private-map increment (vm.max_map_count).
-    wasix_map_count_dec();
-
-    // Success!
     return 0;
 }
 
@@ -1836,7 +2140,10 @@ int msync (void *addr, size_t length, int flags) {
     // firebox#796: fixed mappings (blink wasm64 linear mapping) have no
     // header and no separate backing file to flush — the bytes already live in
     // linear memory. Treat msync as a no-op success.
-    if (wasix_fixed_is_registered((uintptr_t)addr)) {
+    wasix_vma_lock_acquire();
+    const int in_fixed = wasix_fixed_contains((uintptr_t)addr);
+    wasix_vma_lock_release();
+    if (in_fixed) {
         return 0;
     }
     // firebox#61X: a window mapping IS the live host-backed shared memory — the
@@ -1869,63 +2176,37 @@ int msync (void *addr, size_t length, int flags) {
         wasix_window_writeback((uintptr_t)addr, length);
         return 0;
     }
-    // Header recovery: see munmap() for layout. addr is page-aligned by
-    // construction; the header sits exactly one page below it.
-    struct map *map = (struct map *)((char *)addr - WASIX_MMAN_PAGE_SIZE);
-    size_t map_flags = map->flags;
-    off_t map_offset = map->offset;
-    size_t map_length = map->length;
-    int fd = map->fd;
-
-    if (length > map_length) {
-        errno = EINVAL;
+    // firebox#FWX: find the private mapping through the fragment table — any
+    // address inside it, not only its first byte, and never by reading a header
+    // below `addr` (which, for a fragment left by a partial munmap, is user data
+    // or freed memory). An address no mapping covers is ENOMEM, as on Linux
+    // ("the addresses in the range are not mapped"); so is a range running past
+    // the fragment into whatever follows it.
+    uintptr_t a = (uintptr_t)addr, frag_end = 0;
+    wasix_vma_lock_acquire();
+    struct map *map = wasix_frags_pin_locked(a, &frag_end);
+    wasix_vma_lock_release();
+    if (map == NULL) {
+        errno = ENOMEM;
         return -1;
     }
-
-    // firebox#467: msync is semantically meaningful for PROT_WRITE
-    // mappings — that is the case where the user has written through the
-    // mapping and wants those bytes flushed to the backing fd. A
-    // PROT_READ-only mapping has nothing to flush; treat as a no-op
-    // (return 0) per POSIX (msync on a read-only mapping is permitted
-    // and returns 0). The previous check was inverted: it accepted
-    // exactly the no-op case and rejected every legitimate caller,
-    // silently dropping the explicit-flush idiom every editor / DB /
-    // package manager uses. See work/tasks/467-* and
-    // crates/firebox-diff differential corpus `file-mmap-write-read`.
-    if ((map->prot & PROT_WRITE) == 0) {
-        return 0;
+    if (length > frag_end - a) {
+        wasix_map_unpin(map);
+        errno = ENOMEM;
+        return -1;
     }
-
-    // firebox#7C5: a MAP_PRIVATE mapping is copy-on-write — msync() must NOT
-    // flush a private mapping's modifications to the backing file (mmap/7-2,
-    // which calls msync(MS_SYNC) explicitly on a MAP_PRIVATE map and then
-    // re-reads the file to confirm it was not mutated). POSIX: "If the mapping
-    // was made with MAP_PRIVATE, msync() has no effect on the underlying file."
-    // The previous code flushed any PROT_WRITE mapping, leaking private writes.
-    // A read-only or private mapping is a successful no-op flush.
-    if ((map_flags & MAP_PRIVATE) != 0) {
-        return 0;
-    }
-
-    if ((map_flags & MAP_ANON) == 0) {
-        char *body = (char *)addr;
-
-        while (length > 0) {
-            const ssize_t nwrite = pwrite(fd, body, length, map_offset);
-
-            if (nwrite > 0) {
-                length -= (size_t)nwrite;
-                map_offset += (size_t)nwrite;
-                body += (size_t)nwrite;
-            } else if (errno == EINTR) {
-                continue;
-            } else {
-                return -1;
-            }
-        }
-    }
-
-    return 0;
+    // firebox#467: a PROT_READ-only mapping has nothing to flush and returns 0
+    // (the pre-#467 check was inverted and rejected every legitimate caller —
+    // see work/tasks/467-* and the firebox-diff corpus `file-mmap-write-read`).
+    // firebox#7C5: a MAP_PRIVATE mapping never writes back (mmap/7-2: "If the
+    // mapping was made with MAP_PRIVATE, msync() has no effect on the underlying
+    // file"). wasix_map_writeback applies both rules and the ANON no-op, and
+    // never writes past the mapping's length.
+    int rc = wasix_map_writeback(map, a, a + length);
+    int e = errno;
+    wasix_map_unpin(map);
+    if (rc != 0) errno = e;
+    return rc;
 }
 
 // madvise: hint the kernel about future memory access patterns.
