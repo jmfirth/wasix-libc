@@ -22,6 +22,7 @@ ssize_t sendto(int socket, const void *restrict buffer, size_t length, int flags
   __wasi_siflags_t si_flags = 0;
 
   if ((flags & MSG_DONTWAIT) != 0) { si_flags |= __WASI_SIFLAGS_SEND_DONT_WAIT; }
+  if ((flags & MSG_NOSIGNAL) != 0) { si_flags |= __WASI_SIFLAGS_SEND_NO_SIGNAL; }
 
   __wasi_addr_port_t peer_addr;
   // firebox#EK0 — sockaddr_to_wasi diagnoses ENTIRELY IN THE GUEST and returns

@@ -17,6 +17,15 @@
 #include <netinet/in.h>
 #include <unistd.h>
 
+// firebox#MX0 — MSG_NOSIGNAL reaches the host as siflags bit 1, a Firebox
+// extension of the wasix word (upstream defines only bit 0, DONT_WAIT; the
+// host side is `__WASI_SOCK_SEND_INPUT_NO_SIGNAL` in wasi-types). It was
+// dropped, so a send with MSG_NOSIGNAL to a closed socketpair raised
+// SIGPIPE and killed a process that had asked for EPIPE alone.
+#ifndef __WASI_SIFLAGS_SEND_NO_SIGNAL
+#define __WASI_SIFLAGS_SEND_NO_SIGNAL ((__wasi_siflags_t)(1 << 1))
+#endif
+
 #ifndef MIN
 #define MIN(a,b) ((a)<(b) ? (a) : (b))
 #endif
@@ -218,9 +227,29 @@ static inline int sockaddr_to_wasi(const struct sockaddr *restrict addr, const s
   } else if (addr->sa_family == AF_UNIX) {
     if (addrlen < (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1))
       return EINVAL;
+    // Linux's unix_mkname: only a length beyond the whole structure is
+    // EINVAL.
+    if (addrlen > (socklen_t)sizeof(struct sockaddr_un))
+      return EINVAL;
     struct sockaddr_un *addrun = (struct sockaddr_un *)addr;
     peer_addr->tag = __WASI_ADDRESS_FAMILY_UNIX;
     socklen_t pathlen = addrlen - offsetof(struct sockaddr_un, sun_path);
+    if (addrun->sun_path[0] != '\0') {
+      // firebox#5XC — A PATHNAME SOCKET ENDS AT ITS NUL, NOT AT `addrlen`.
+      // `bind(fd, &a, sizeof a)` is the idiom (python's socket module, libuv
+      // and most hand-written C pass it), and it was EINVAL: sizeof is 110,
+      // so the "path" was 108 bytes and failed the 107-byte check though the
+      // path itself was a few bytes long. Linux's unix_mkname NUL-terminates
+      // the copy and takes the path up to its first NUL; a path with no NUL
+      // in its 108 bytes is all 108, which the WASI address carries without
+      // a terminator (the host decoder reads to the first NUL or the end).
+      size_t n = strnlen(addrun->sun_path, (size_t)pathlen);
+      memcpy(&peer_addr->u.unix.b0, &addrun->sun_path, n);
+      if (n < sizeof(addrun->sun_path))
+        *(uint8_t *)(&peer_addr->u.unix.b0 + n) = '\0';
+      return 0;
+    }
+    // An abstract name's length IS `addrlen`: every byte is significant.
     if (pathlen > 107) { // Addresses are limited to 107 bytes + 1 null byte only
       // Same code Linux's unix_mkname gives an over-long sockaddr_un: the
       // family is one we support, the length is not one it can hold.
