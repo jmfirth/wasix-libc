@@ -25,6 +25,7 @@ ssize_t sendmsg(int socket, const struct msghdr* msg, int flags) {
   __wasi_errno_t error;
 
   if ((flags & MSG_DONTWAIT) != 0) { si_flags |= __WASI_SIFLAGS_SEND_DONT_WAIT; }
+  if ((flags & MSG_NOSIGNAL) != 0) { si_flags |= __WASI_SIFLAGS_SEND_NO_SIGNAL; }
 
   if (msg->msg_name == NULL) {
     // firebox#TWX — POSIX XSH 2.9.5 cancellation point. Observe an

@@ -11,6 +11,13 @@
 #include <string.h>
 #include <wasi/libc.h>
 
+// The wasix header names roflags bit 0 `HIDDEN`; it is preview1's
+// `recv_data_truncated`, and the host sets it for a truncated datagram
+// (`__WASI_SOCK_RECV_OUTPUT_DATA_TRUNCATED` in wasi-types).
+#ifndef __WASI_ROFLAGS_RECV_DATA_TRUNCATED
+#define __WASI_ROFLAGS_RECV_DATA_TRUNCATED ((__wasi_roflags_t)(1 << 0))
+#endif
+
 ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
   __wasi_iovec_t *ri_data = (__wasi_iovec_t *)msg->msg_iov;
   size_t ri_data_len = msg->msg_iovlen;
@@ -62,7 +69,12 @@ ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
     // pread/pwrite.
     guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
   }
-  msg->msg_flags = ro_flags;
+  // firebox#MX0 — `ro_flags` is the WASI roflags word, not a set of MSG_*
+  // bits: the host reports a datagram longer than the buffer as
+  // `__WASI_ROFLAGS_RECV_DATA_TRUNCATED`, which Linux spells MSG_TRUNC.
+  // Copying the word raw left msg_flags 0 on a truncated read (MEASURED).
+  msg->msg_flags = 0;
+  if ((ro_flags & __WASI_ROFLAGS_RECV_DATA_TRUNCATED) != 0) { msg->msg_flags |= MSG_TRUNC; }
 
   if (guest_error != 0) {
     // No host call is outstanding on this path -- __wasi_sock_recv_from

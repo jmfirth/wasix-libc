@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 #include <common/cancel.h>
+#include <common/net.h>
 #include <sys/socket.h>
 
 #include <assert.h>
@@ -23,6 +24,7 @@ ssize_t send(int socket, const void *buffer, size_t length, int flags) {
   __wasi_siflags_t si_flags = 0;
 
   if ((flags & MSG_DONTWAIT) != 0) { si_flags |= __WASI_SIFLAGS_SEND_DONT_WAIT; }
+  if ((flags & MSG_NOSIGNAL) != 0) { si_flags |= __WASI_SIFLAGS_SEND_NO_SIGNAL; }
 
   // Perform system call.
   __wasi_size_t so_datalen;

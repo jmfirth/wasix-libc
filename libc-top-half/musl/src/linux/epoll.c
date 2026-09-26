@@ -105,6 +105,15 @@ static inline int __fbx_epoll_ctl_finish(__wasi_errno_t error)
     return 0;
 }
 
+/* firebox#5XC — EPOLLEXCLUSIVE was dropped on the way to the host, so a
+ * caller asking for exclusive wakeups got a plain registration and none of
+ * the EINVALs Linux gives its misuse (EPOLL_CTL_MOD, an epoll target, events
+ * outside IN|OUT|ERR|HUP|ET|EXCLUSIVE). The wasix bit is 1<<8, declared by
+ * the host in wasi-types' wasix_manual.rs; the generated header lacks it. */
+#ifndef __WASI_EPOLL_TYPE_EPOLLEXCLUSIVE
+#define __WASI_EPOLL_TYPE_EPOLLEXCLUSIVE ((__wasi_epoll_type_t)+(1 << 8))
+#endif
+
 int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
 {
     if (ev)
@@ -128,6 +137,8 @@ int epoll_ctl(int fd, int op, int fd2, struct epoll_event *ev)
             ev2.events |= __WASI_EPOLL_TYPE_EPOLLET;
         if ((ev->events & EPOLLONESHOT) != 0)
             ev2.events |= __WASI_EPOLL_TYPE_EPOLLONESHOT;
+        if ((ev->events & EPOLLEXCLUSIVE) != 0)
+            ev2.events |= __WASI_EPOLL_TYPE_EPOLLEXCLUSIVE;
         ev2.data.ptr = (__wasi_pointersize_t)ev->data.ptr;
         ev2.data.fd = fd2;
         ev2.data.data1 = ev->data.u32;

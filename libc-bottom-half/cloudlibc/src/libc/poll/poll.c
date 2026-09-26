@@ -7,9 +7,44 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <string.h>
+#include <time.h>
 #include <wasi/libc.h>
 
+// firebox#XD4 — does this entry ask for input or output readiness at all?
+static bool wants_io(const struct pollfd *pollfd) {
+  return (pollfd->events & (POLLRDNORM | POLLIN | POLLWRNORM | POLLOUT)) != 0;
+}
+
 int poll(struct pollfd *fds, size_t nfds, int timeout) {
+  // firebox#XD4 — an entry whose `events` asks for NEITHER input nor output
+  // (events == 0 — the idiom for parking an entry in a pollfd array — or a
+  // POLLPRI-only request) used to fail the WHOLE call with ENOSYS. Linux polls
+  // it for the conditions that are always reported: POLLHUP, POLLERR and
+  // POLLNVAL, and nothing else.
+  //
+  // WASI has no "status only" subscription, so such an entry gets a STATUS
+  // subscription on its readable side (its writable side for a write-only fd)
+  // and only error/hangup results are kept for it. A status subscription that
+  // merely reports READY is not reportable; that entry is DEMOTED (left out
+  // for the rest of this call) and the poll re-issued with the time that
+  // remains, so readiness nobody asked for can neither wake the caller nor
+  // spin it.
+  bool demoted[nfds ? nfds : 1];
+  memset(demoted, 0, sizeof demoted);
+  struct timespec started;
+  if (timeout > 0)
+    clock_gettime(CLOCK_MONOTONIC, &started);
+
+  for (;;) {
+  int remaining = timeout;
+  if (timeout > 0) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long long elapsed = (long long)(now.tv_sec - started.tv_sec) * 1000 +
+                        (now.tv_nsec - started.tv_nsec) / 1000000;
+    remaining = elapsed >= timeout ? 0 : (int)(timeout - elapsed);
+  }
   // Construct events for poll().
   size_t maxevents = 2 * nfds + 1;
   __wasi_subscription_t subscriptions[maxevents];
@@ -18,7 +53,28 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     struct pollfd *pollfd = &fds[i];
     if (pollfd->fd < 0)
       continue;
-    bool created_events = false;
+    if (!wants_io(pollfd)) {
+      if (demoted[i])
+        continue;
+      // firebox#XD4 — the STATUS subscription. A bad fd is answered by the
+      // host per entry (EBADF event -> POLLNVAL), so it needs no special case.
+      __wasi_eventtype_t tag = __WASI_EVENTTYPE_FD_READ;
+      __wasi_fdstat_t st;
+      if (__wasi_fd_fdstat_get(pollfd->fd, &st) == 0 &&
+          (st.fs_rights_base & __WASI_RIGHTS_FD_READ) == 0 &&
+          (st.fs_rights_base & __WASI_RIGHTS_FD_WRITE) != 0)
+        tag = __WASI_EVENTTYPE_FD_WRITE;
+      __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
+      *subscription = (__wasi_subscription_t){
+          .userdata = (uintptr_t)pollfd,
+          .u.tag = tag,
+      };
+      if (tag == __WASI_EVENTTYPE_FD_READ)
+        subscription->u.u.fd_read.file_descriptor = pollfd->fd;
+      else
+        subscription->u.u.fd_write.file_descriptor = pollfd->fd;
+      continue;
+    }
     // POLLIN and POLLRDNORM are distinct on musl/wasix (0x001 vs 0x040)
     // but equivalent for TCP sockets, pipes, and regular files.  Callers
     // that set POLLIN (curl, Rust std) must see the same behaviour as
@@ -30,7 +86,6 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
           .u.tag = __WASI_EVENTTYPE_FD_READ,
           .u.u.fd_read.file_descriptor = pollfd->fd,
       };
-      created_events = true;
     }
     if ((pollfd->events & (POLLWRNORM | POLLOUT)) != 0) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
@@ -39,20 +94,11 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
           .u.tag = __WASI_EVENTTYPE_FD_WRITE,
           .u.u.fd_write.file_descriptor = pollfd->fd,
       };
-      created_events = true;
-    }
-
-    // As entries are decomposed into separate read/write subscriptions,
-    // we cannot detect POLLERR, POLLHUP and POLLNVAL if POLLRDNORM and
-    // POLLWRNORM are not specified. Disallow this for now.
-    if (!created_events) {
-      errno = ENOSYS;
-      return -1;
     }
   }
 
   // Create extra event for the timeout.
-  if (timeout >= 0) {
+  if (remaining >= 0) {
     // in WASI, a timeout of 0 corresponds to an indefinite wait, so to work
     // around that and remain compatible with downstream libc users here we
     // set the subscription timeout to 1 (which actually corresponds to
@@ -61,7 +107,7 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     *subscription = (__wasi_subscription_t){
         .u.tag = __WASI_EVENTTYPE_CLOCK,
         .u.u.clock.id = __WASI_CLOCKID_REALTIME,
-        .u.u.clock.timeout = (__wasi_timestamp_t)(timeout?(timeout * 1000000LL):1LL),
+        .u.u.clock.timeout = (__wasi_timestamp_t)(remaining?(remaining * 1000000LL):1LL),
     };
   }
 
@@ -119,11 +165,28 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
   }
 
   // Set revents fields.
+  bool clock_fired = false;
+  bool newly_demoted = false;
   for (size_t i = 0; i < nevents; ++i) {
     const __wasi_event_t *event = &events[i];
+    if (event->type == __WASI_EVENTTYPE_CLOCK)
+      clock_fired = true;
     if (event->type == __WASI_EVENTTYPE_FD_READ ||
         event->type == __WASI_EVENTTYPE_FD_WRITE) {
       struct pollfd *pollfd = (struct pollfd *)(uintptr_t)event->userdata;
+      if (!wants_io(pollfd) && event->error == 0 &&
+          (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) == 0) {
+        // firebox#XD4 — a status subscription that only reports READY:
+        // nothing the caller asked about. Demote it and poll again.
+        demoted[pollfd - fds] = true;
+        newly_demoted = true;
+        continue;
+      }
+      if (!wants_io(pollfd) && event->error == 0) {
+        // firebox#XD4 — status entry with a hangup: report only POLLHUP.
+        pollfd->revents |= POLLHUP;
+        continue;
+      }
       if (event->error == __WASI_ERRNO_BADF) {
         // Invalid file descriptor.
         pollfd->revents |= POLLNVAL;
@@ -160,5 +223,10 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     if (pollfd->revents != 0)
       ++retval;
   }
+  // firebox#XD4 — only a demotion with nothing to report and time left makes
+  // another round; anything reportable, or the timeout, ends the call.
+  if (retval == 0 && newly_demoted && !clock_fired)
+    continue;
   return retval;
+  }
 }
