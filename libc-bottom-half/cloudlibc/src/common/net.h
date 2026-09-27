@@ -189,6 +189,17 @@ static inline int wasi_to_sockaddr(const struct __wasi_addr_port_t *restrict pee
   return 0;
 }
 
+// firebox#15W — AN UNBOUND AF_UNIX DATAGRAM SENDER HAS NO ADDRESS AT ALL.
+// The host reports it as an AF_UNIX address with an empty path, which is
+// also how getsockname() spells an unbound socket (`sizeof(sa_family_t)`
+// long, as Linux does). recvfrom()/recvmsg() must not: Linux's
+// unix_copy_addr sets the name length to 0 and leaves the caller's buffer
+// alone (MEASURED: addrlen 0, buffer untouched), which CPython turns into
+// `None` where the 2-byte form gives ''. Only the receive paths ask this.
+static inline int wasi_addr_is_unnamed_unix(const struct __wasi_addr_port_t *peer_addr) {
+  return peer_addr->tag == __WASI_ADDRESS_FAMILY_UNIX && peer_addr->u.unix.b0 == 0;
+}
+
 static inline int sockaddr_to_wasi(const struct sockaddr *restrict addr, const socklen_t addrlen, struct __wasi_addr_port_t *restrict peer_addr) {
   // firebox#9EJ — `addr->sa_family` below is an unconditional dereference, and
   // bind()/connect() pass the caller's pointer through untouched. On wasm that

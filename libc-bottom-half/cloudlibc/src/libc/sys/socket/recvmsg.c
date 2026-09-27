@@ -67,7 +67,12 @@ ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
     // __wasilibc_errno_from_wasi below, which translates a guest constant a
     // second time -- invisible today, wrong after #87F step 4. Same split as
     // pread/pwrite.
-    guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
+    if (wasi_addr_is_unnamed_unix(&peer_addr)) {
+      // firebox#15W — see common/net.h: no address, a zero length.
+      *addrlen = 0;
+    } else {
+      guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
+    }
   }
   // firebox#MX0 — `ro_flags` is the WASI roflags word, not a set of MSG_*
   // bits: the host reports a datagram longer than the buffer as

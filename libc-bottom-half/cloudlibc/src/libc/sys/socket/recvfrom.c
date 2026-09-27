@@ -44,7 +44,12 @@ ssize_t recvfrom(int socket, void* buffer, size_t length, int flags, struct sock
   // The datagram has already been consumed at this point, but reporting the
   // failure anyway is what Linux does -- __sys_recvfrom overwrites its return
   // with move_addr_to_user's error.
-  if (addr != NULL) {
+  if (addr != NULL && wasi_addr_is_unnamed_unix(&peer_addr)) {
+    // firebox#15W — see common/net.h: no address, a zero length.
+    if (addrlen == NULL)
+      return (errno = EFAULT, -1);
+    *addrlen = 0;
+  } else if (addr != NULL) {
     int guest_error = wasi_to_sockaddr(&peer_addr, addr, addrlen);
     if (guest_error != 0) {
       errno = guest_error;
