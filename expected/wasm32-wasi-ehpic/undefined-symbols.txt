@@ -1,5 +1,6 @@
 __addtf3
 __c_longjmp
+__cpp_exception
 __divtf3
 __eqtf2
 __extenddftf2

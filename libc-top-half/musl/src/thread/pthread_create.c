@@ -365,6 +365,25 @@ hidden void *__dummy_reference = wasi_thread_start;
 extern void __set_tp(uintptr_t p);
 
 #ifndef __FIREBOX_NO_THREADS__
+/* firebox#ZVA — a C++ exception escaping a thread's start routine must reach
+ * std::terminate, exactly as one escaping main does; see
+ * libc-bottom-half/sources/__wasilibc_cxx_guard.c. WEAK for the same reason as
+ * in __wasilibc_start_main.c: no libc++abi, no guard, a direct call. */
+extern void __wasilibc_cxx_guarded_call(void (*fn)(void *), void *arg)
+	__attribute__((__weak__));
+
+struct start_call {
+	void *(*start_func)(void *);
+	void *start_arg;
+	void *result;
+};
+
+static void call_start(void *p)
+{
+	struct start_call *c = p;
+	c->result = c->start_func(c->start_arg);
+}
+
 hidden void __wasi_thread_start_C(int tid, void *p)
 {
 	struct start_args *args = p;
@@ -401,7 +420,12 @@ hidden void __wasi_thread_start_C(int tid, void *p)
 	__wasi_callback_signal("__wasm_signal");
 
 	// Execute the user's start function.
-	__pthread_exit(args->start_func(args->start_arg));
+	struct start_call c = { args->start_func, args->start_arg, 0 };
+	if (__wasilibc_cxx_guarded_call)
+		__wasilibc_cxx_guarded_call(call_start, &c);
+	else
+		call_start(&c);
+	__pthread_exit(c.result);
 }
 #endif /* !__FIREBOX_NO_THREADS__ */
 #endif

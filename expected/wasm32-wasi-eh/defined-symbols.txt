@@ -37,6 +37,7 @@ __clock_settime
 __cos
 __cosdf
 __cosl
+__cpp_exception
 __crypt_blowfish
 __crypt_des
 __crypt_md5
@@ -517,6 +518,8 @@ __wasilibc_access
 __wasilibc_cwd
 __wasilibc_cwd_lock
 __wasilibc_cwd_unlock
+__wasilibc_cxx_guarded_call
+__wasilibc_cxx_uncaught
 __wasilibc_deinitialize_environ
 __wasilibc_dttoif
 __wasilibc_ensure_environ
@@ -562,6 +565,7 @@ __wasilibc_register_preopened_fd
 __wasilibc_rename_newat
 __wasilibc_rename_oldat
 __wasilibc_rmdirat
+__wasilibc_set_cxx_uncaught_hook
 __wasilibc_set_stack_pointer
 __wasilibc_set_tls_base
 __wasilibc_setjmp

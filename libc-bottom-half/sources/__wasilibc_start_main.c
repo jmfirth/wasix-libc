@@ -20,6 +20,35 @@ extern void __wasi_init_tp(void);
 extern void __wasm_call_dtors(void);
 extern void __wasi_init_signals(void);
 
+/* firebox#ZVA — an uncaught C++ exception must reach std::terminate, and on
+ * wasm EH nothing below this frame can decide "no handler"; see
+ * __wasilibc_cxx_guard.c. The reference is WEAK so a program without
+ * libc++abi does not link the guard (and its `try_table`); then the call is
+ * direct, which is exactly what it was before. */
+extern void __wasilibc_cxx_guarded_call(void (*fn)(void *), void *arg)
+    __attribute__((__weak__));
+
+static void guarded(void (*fn)(void *), void *arg) {
+    if (__wasilibc_cxx_guarded_call)
+        __wasilibc_cxx_guarded_call(fn, arg);
+    else
+        fn(arg);
+}
+
+static void call_void(void *fn) {
+    ((void (*)(void))fn)();
+}
+
+struct main_call {
+    int (*main_void)(void);
+    int result;
+};
+
+static void call_main(void *p) {
+    struct main_call *m = p;
+    m->result = m->main_void();
+}
+
 void __wasilibc_start_main(void (*call_ctors)(void), int (*main_void)(void)) {
     // Commands should only be called once per instance. This simple check
     // ensures that the `_start` function isn't started more than once.
@@ -77,17 +106,24 @@ void __wasilibc_start_main(void (*call_ctors)(void), int (*main_void)(void)) {
      * touches is already relocated. */
     __wasi_init_signals();
 
+    // Constructors, `main` and destructors each run under the C++ guard: a
+    // static initialiser, `main` and an atexit handler / static destructor are
+    // all places an exception escapes to std::terminate on Linux. The exit
+    // path below stays OUTSIDE — it is libc's, and throws nothing.
+
     // The executable's linker-synthesized constructor runner.
-    call_ctors();
+    guarded(call_void, (void *)call_ctors);
 
     // `__main_void` is either the application's zero-argument `__main_void`
     // or the libc routine which obtains the command-line arguments and calls
     // `__main_argv_argc`. The EXECUTABLE bound it, so interposition by a
     // program-defined `__main_void` (rustc emits one) is preserved.
-    int r = main_void();
+    struct main_call m = { main_void, 0 };
+    guarded(call_main, &m);
+    int r = m.result;
 
     // Call atexit functions, destructors, stdio cleanup, etc.
-    __wasm_call_dtors();
+    guarded(call_void, (void *)__wasm_call_dtors);
 
     // If main exited successfully, just return, otherwise call
     // `__wasi_proc_exit`.
