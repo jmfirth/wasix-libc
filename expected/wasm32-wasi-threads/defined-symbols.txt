@@ -876,6 +876,7 @@ fread
 fread_unlocked
 free
 freeif_addrs
+freeifaddrs
 freelocale
 freopen
 freopen64
@@ -934,6 +935,7 @@ getgrouplist
 gethostid
 gethostname
 getif_addrs
+getifaddrs
 getitimer
 getline
 getopt

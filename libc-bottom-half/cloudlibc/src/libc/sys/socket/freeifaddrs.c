@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <string.h>
 
+#include <_/cdefs.h>
 #include <ifaddrs.h>
 
 void freeifaddrs(struct ifaddrs *ifa) {
@@ -57,3 +58,6 @@ void freeifaddrs(struct ifaddrs *ifa) {
     ifa = next;
   }
 }
+
+// firebox#YZN: pre-rename spelling kept as a strong alias; see getifaddrs.c.
+__strong_reference(freeifaddrs, freeif_addrs);

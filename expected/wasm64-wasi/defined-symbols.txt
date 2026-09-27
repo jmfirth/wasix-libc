@@ -892,6 +892,7 @@ fread_unlocked
 free
 freeaddrinfo
 freeif_addrs
+freeifaddrs
 freelocale
 freopen
 freopen64
@@ -959,6 +960,7 @@ gethostbyname_r
 gethostid
 gethostname
 getif_addrs
+getifaddrs
 getitimer
 getline
 getnameinfo

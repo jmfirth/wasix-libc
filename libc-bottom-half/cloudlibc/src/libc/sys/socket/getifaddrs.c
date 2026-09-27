@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <string.h>
 
+#include <_/cdefs.h>
 #include <ifaddrs.h>
 #include <wasi/libc.h>
 
@@ -113,3 +114,10 @@ int getifaddrs(struct ifaddrs **ifap) {
   free(ips_heap);
   return 0;
 }
+
+// firebox#YZN: the pre-rename spelling stays EXPORTED as a strong alias of the
+// same definition. Every provider before this one defined getif_addrs, so a
+// consumer linked against one of them imports that name; dropping it would be
+// a removal, which forks a new provider class instead of superseding the old
+// one. The alias makes the rename a strict superset.
+__strong_reference(getifaddrs, getif_addrs);
