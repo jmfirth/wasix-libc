@@ -232,6 +232,12 @@ __wasi_errno_t __wasix_sched_check_owner(uint32_t pid){return (uint16_t)__import
 int32_t __imported_wasix_fbx_resource_set_nofile(int64_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("resource_set_nofile")));
 __wasi_errno_t __wasix_resource_set_nofile(uint64_t soft,uint64_t hard){return (uint16_t)__imported_wasix_fbx_resource_set_nofile((int64_t)soft,(int64_t)hard);}
 
+/* firebox#48H — getrlimit(RLIMIT_NOFILE) host wire: reads the fd table's (soft,
+ * hard) into out[0..2]. intptr_t out ptr is width-agnostic, matching the host
+ * WasmPtr<u64,M> (as itimer_get). */
+int32_t __imported_wasix_fbx_resource_get_nofile(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("resource_get_nofile")));
+__wasi_errno_t __wasix_resource_get_nofile(uint64_t *out){return (uint16_t)__imported_wasix_fbx_resource_get_nofile((intptr_t)out);}
+
 /* firebox#1QR — the blocked signal mask a freshly instantiated guest must adopt
  * at startup, i.e. POSIX signal-mask inheritance across posix_spawn plus
  * POSIX_SPAWN_SETSIGMASK. A spawned child is a NEW instance with NEW linear
