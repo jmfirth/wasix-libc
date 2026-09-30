@@ -14,7 +14,7 @@ int __res_mkquery(int op, const char *dname, int class, int type,
 
 	if (l && dname[l-1]=='.') l--;
 	n = 17+l+!!l;
-	if (l>253 || buflen<n || op>15u || class>255u || type>255u)
+	if (l>253 || buflen<n || op>15u || class>65535u || type>65535u)
 		return -1;
 
 	/* Construct query template - ID will be filled later */
@@ -28,7 +28,10 @@ int __res_mkquery(int op, const char *dname, int class, int type,
 		if (j-i-1u > 62u) return -1;
 		q[i-1] = j-i;
 	}
+	/* DNS type and class are 16-bit fields (including CAA, type 257). */
+	q[i] = type >> 8;
 	q[i+1] = type;
+	q[i+2] = class >> 8;
 	q[i+3] = class;
 
 	/* Make a reasonably unpredictable id */
