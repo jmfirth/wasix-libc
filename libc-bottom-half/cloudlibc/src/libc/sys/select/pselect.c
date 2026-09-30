@@ -83,42 +83,15 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     }
   }
 
-  // firebox#B28 — WAIT INDEFINITELY when nothing else was subscribed.
-  //
-  // `pselect(0, NULL, NULL, NULL, NULL, mask)` — the canonical "park this
-  // thread until a signal arrives" idiom — produces zero subscriptions.
-  // `__wasi_poll_oneoff` refuses an empty subscription list with `EINVAL`, and
-  // the code below used to relabel that as `ENOTSUP` and return -1 in 0 ms
-  // (MEASURED against the shipping sysroot, deterministic 3/3). Linux blocks.
-  //
-  // The upstream justification for that refusal — "Wasm has no signal
-  // handling, so there would be no way for the poll to wake up" — is FALSE for
-  // firebox, which ships per-thread signal delivery. It is "upstream doesn't"
-  // wearing a platform bound's clothes, which invariant 0 calls a violation
-  // rather than a bound.
-  //
-  // We do NOT need a synthetic short timeout (the earlier 10 ms form) and we do
-  // NOT need a host change: the WASI ABI already encodes an indefinite wait as
-  // a CLOCK subscription whose timeout is 0. MEASURED 2026-08-19 against the
-  // UNMODIFIED shipping sysroot + runtime, deterministic 3/3, with its negative
-  // control in the same process:
-  //   timeout=1e9  -> err=0  nevents=1 after 1003 ms      (control: alive)
-  //   timeout=0, alarm(2) armed
-  //                -> err=27 (EINTR) nevents=0 after 2003 ms, handler ran
-  //   timeout=0, nothing armed
-  //                -> never returned; killed by the 8 s wrapper alarm
-  // So timeout==0 is an indefinite wait that a delivered signal interrupts with
-  // EINTR — exactly the POSIX contract for `pselect` (signal(7): select/pselect
-  // are never restarted, they fail EINTR regardless of SA_RESTART).
-  //
-  // `timespec_to_timestamp_clamp` never yields 0 (a zero-length caller timeout
-  // is spelled 1, "immediate"), so this value is unambiguously ours.
+  // firebox#RDN — a descriptor-free infinite wait must not emit an
+  // expired CLOCK. Use the largest representable relative deadline;
+  // the signal-mask and EINTR paths below still end the wait faithfully.
   if (nsubscriptions == 0) {
     __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
     *subscription = (__wasi_subscription_t){
         .u.tag = __WASI_EVENTTYPE_CLOCK,
         .u.u.clock.id = __WASI_CLOCKID_MONOTONIC,
-        .u.u.clock.timeout = 0,  // 0 == wait indefinitely (firebox#B28)
+        .u.u.clock.timeout = UINT64_MAX,
     };
   }
 
