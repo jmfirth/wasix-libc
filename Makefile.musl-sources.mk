@@ -93,6 +93,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         network/ns_parse.c \
         network/res_mkquery.c \
         network/res_send.c \
+        network/res_msend.c \
         network/res_query.c \
         network/res_querydomain.c \
         network/res_search.c \

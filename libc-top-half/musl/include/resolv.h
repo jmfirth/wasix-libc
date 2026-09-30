@@ -22,7 +22,7 @@ extern "C" {
 #define RES_DFLRETRY		2
 #define RES_MAXTIME		65535
 
-/* Legacy resolver configuration. */
+/* unused; purely for broken apps */
 typedef struct __res_state {
 	int retrans;
 	int retry;
