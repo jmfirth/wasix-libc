@@ -92,6 +92,11 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         network/dn_skipname.c \
         network/ns_parse.c \
         network/res_mkquery.c \
+        network/res_send.c \
+        network/res_msend.c \
+        network/res_query.c \
+        network/res_querydomain.c \
+        network/res_search.c \
         network/res_state.c \
         network/if_freenameindex.c \
         network/in6addr_any.c \

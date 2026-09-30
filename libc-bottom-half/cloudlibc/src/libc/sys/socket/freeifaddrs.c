@@ -30,30 +30,20 @@
 
 #include <_/cdefs.h>
 #include <ifaddrs.h>
+#include <stdlib.h>
 
+/* firebox#P47 (P47-B 77bbf88e, merged onto the #YZN rename): the WASIX
+ * producer allocates each node and each member separately, and every member is
+ * heap-owned or NULL. The broadcast/destination union owns ONE allocation, so it
+ * is freed once through ifa_broadaddr. ifa_name is freed too (NULL today). */
 void freeifaddrs(struct ifaddrs *ifa) {
-  for (;ifa != NULL;) {
-    if (ifa->ifa_addr != NULL) {
-      free(ifa->ifa_addr);
-      ifa->ifa_addr = NULL;
-    }
-    if (ifa->ifa_netmask != NULL) {
-      free(ifa->ifa_netmask);
-      ifa->ifa_netmask = NULL;
-    }
-    if (ifa->ifa_ifu.ifu_broadaddr != NULL) {
-      free(ifa->ifa_ifu.ifu_broadaddr);
-      ifa->ifa_ifu.ifu_broadaddr = NULL;
-    }
-    if (ifa->ifa_ifu.ifu_dstaddr != NULL) {
-      free(ifa->ifa_ifu.ifu_dstaddr);
-      ifa->ifa_ifu.ifu_dstaddr = NULL;
-    }
-    if (ifa->ifa_data != NULL) {
-      free(ifa->ifa_data);
-      ifa->ifa_data = NULL;
-    }
-    struct ifaddrs * next = ifa->ifa_next;
+  while (ifa) {
+    struct ifaddrs *next = ifa->ifa_next;
+    free(ifa->ifa_name);
+    free(ifa->ifa_addr);
+    free(ifa->ifa_netmask);
+    free(ifa->ifa_broadaddr);
+    free(ifa->ifa_data);
     free(ifa);
     ifa = next;
   }
