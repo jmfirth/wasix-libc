@@ -33,8 +33,16 @@ extern int open(const char *path, int flags, ...);
 // WebAssembly doesn't support shrinking linear memory.
 #define MORECORE_CANNOT_TRIM 1
 
-// Disable sanity checks to reduce code size.
-#define ABORT __builtin_unreachable()
+// firebox#7KH: detected corruption must terminate with SIGABRT, including
+// while dlmalloc holds its lock. Neither raw write nor libc's abort path
+// allocates; avoid stdio here because it can re-enter the damaged allocator.
+// The upstream corruption, usage-error and assertion actions all use ABORT.
+static _Noreturn void dlmalloc_abort(void) {
+    static const char message[] = "malloc(): heap corruption or invalid pointer\n";
+    (void)write(2, message, sizeof(message) - 1);
+    abort();
+}
+#define ABORT dlmalloc_abort()
 
 // If threads are enabled, enable support for threads.
 #ifdef _REENTRANT

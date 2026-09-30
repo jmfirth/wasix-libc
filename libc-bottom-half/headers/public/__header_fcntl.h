@@ -117,6 +117,17 @@
 #define F_DUPFD_CLOEXEC (1030)
 
 /*
+ * firebox#TCS: Linux pipe capacity commands, visible under _GNU_SOURCE as in
+ * glibc and musl. The values are Linux's; like every F_* here they never cross
+ * the host boundary (fcntl.c dispatches on them symbolically), and they
+ * overlap no existing command, so adding them needs no lockstep relink.
+ */
+#if defined(_GNU_SOURCE)
+#define F_SETPIPE_SZ (1031)
+#define F_GETPIPE_SZ (1032)
+#endif
+
+/*
  * POSIX advisory record locks (Firebox extension, issue #243).
  *
  * Routed at runtime to the WASIX import `__wasix_fd_lock_range`. The

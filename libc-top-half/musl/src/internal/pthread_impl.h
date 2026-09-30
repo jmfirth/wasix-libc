@@ -336,6 +336,7 @@ extern hidden volatile int __eintr_valid_flag;
  * libc-internal, same posture as __eintr_valid_flag above. */
 hidden void __wasm_inline_delivery_begin(void);
 hidden void __wasm_inline_delivery_end(void);
+hidden int __wasm_inline_delivery_end_restart(void);
 
 #if defined(__wasilibc_unmodified_upstream) || !defined(__wasm_exception_handling__)
 hidden int __clone(int (*)(void *), void *, int, void *, ...);

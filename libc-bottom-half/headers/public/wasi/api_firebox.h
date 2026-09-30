@@ -142,11 +142,21 @@ __wasi_errno_t __wasix_sched_check_owner(uint32_t pid);
  * setrlimit(2) errnos surfaced verbatim: __WASI_ERRNO_INVAL when soft > hard,
  * __WASI_ERRNO_PERM for a hard-limit RAISE (the sandbox grants no
  * CAP_SYS_RESOURCE). The guest setrlimit(RLIMIT_NOFILE) wrapper routes through
- * this so the enforced limit moves; getrlimit still reads the echoed table.
+ * this so the enforced limit moves; getrlimit reads it back through
+ * __wasix_resource_get_nofile (firebox#48H).
  * Both args are 64-bit (rlim_t) regardless of pointer width, so the host takes
  * i64/i64 → registered identically in wasix_32v1 and wasix_64v1.
  * Host: lib/wasix/src/syscalls/wasix/resource_set_nofile.rs. */
 __wasi_errno_t __wasix_resource_set_nofile(uint64_t soft, uint64_t hard);
+
+/* firebox#48H — host side of getrlimit(RLIMIT_NOFILE, …), the read companion to
+ * __wasix_resource_set_nofile. Writes the host fd table's limit — the one it
+ * actually enforces — as out[0] = soft, out[1] = hard. An unset process reads
+ * the fd table's finite default, never RLIM_INFINITY: Linux never reports an
+ * infinite RLIMIT_NOFILE, and programs size tables from it. `out` is a guest
+ * pointer, so the host import is width-generic (wasix_32v1 / wasix_64v1).
+ * Host: lib/wasix/src/syscalls/wasix/resource_get_nofile.rs. */
+__wasi_errno_t __wasix_resource_get_nofile(uint64_t *out);
 
 /* firebox#1QR — the blocked signal mask a freshly instantiated guest must START
  * WITH: POSIX signal-mask inheritance across posix_spawn(3), plus the

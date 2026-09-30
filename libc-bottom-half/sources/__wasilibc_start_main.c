@@ -1,0 +1,141 @@
+// firebox#CTX — the program-startup sequence, owned by libc and NOT by crt1.
+//
+// `_start` (libc-bottom-half/crt/crt1-command.c) is linked into every
+// executable. For a PIC thin main that means any behaviour it carries is frozen
+// into the consumer's bytes and a startup fix reaches a consumer only by
+// relinking it — #R0A (signals before constructors) was exactly such a fix and
+// needed a full relink cascade. So `_start` is reduced to the two things only
+// the executable can supply — its OWN linker-synthesized `__wasm_call_ctors`
+// and the `__main_void` it binds (the program's, or libc's argv-marshalling
+// wrapper) — and hands them here. Everything that is BEHAVIOUR (the run-once
+// guard, TLS, signal state, the ctor/main/dtor order, the exit path) lives in
+// this function, which a thin main imports from the shared libc provider and a
+// static main pulls from libc.a. One source, both link models.
+
+#ifdef _REENTRANT
+#include <stdatomic.h>
+extern void __wasi_init_tp(void);
+#endif
+#include <wasi/api.h>
+extern void __wasm_call_dtors(void);
+extern void __wasi_init_signals(void);
+
+/* firebox#ZVA — an uncaught C++ exception must reach std::terminate, and on
+ * wasm EH nothing below this frame can decide "no handler"; see
+ * __wasilibc_cxx_guard.c. The reference is WEAK so a program without
+ * libc++abi does not link the guard (and its `try_table`); then the call is
+ * direct, which is exactly what it was before. */
+extern void __wasilibc_cxx_guarded_call(void (*fn)(void *), void *arg)
+    __attribute__((__weak__));
+
+static void guarded(void (*fn)(void *), void *arg) {
+    if (__wasilibc_cxx_guarded_call)
+        __wasilibc_cxx_guarded_call(fn, arg);
+    else
+        fn(arg);
+}
+
+static void call_void(void *fn) {
+    ((void (*)(void))fn)();
+}
+
+struct main_call {
+    int (*main_void)(void);
+    int result;
+};
+
+static void call_main(void *p) {
+    struct main_call *m = p;
+    m->result = m->main_void();
+}
+
+void __wasilibc_start_main(void (*call_ctors)(void), int (*main_void)(void)) {
+    // Commands should only be called once per instance. This simple check
+    // ensures that the `_start` function isn't started more than once.
+    //
+    // We use `volatile` here to prevent the store to `started` from being
+    // sunk past any subsequent code, and to prevent any compiler from
+    // optimizing based on the knowledge that this is the program entrypoint.
+#ifdef _REENTRANT
+    static volatile _Atomic int started = 0;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&started, &expected, 1)) {
+	__builtin_trap();
+    }
+#else
+    static volatile int started = 0;
+    if (started != 0) {
+	__builtin_trap();
+    }
+    started = 1;
+#endif
+
+#ifdef _REENTRANT
+	__wasi_init_tp();
+#endif
+
+    /* firebox#R0A — signal state is established BEFORE constructors run,
+     * because that is the order Linux has.
+     *
+     * On Linux the kernel installs the process signal mask (inherited, or
+     * `attr->__mask` for POSIX_SPAWN_SETSIGMASK) and resets catchable
+     * dispositions as part of `exec`, before the dynamic loader and before any
+     * `.init_array` entry. A constructor therefore runs ON TOP of the final
+     * signal state and its changes survive into `main`.
+     *
+     * With `__wasi_init_signals()` after `__wasm_call_ctors()` the opposite
+     * held, and BOTH halves of it were destructive — MEASURED 2026-09-19 in a
+     * spawned child whose constructor blocked SIGPIPE and installed a SIGUSR2
+     * handler:
+     *   - the `pthread_sigmask(SIG_SETMASK, ...)` that adopts the spawned mask
+     *     (firebox#1QR) ERASED the constructor's block — observed mask was the
+     *     requested {SIGTERM} alone, not {SIGTERM, SIGPIPE};
+     *   - the inherited-disposition replay OVERWROTE the constructor's handler
+     *     with the parent's SIG_IGN.
+     * Neither is exotic: a constructor blocking SIGPIPE and a C++ static
+     * initialiser installing a handler are ordinary Linux idioms, and both
+     * failed silently — the guest saw a plausible mask, not an error.
+     *
+     * ⛔ Safe here and not merely earlier: `__wasi_init_tp()` above has already
+     * established TLS, which is all `pthread_sigmask` and musl's
+     * self-initialising malloc need. Data relocations are NOT a hazard either —
+     * for a PIE main module the HOST applies them before `_start` is entered
+     * (`__wasm_apply_data_relocs` / `__wasm_apply_tls_relocs` are called from
+     * the wasix linker's main-module path and from `WasiEnv` instance init),
+     * not from `__wasm_call_ctors`, so every pointer `__wasi_init_signals`
+     * touches is already relocated. */
+    __wasi_init_signals();
+
+    // Constructors, `main` and destructors each run under the C++ guard: a
+    // static initialiser, `main` and an atexit handler / static destructor are
+    // all places an exception escapes to std::terminate on Linux. The exit
+    // path below stays OUTSIDE — it is libc's, and throws nothing.
+
+    // The executable's linker-synthesized constructor runner.
+    guarded(call_void, (void *)call_ctors);
+
+    // `__main_void` is either the application's zero-argument `__main_void`
+    // or the libc routine which obtains the command-line arguments and calls
+    // `__main_argv_argc`. The EXECUTABLE bound it, so interposition by a
+    // program-defined `__main_void` (rustc emits one) is preserved.
+    struct main_call m = { main_void, 0 };
+    guarded(call_main, &m);
+    int r = m.result;
+
+    // Call atexit functions, destructors, stdio cleanup, etc.
+    guarded(call_void, (void *)__wasm_call_dtors);
+
+    // If main exited successfully, just return, otherwise call
+    // `__wasi_proc_exit`.
+    if (r != 0) {
+        __wasi_proc_exit2(r);
+
+        // This case is only reachable with the setjmp/longjmp-based vfork.
+        // If control ever returns here, it means the child continued
+        // execution past the function calling vfork without an intervening
+        // proc_exec or exit/_Exit, violating the required vfork semantics.
+        // Such a state is undefined behaviour, so this path is correctly
+        // marked unreachable.
+        __builtin_unreachable();
+    }
+}

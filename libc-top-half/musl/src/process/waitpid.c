@@ -24,6 +24,16 @@ pid_t waitpid(pid_t pid, int *status, int options)
 	}
 
 	__wasi_option_pid_t opid;
+	__wasi_join_status_t code;
+	int ret;
+	/* firebox#HD5 — SA_RESTART. wait4 is on the signal(7) restart list: a
+	 * handler installed with SA_RESTART resumes the wait, the caller never sees
+	 * EINTR. The host cannot restart it itself — the handler has to run HERE, in
+	 * end() below, between the interrupted join and its restart — so the
+	 * restart is this loop: re-issue the join when the handlers that just ran
+	 * all carried SA_RESTART. MEASURED before: waitpid under an SA_RESTART
+	 * handler returned -1/EINTR at 1.0s where Linux reaps the child at exit. */
+	for (;;) {
 	if (pid == -1) {
 		opid.tag = __WASI_OPTION_NONE;
 	} else {
@@ -31,7 +41,6 @@ pid_t waitpid(pid_t pid, int *status, int options)
 		opid.u.some = abs(pid);
 	}
 
-	__wasi_join_status_t code;
 	/* Firebox (#XH1): bracket the join in an INLINE-DELIVERY WINDOW.
 	 *
 	 * A blocking proc_join parks inside the host's block_on, where firebox#VHC
@@ -56,8 +65,12 @@ pid_t waitpid(pid_t pid, int *status, int options)
 	 * the same bracket; adopting it site by site is owed, and the bracket is
 	 * the shared mechanism that makes each adoption one line. */
 	__wasm_inline_delivery_begin();
-	int ret = __wasi_proc_join((__wasi_option_pid_t*)&opid, flags, &code);
-	__wasm_inline_delivery_end();
+	ret = __wasi_proc_join((__wasi_option_pid_t*)&opid, flags, &code);
+	int restart = __wasm_inline_delivery_end_restart();
+	if (ret == __WASI_ERRNO_INTR && restart)
+		continue;
+	break;
+	}
 	if (ret != 0) {
 		errno = __wasilibc_errno_from_wasi(ret);
 		return -1;

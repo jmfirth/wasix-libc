@@ -38,9 +38,8 @@ static void do_setrlimit(void *p)
 // wasix-libc controls end to end (dlmalloc is MORECORE-only, HAVE_MMAP == 0, so
 // every allocation flows through sbrk). Every other resource is stored so that
 // getrlimit() round-trips the value a program set, but is otherwise advisory.
-// (RLIMIT_NOFILE is separately enforced by the host fd table, firebox#ASY;
-// wiring guest getrlimit(RLIMIT_NOFILE) through to that limit is deliberately
-// left to the companion host-import change — this table only echoes it back.)
+// (RLIMIT_NOFILE is not in this table at all: the host fd table enforces it,
+// firebox#ASY, and setrlimit/getrlimit route to it, firebox#1GJ/#48H.)
 //
 // The table is BSS-zeroed. A resource reports RLIM_INFINITY (its Linux default
 // for an unconstrained process) until its bit is raised in `set_mask`; tracking
@@ -156,6 +155,23 @@ int setrlimit(int resource, const struct rlimit *rlim)
 		errno = EINVAL;
 		return -1;
 	}
+	// firebox#1GJ/#48H: RLIMIT_NOFILE lives on the host fd table, which both
+	// ENFORCES it (a newly allocated fd *number* >= the soft limit fails with
+	// EMFILE) and REPORTS it (getrlimit reads it back through
+	// __wasix_resource_get_nofile). The host applies Linux's unprivileged rules
+	// itself — EINVAL for soft > hard, EPERM for a hard-limit raise past its
+	// finite default (4096) — so NOFILE goes straight there and is never
+	// recorded in this table: one source of truth, so what getrlimit reports is
+	// what open() enforces. Other resources keep their table-only behavior
+	// (RLIMIT_DATA/RLIMIT_AS drive the sbrk ceiling).
+	if (resource == RLIMIT_NOFILE) {
+		__wasi_errno_t e = __wasix_resource_set_nofile(rlim->rlim_cur, rlim->rlim_max);
+		if (e != __WASI_ERRNO_SUCCESS) {
+			errno = __wasilibc_errno_from_wasi((int)e);
+			return -1;
+		}
+		return 0;
+	}
 	// Unprivileged processes may lower the hard limit but never raise it; the
 	// sandbox grants no CAP_SYS_RESOURCE. The default hard limit is
 	// RLIM_INFINITY, so the first setrlimit for a resource always succeeds.
@@ -164,25 +180,6 @@ int setrlimit(int resource, const struct rlimit *rlim)
 	if (rlim->rlim_max > cur.rlim_max) {
 		errno = EPERM;
 		return -1;
-	}
-	// firebox#1GJ: RLIMIT_NOFILE is enforced by the host fd table (a newly
-	// allocated fd *number* >= the soft limit fails with EMFILE), not by this
-	// echo table. Route the change to the host BEFORE recording it, so a
-	// host-rejected limit fails without desyncing the echo from what is actually
-	// enforced. The host holds the authoritative NOFILE hard default (4096),
-	// which this table does not (its default is RLIM_INFINITY), so a first-time
-	// unprivileged hard-limit raise past the fd-table ceiling is caught here even
-	// though the RLIM_INFINITY-based check above passed it. Other resources keep
-	// their existing table-only behavior (RLIMIT_DATA/RLIMIT_AS sbrk ceiling).
-	if (resource == RLIMIT_NOFILE) {
-		__wasi_errno_t e = __wasix_resource_set_nofile(rlim->rlim_cur, rlim->rlim_max);
-		if (e != __WASI_ERRNO_SUCCESS) {
-			// The firebox sysroot aliases the POSIX errno macros to the
-			// __WASI_ERRNO_* numbers, so the raw host errno matches <errno.h>
-			// (sched_impl.h relies on the same aliasing).
-			errno = __wasilibc_errno_from_wasi((int)e);
-			return -1;
-		}
 	}
 	rlimits[resource] = *rlim;
 	rlimit_set_mask |= (1u << resource);

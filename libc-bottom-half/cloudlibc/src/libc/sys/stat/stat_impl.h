@@ -149,6 +149,34 @@ static inline void to_public_stat(const __wasi_filestat_t *in,
   // Note this runs AFTER the extraction above and reads `in->dev`, never
   // `out->st_dev`, so the ordering is not fragile.
   out->st_dev = 1;
+
+  // firebox#RSH -- SYNTHESIZE st_blocks / st_blksize (interim, libc-only).
+  //
+  // WASI's filestat carries neither, so both were left 0. That is not a
+  // cosmetic gap: GNU tar's sparse detection (`tar -S`) treats a regular file
+  // whose st_blocks*512 < st_size as sparse and archives only its data map.
+  // With st_blocks == 0 EVERY non-empty file looked fully sparse, and
+  // `tar -S` of a 10000-byte file extracted 10000 NULs with rc 0 -- silent
+  // data loss. `du` reported 0 for everything, and st_blksize 0 is an
+  // invalid I/O-size hint (stdio, cp, dd divide or size buffers by it).
+  //
+  // The synthesis is the one a plain Linux 4 KiB-block filesystem gives a
+  // NON-sparse file: blocks = size rounded up to 4096, counted in 512-byte
+  // units. Reporting a file as fully allocated is the safe direction: a
+  // consumer that under-counts allocation loses data (the tar bug); one that
+  // over-counts only forgoes a hole optimization. Non-regular files report 0
+  // blocks, as tmpfs/ext4 do for fifos, sockets, devices and fast symlinks
+  // (directories are 4096-byte on ext4; 0 here matches tmpfs and st_size 0).
+  //
+  // Retires when the runtime returns real allocation through the statx-shaped
+  // fd_/path_filestat_get_x imports (#HMQ); this block then reads the
+  // runtime's values instead of deriving them from st_size.
+  out->st_blksize = 4096;
+  if (S_ISREG(out->st_mode) && out->st_size > 0) {
+    out->st_blocks = (blkcnt_t)(((uint64_t)out->st_size + 4095) / 4096) * 8;
+  } else {
+    out->st_blocks = 0;
+  }
 }
 
 // firebox(#QQZ/#NGG): `noinline` is load-bearing, NOT a style choice.

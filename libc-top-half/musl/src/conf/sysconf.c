@@ -1,9 +1,8 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
-#ifdef __wasilibc_unmodified_upstream // WASI has no process-level accounting
+// firebox#48H: <sys/resource.h> for _SC_OPEN_MAX's getrlimit(RLIMIT_NOFILE).
 #include <sys/resource.h>
-#endif
 #ifdef __wasilibc_unmodified_upstream // WASI has no realtime signals
 #include <signal.h>
 #endif
@@ -53,12 +52,10 @@ long sysconf(int name)
 #endif
 		[_SC_CLK_TCK] = 100,
 		[_SC_NGROUPS_MAX] = 32,
-#ifdef __wasilibc_unmodified_upstream // WASI has no rlimit
+		// firebox#48H: the host fd table enforces RLIMIT_NOFILE and getrlimit
+		// reports it, so _SC_OPEN_MAX is its soft limit exactly as on Linux
+		// (it was -1, "no limit", while EMFILE was already enforced at 1024).
 		[_SC_OPEN_MAX] = RLIM(NOFILE),
-#else
-		// Rlimit is not supported on wasi.
-		[_SC_OPEN_MAX] = -1,
-#endif
 
 		[_SC_STREAM_MAX] = -1,
 		[_SC_TZNAME_MAX] = TZNAME_MAX,
@@ -255,17 +252,14 @@ long sysconf(int name)
 	} else if (values[name] >= -1) {
 		return values[name];
 	} else if (values[name] < -256) {
-#ifdef __wasilibc_unmodified_upstream // WASI has no getrlimit
+		// firebox#48H: reached on wasi only by _SC_OPEN_MAX (every other RLIM()
+		// row is -1 there); getrlimit(RLIMIT_NOFILE) reads the host fd table.
 		struct rlimit lim;
-		getrlimit(values[name]&16383, &lim);
+		if (getrlimit(values[name]&16383, &lim))
+			return -1;
 		if (lim.rlim_cur == RLIM_INFINITY)
 			return -1;
 		return lim.rlim_cur > LONG_MAX ? LONG_MAX : lim.rlim_cur;
-#else
-		// Not supported on wasi.
-		errno = EINVAL;
-		return -1;
-#endif
 	}
 
 	switch ((unsigned char)values[name]) {

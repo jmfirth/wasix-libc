@@ -520,6 +520,8 @@ __wasilibc_access
 __wasilibc_cwd
 __wasilibc_cwd_lock
 __wasilibc_cwd_unlock
+__wasilibc_cxx_guarded_call
+__wasilibc_cxx_uncaught
 __wasilibc_deinitialize_environ
 __wasilibc_dttoif
 __wasilibc_ensure_environ
@@ -565,9 +567,11 @@ __wasilibc_register_preopened_fd
 __wasilibc_rename_newat
 __wasilibc_rename_oldat
 __wasilibc_rmdirat
+__wasilibc_set_cxx_uncaught_hook
 __wasilibc_set_stack_pointer
 __wasilibc_set_tls_base
 __wasilibc_setjmp
+__wasilibc_start_main
 __wasilibc_stat
 __wasilibc_tell
 __wasilibc_tls_align
@@ -936,6 +940,7 @@ fread_unlocked
 free
 freeaddrinfo
 freeif_addrs
+freeifaddrs
 freelocale
 freopen
 freopen64
@@ -1004,6 +1009,7 @@ gethostbyname_r
 gethostid
 gethostname
 getif_addrs
+getifaddrs
 getitimer
 getline
 getnameinfo

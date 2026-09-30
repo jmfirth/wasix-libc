@@ -1916,9 +1916,16 @@ void __wasm_deliver_pending_rt_inline(void) {
  *
  * The RT rings carry queued DEPTH that no single bit can represent, so the
  * ring-driven precedent runs too, after the bitmask pass. */
-void __wasm_deliver_pending_inline(void) {
+/* firebox#HD5 — the SA_RESTART vote of one inline drain: 1 iff at least one
+ * USER HANDLER was dispatched and every one dispatched was installed with
+ * SA_RESTART (signal(7): one handler without it makes the call fail EINTR).
+ * The flags are sampled BEFORE the dispatch, which may SA_RESETHAND them. RT
+ * signals drained by __wasm_deliver_pending_rt_inline do not vote — a restart
+ * that depends only on them is conservatively refused (EINTR, as before). */
+static int __wasm_deliver_pending_inline_vote(void) {
 	struct pthread *self = __pthread_self();
-	if (!self) return;
+	if (!self) return 0;
+	int ran = 0, all_restart = 1;
 	for (int s = 1; s < _NSIG; s++) {
 		if (s - 32U < 3) continue;
 		int word = (s - 1) / 32;
@@ -1929,9 +1936,21 @@ void __wasm_deliver_pending_inline(void) {
 		if (__wasm_thread_sig_blocked(s)) continue;
 		a_and((volatile int *)&self->pending_sigs[word], ~bit);
 		a_and(&__wasm_pending_sigs[word], ~bit);
+		LOCK(__eintr_handler_lock);
+		struct k_sigaction ksa = __eintr_handler_callbacks[s];
+		UNLOCK(__eintr_handler_lock);
+		if (ksa.handler != SIG_DFL && ksa.handler != SIG_IGN && ksa.handler != 0) {
+			ran = 1;
+			if (!(ksa.flags & SA_RESTART)) all_restart = 0;
+		}
 		__wasm_signal(s);
 	}
 	__wasm_deliver_pending_rt_inline();
+	return ran && all_restart;
+}
+
+void __wasm_deliver_pending_inline(void) {
+	(void)__wasm_deliver_pending_inline_vote();
 }
 
 /* firebox#XH1 — open an inline-delivery window on this thread. A blocking libc
@@ -1958,10 +1977,22 @@ void __wasm_inline_delivery_begin(void) {
  * inside the window, and that signal would otherwise wait for an unrelated
  * mask restore that may never come. */
 void __wasm_inline_delivery_end(void) {
+	(void)__wasm_inline_delivery_end_restart();
+}
+
+/* firebox#HD5 — __wasm_inline_delivery_end() that also answers the SA_RESTART
+ * question for the bracketed call: nonzero iff the drain ran at least one user
+ * handler and every one it ran carried SA_RESTART. A wrapper on the signal(7)
+ * restart list (waitpid) re-issues its call when this is nonzero and the call
+ * failed EINTR, which is the restart Linux performs in the kernel. Only the
+ * OUTERMOST bracket drains, so a nested one answers 0 and leaves the decision
+ * to the frame that actually dispatched. */
+int __wasm_inline_delivery_end_restart(void) {
 	if (__fbx_inline_delivery_depth > 0)
 		__fbx_inline_delivery_depth--;
 	if (__fbx_inline_delivery_depth == 0)
-		__wasm_deliver_pending_inline();
+		return __wasm_deliver_pending_inline_vote();
+	return 0;
 }
 
 /* firebox in-handler self-raise — the raise()/pthread_kill() fast path

@@ -179,8 +179,9 @@ ifeq ($(EXNREF_EH), yes)
     # Use wasm 3.0 exnref exception handling
     CFLAGS += -mexception-handling -fwasm-exceptions -mllvm --wasm-enable-eh -Wl,-mllvm,--wasm-enable-eh -mllvm --wasm-use-legacy-eh=false -Wl,-mllvm,--wasm-use-legacy-eh=false -Wl,-mllvm,--exception-model=wasm
 else
-    # Use legacy exception handling
-    CFLAGS += -mexception-handling -fwasm-exceptions
+    # Use legacy exception handling. firebox#ZVA: the hand-written catch in
+    # __wasilibc_cxx_guard.c defaults to exnref and must be told.
+    CFLAGS += -mexception-handling -fwasm-exceptions -D__WASILIBC_LEGACY_EH__
 endif
 
 # Configure support for threads.
