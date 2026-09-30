@@ -30,6 +30,8 @@
 LIBC_TOP_HALF_MUSL_SOURCES = \
     $(addprefix $(LIBC_TOP_HALF_MUSL_SRC_DIR)/, \
         internal/syscall_ret.c \
+        legacy/err.c \
+        legacy/isastream.c \
         misc/a64l.c \
         misc/basename.c \
         misc/dirname.c \
@@ -86,6 +88,12 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         network/inet_aton.c \
         network/inet_addr.c \
         network/dn_expand.c \
+        network/dn_comp.c \
+        network/dn_skipname.c \
+        network/ns_parse.c \
+        network/res_mkquery.c \
+        network/res_state.c \
+        network/if_freenameindex.c \
         network/in6addr_any.c \
         network/in6addr_loopback.c \
         network/proto.c \
