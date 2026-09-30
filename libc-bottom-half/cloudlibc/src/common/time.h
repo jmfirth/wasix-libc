@@ -48,25 +48,17 @@ static inline bool timespec_to_timestamp_clamp(
   // busy-spin, and the loop still made forward progress, which is why it never
   // surfaced as a hang. Invariant 0: a false success is never faithful.
   //
-  // Encode the duration honestly and reserve the two special ABI values:
-  //   0 => INFINITE in `poll_oneoff` (host maps it to `Duration::MAX`), so a
-  //        genuine zero-length wait must NOT be spelled 0 here.
-  //   1 => "immediate" (host maps it to `Duration::ZERO`).
-  // A negative `tv_sec` is not a representable duration; POSIX select() calls
-  // that EINVAL, but the caller-visible validation lives in select.c, so keep
-  // the prior lenient "treat as immediate" rather than widen this helper's
-  // contract.
+  // firebox#RDN — zero is an expired WASI CLOCK, just as POSIX requires.
+  // Keep negative durations on the prior lenient immediate path; caller
+  // validation owns EINVAL for an invalid select timeout.
   if (timespec->tv_sec < 0) {
-    *timestamp = 1;  // 1 == immediate; 0 would mean INFINITE (firebox#B28)
+    *timestamp = 0;
     return true;
   }
   if (__builtin_mul_overflow(timespec->tv_sec, NSEC_PER_SEC, timestamp) ||
       __builtin_add_overflow(*timestamp, timespec->tv_nsec, timestamp)) {
     // Make sure our timestamp does not overflow.
     *timestamp = NUMERIC_MAX(__wasi_timestamp_t);
-  } else if (*timestamp == 0) {
-    // A true zero-length wait. Spell it 1 ("immediate"), never 0 ("infinite").
-    *timestamp = 1;
   }
   return true;
 }

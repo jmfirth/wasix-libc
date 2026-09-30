@@ -137,12 +137,9 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *rqtp,
   // re-arm is the part that makes it honest, and the loop only exits on the
   // FINAL chunk, on EINTR, or on a host error.
   //
-  // We deliberately do NOT spell an over-long sleep as the wire's INFINITE
-  // encoding (`timeout == 0`, which the host maps to `Duration::MAX`): a
-  // finite sleep must still return, even if the guest will not be around to
-  // see it. `sleep infinity` converges on the same observable behaviour by
-  // asking for ~2.9e11 chunks of 584 years each, which is what "does not
-  // return" means for a program.
+  // firebox#RDN — zero is immediately expired, not an infinite encoding.
+  // An over-long finite sleep still uses full-width chunks and re-arms until
+  // complete; no chunk may claim completion for the remaining duration.
   while (rem_sec > 0 || rem_nsec > 0) {
     bool final_chunk;
     __wasi_timestamp_t timeout;
@@ -155,9 +152,8 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *rqtp,
       final_chunk = true;
     }
 
-    // `timeout` is never 0 here — the loop guard excludes a zero remainder —
-    // so we never collide with the wire's `0 == INFINITE` encoding. (1 is the
-    // wire's "immediate", and a genuine 1 ns request lands on it correctly.)
+    // The loop guard excludes a zero remainder. A genuine 1ns request
+    // uses the historical immediate encoding accepted by the runtime.
     __wasi_subscription_t sub = {
         .u.tag = __WASI_EVENTTYPE_CLOCK,
         .u.u.clock.id = id,

@@ -99,38 +99,24 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
 
   // Create extra event for the timeout.
   if (remaining >= 0) {
-    // in WASI, a timeout of 0 corresponds to an indefinite wait, so to work
-    // around that and remain compatible with downstream libc users here we
-    // set the subscription timeout to 1 (which actually corresponds to
-    // immediate wakeup)
+    // firebox#RDN — WASI relative zero is an immediate readiness check.
     __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
     *subscription = (__wasi_subscription_t){
         .u.tag = __WASI_EVENTTYPE_CLOCK,
         .u.u.clock.id = __WASI_CLOCKID_REALTIME,
-        .u.u.clock.timeout = (__wasi_timestamp_t)(remaining?(remaining * 1000000LL):1LL),
+        .u.u.clock.timeout = (__wasi_timestamp_t)(remaining * 1000000LL),
     };
   }
 
-  // firebox#B28 — WAIT INDEFINITELY when nothing else was subscribed.
-  //
-  // Second carrier of the same class as pselect.c: `poll(NULL, 0, -1)` (and any
-  // poll whose every pollfd has a negative fd, with an infinite timeout)
-  // produces zero subscriptions, `__wasi_poll_oneoff` refuses an empty list
-  // with `EINVAL`, and this code relabelled it `ENOTSUP` and returned -1 at
-  // once. Linux blocks until a signal arrives. Invariant 1 — fix the class, not
-  // the symptom: pselect and poll are one defect in two files.
-  //
-  // A CLOCK subscription with timeout 0 is the ABI's own encoding of an
-  // indefinite wait (see the note in pselect.c for the measurement); the
-  // runtime interrupts it with `EINTR` when a signal handler runs. Note the
-  // asymmetry with the caller-supplied timeout above, which maps `0` to `1`
-  // precisely BECAUSE 0 means infinite — the two encodings are consistent.
+  // firebox#RDN — a descriptor-free infinite wait must not emit an
+  // expired CLOCK. Use the largest representable relative deadline, as
+  // kernels clamp unbounded waits; real signals still interrupt this wait.
   if (nsubscriptions == 0) {
     __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
     *subscription = (__wasi_subscription_t){
         .u.tag = __WASI_EVENTTYPE_CLOCK,
         .u.u.clock.id = __WASI_CLOCKID_MONOTONIC,
-        .u.u.clock.timeout = 0,  // 0 == wait indefinitely (firebox#B28)
+        .u.u.clock.timeout = UINT64_MAX,
     };
   }
 
