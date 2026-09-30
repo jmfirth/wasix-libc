@@ -14,6 +14,70 @@
 #include <stdbool.h>
 #include <wasi/libc.h>
 
+// firebox#D7S — fd_set is the POSIX bitmask (<sys/select.h>), and this
+// definition is emitted as `__pselect_fdmask`: the header redirects the name.
+// The unversioned `pselect`/`select` symbols are the legacy {count,list} ABI,
+// defined in select_legacy.c on top of this function.
+//
+// Like Linux (fs/select.c), only the first `nfds` bits of each set are read,
+// word by word, and on success every word covering those bits is rewritten to
+// hold exactly the ready descriptors; bits past `nfds` in the last word are
+// cleared. `nfds` is not capped at FD_SETSIZE: a caller may pass a larger
+// bitmap of its own, as it may on Linux.
+#define FDMASK_BITS ((int)(8 * sizeof(unsigned long)))
+
+static size_t fdmask_words(int nfds) {
+  return ((size_t)nfds + FDMASK_BITS - 1) / FDMASK_BITS;
+}
+
+static unsigned long fdmask_word(const fd_set *set, size_t word, int nfds) {
+  unsigned long bits = set->fds_bits[word];
+  size_t tail = (size_t)nfds - word * FDMASK_BITS;
+  if (tail < (size_t)FDMASK_BITS)
+    bits &= (1UL << tail) - 1;
+  return bits;
+}
+
+static size_t fdmask_count(const fd_set *set, int nfds) {
+  size_t n = 0;
+  if (set != NULL) {
+    for (size_t w = 0, e = fdmask_words(nfds); w < e; ++w)
+      n += (size_t)__builtin_popcountl(fdmask_word(set, w, nfds));
+  }
+  return n;
+}
+
+static size_t fdmask_subscribe(const fd_set *set, int nfds,
+                               __wasi_eventtype_t type,
+                               __wasi_subscription_t *subscriptions) {
+  size_t n = 0;
+  if (set == NULL)
+    return 0;
+  for (size_t w = 0, e = fdmask_words(nfds); w < e; ++w) {
+    for (unsigned long bits = fdmask_word(set, w, nfds); bits != 0;
+         bits &= bits - 1) {
+      int fd = (int)(w * FDMASK_BITS) + __builtin_ctzl(bits);
+      __wasi_subscription_t *subscription = &subscriptions[n++];
+      *subscription = (__wasi_subscription_t){
+          .userdata = (uintptr_t)(intptr_t)fd,
+          .u.tag = type,
+      };
+      if (type == __WASI_EVENTTYPE_FD_READ)
+        subscription->u.u.fd_read.file_descriptor = fd;
+      else
+        subscription->u.u.fd_write.file_descriptor = fd;
+    }
+  }
+  return n;
+}
+
+static void fdmask_clear(fd_set *set, int nfds) {
+  if (set != NULL) {
+    for (size_t w = 0, e = fdmask_words(nfds); w < e; ++w)
+      set->fds_bits[w] = 0;
+  }
+}
+
 int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
             fd_set *restrict errorfds, const struct timespec *restrict timeout,
             const sigset_t *sigmask) {
@@ -23,52 +87,15 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     return -1;
   }
 
-  // This implementation does not support polling for exceptional
-  // conditions, such as out-of-band data on TCP sockets.  Return zero
-  // entries rather than failing — callers like curl pass errorfds to
-  // every select() call by convention, and ENOSYS breaks the API.
-  if (errorfds != NULL && errorfds->__nfds > 0) {
-    FD_ZERO(errorfds);
-  }
-
-  // Replace NULL pointers by the empty set.
-  fd_set empty;
-  FD_ZERO(&empty);
-  if (readfds == NULL)
-    readfds = &empty;
-  if (writefds == NULL)
-    writefds = &empty;
-
-  // Determine the maximum number of events.
-  size_t maxevents = readfds->__nfds + writefds->__nfds + 1;
+  // Determine the maximum number of events: one per set bit, plus the timeout.
+  size_t maxevents = fdmask_count(readfds, nfds) + fdmask_count(writefds, nfds) + 1;
   __wasi_subscription_t subscriptions[maxevents];
   size_t nsubscriptions = 0;
 
-  // Convert the readfds set.
-  for (size_t i = 0; i < readfds->__nfds; ++i) {
-    int fd = readfds->__fds[i];
-    if (fd < nfds) {
-      __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
-      *subscription = (__wasi_subscription_t){
-          .userdata = (uintptr_t)(intptr_t)fd,
-          .u.tag = __WASI_EVENTTYPE_FD_READ,
-          .u.u.fd_read.file_descriptor = fd,
-      };
-    }
-  }
-
-  // Convert the writefds set.
-  for (size_t i = 0; i < writefds->__nfds; ++i) {
-    int fd = writefds->__fds[i];
-    if (fd < nfds) {
-      __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
-      *subscription = (__wasi_subscription_t){
-          .userdata = (uintptr_t)(intptr_t)fd,
-          .u.tag = __WASI_EVENTTYPE_FD_WRITE,
-          .u.u.fd_write.file_descriptor = fd,
-      };
-    }
-  }
+  nsubscriptions += fdmask_subscribe(readfds, nfds, __WASI_EVENTTYPE_FD_READ,
+                                     &subscriptions[nsubscriptions]);
+  nsubscriptions += fdmask_subscribe(writefds, nfds, __WASI_EVENTTYPE_FD_WRITE,
+                                     &subscriptions[nsubscriptions]);
 
   // Create extra event for the timeout.
   if (timeout != NULL) {
@@ -198,18 +225,34 @@ int pselect(int nfds, fd_set *restrict readfds, fd_set *restrict writefds,
     }
   }
 
-  // Build result sets from poll_oneoff events.
-  FD_ZERO(readfds);
-  FD_ZERO(writefds);
+  // Build result sets from poll_oneoff events. Only now, after every failure
+  // return, are the caller's sets touched: POSIX leaves them unspecified on
+  // error, and not clobbering them is the kinder reading.
+  //
+  // This implementation does not support polling for exceptional conditions,
+  // such as out-of-band data on TCP sockets. errorfds comes back empty rather
+  // than failing -- callers like curl pass errorfds to every select() call by
+  // convention, and ENOSYS breaks the API.
+  fdmask_clear(readfds, nfds);
+  fdmask_clear(writefds, nfds);
+  fdmask_clear(errorfds, nfds);
+  int ready = 0;
   for (size_t i = 0; i < nevents; ++i) {
     const __wasi_event_t *event = &events[i];
-    if (event->type == __WASI_EVENTTYPE_FD_READ) {
-      int fd = (int)(intptr_t)event->userdata;
-      readfds->__fds[readfds->__nfds++] = fd;
-    } else if (event->type == __WASI_EVENTTYPE_FD_WRITE) {
-      int fd = (int)(intptr_t)event->userdata;
-      writefds->__fds[writefds->__nfds++] = fd;
+    fd_set *set;
+    if (event->type == __WASI_EVENTTYPE_FD_READ)
+      set = readfds;
+    else if (event->type == __WASI_EVENTTYPE_FD_WRITE)
+      set = writefds;
+    else
+      continue;
+    int fd = (int)(intptr_t)event->userdata;
+    unsigned long bit = 1UL << (fd % FDMASK_BITS);
+    unsigned long *word = &set->fds_bits[fd / FDMASK_BITS];
+    if ((*word & bit) == 0) {
+      *word |= bit;
+      ++ready;
     }
   }
-  return readfds->__nfds + writefds->__nfds;
+  return ready;
 }

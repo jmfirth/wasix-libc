@@ -1,6 +1,5 @@
 #include <__errno.h>
 #include <__errno_values.h>
-#include <__fd_set.h>
 #include <__function___isatty.h>
 #include <__functions_malloc.h>
 #include <__functions_memcpy.h>
@@ -57,7 +56,6 @@
 #include <__typedef_clock_t.h>
 #include <__typedef_clockid_t.h>
 #include <__typedef_dev_t.h>
-#include <__typedef_fd_set.h>
 #include <__typedef_gid_t.h>
 #include <__typedef_in_addr_t.h>
 #include <__typedef_in_port_t.h>

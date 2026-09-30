@@ -237,6 +237,7 @@ __powf_log2_data
 __private_cond_signal
 __progname
 __progname_full
+__pselect_fdmask
 __pthread_cond_timedwait
 __pthread_create
 __pthread_exit
@@ -281,6 +282,7 @@ __rsqrt_tab
 __secs_to_tm
 __secs_to_zone
 __seed48
+__select_fdmask
 __sem_open_lockptr
 __set_thread_area
 __shgetc
