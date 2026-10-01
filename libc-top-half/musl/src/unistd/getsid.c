@@ -1,40 +1,33 @@
 #include <unistd.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
+#else
+#include <wasi/api_firebox.h>
 #endif
 
 /*
- * firebox#388 (sibling of #347): WASIX has no host-side session table.
- * Upstream stub returned EINVAL unconditionally -- which trips programs
- * that query their own session id (Python's os.getsid, bash's job-control
- * paths).
+ * firebox#7RS -- getsid ASKS THE HOST.
  *
- * Per POSIX (man 2 getsid):
- *   - getsid(0) returns the caller's session id
- *   - getsid(pid) returns the session id of process pid
- *   - returns -1 with ESRCH if pid is not a valid process
- *   - returns -1 with EPERM if the caller can't query that process
- *
- * In our single-process model sid == pid for the caller. For unknown
- * pids we return ESRCH (POSIX-correct), not EINVAL.
+ * firebox#388 answered from nothing. It gave getpid() for the caller, ESRCH for
+ * every other pid (live or not), and EINVAL for a negative pid, which POSIX
+ * does not list. `proc_get_sid` reads the host's per-process session id and
+ * decides the arguments with getpgid's rules: `pid == 0` is the caller, and a
+ * negative or unknown pid is ESRCH. The sign survives the cast because the host
+ * recovers it from the u32.
  */
 pid_t getsid(pid_t pid)
 {
 #ifdef __wasilibc_unmodified_upstream
 	return syscall(SYS_getsid, pid);
 #else
-	if (pid < 0) {
-		errno = EINVAL;
+	uint32_t sid = 0;
+	__wasi_errno_t error = __wasix_proc_get_sid((uint32_t) pid, &sid);
+	if (error != 0) {
+		errno = __wasilibc_errno_from_wasi(error);
 		return -1;
 	}
-	pid_t self = getpid();
-	if (pid == 0 || pid == self) {
-		return self;
-	}
-	/* Other pids: we have no host-side session table to query. ESRCH
-	 * (POSIX-correct for "no such process") rather than EINVAL. */
-	errno = ESRCH;
-	return -1;
+	return (pid_t) sid;
 #endif
 }

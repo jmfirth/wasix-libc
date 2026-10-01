@@ -269,3 +269,11 @@ __wasi_errno_t __wasix_proc_get_sigmask(uint64_t *mask){return (uint16_t)__impor
  * Host: lib/wasix/src/syscalls/wasix/proc_stage_spawn_pgid.rs. */
 int32_t __imported_wasix_fbx_proc_stage_spawn_pgid(int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_stage_spawn_pgid")));
 __wasi_errno_t __wasix_proc_stage_spawn_pgid(uint32_t pgid){return (uint16_t)__imported_wasix_fbx_proc_stage_spawn_pgid((int32_t)pgid);}
+/* firebox#7RS — POSIX sessions. The out-pointers are intptr_t so ONE
+ * declaration resolves under both wasix_32v1 and wasix_64v1, matching the host's
+ * WasmPtr<Pid, M>.
+ * Host: lib/wasix/src/syscalls/wasix/proc_setsid.rs, proc_get_sid.rs. */
+int32_t __imported_wasix_fbx_proc_setsid(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_setsid")));
+__wasi_errno_t __wasix_proc_setsid(uint32_t *ret_sid){return (uint16_t)__imported_wasix_fbx_proc_setsid((intptr_t)ret_sid);}
+int32_t __imported_wasix_fbx_proc_get_sid(int32_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_get_sid")));
+__wasi_errno_t __wasix_proc_get_sid(uint32_t pid,uint32_t *ret_sid){return (uint16_t)__imported_wasix_fbx_proc_get_sid((int32_t)pid,(intptr_t)ret_sid);}

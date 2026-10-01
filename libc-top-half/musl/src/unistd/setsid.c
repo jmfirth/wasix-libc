@@ -1,45 +1,37 @@
 #include <unistd.h>
 #include <errno.h>
+#include <wasi/libc.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
+#else
+#include <wasi/api_firebox.h>
 #endif
 
 /*
- * firebox#Y42 -- setsid performs the half that IS backed, and no longer writes
- * the terminal global.
+ * firebox#7RS -- setsid ASKS THE HOST.
  *
- * SCOPE, stated plainly because the shape here is deliberate. There is NO
- * session model host-side -- `WasiProcess` carries a `pgid` and no `sid` at all
- * -- so setsid/getsid/tcgetsid remain unmodelled, and #HS6's pgid ABI
- * deliberately does not cover them. This file is NOT the fix for that; it is
- * the minimum needed to keep setsid coherent now that `__wasilibc_pgrp` means
- * the terminal foreground group rather than the caller's pgid (firebox#Y42).
- * Left alone, setsid() would have silently rewritten the TERMINAL's foreground
- * group -- a different and newly wrong thing.
+ * The host models sessions: `WasiProcess::sid` sits beside `pgid`, is
+ * inherited across fork/spawn, and is kept across exec. `proc_setsid` applies
+ * the Linux rule there, where every process's group is visible: EPERM when a
+ * process group named after the caller already exists, which includes the
+ * caller being a group leader. Otherwise the caller leads a new session and a
+ * new group, both equal to its pid.
  *
- * What setsid() must do splits cleanly in two:
- *   1. Make the caller a process-group leader. REAL as of #HS6: setpgid(0, 0)
- *      is host-backed and takes genuine effect, including for proc_signal's
- *      group delivery. It cannot fail for the self form.
- *   2. Make the caller a SESSION leader and detach its controlling terminal.
- *      UNBACKED. Nothing here does it.
- *
- * The `getpid()` return is therefore still a fiction -- it reports a session id
- * for a session that was not created (firebox#E4T, #9B8's measured
- * `setsid() = 1, errno = 0`). That fiction is NOT retired here: retiring it
- * honestly means either a host session model or an ENOSYS, and both are
- * decisions above this file's scope. It is recorded, not laundered -- do not
- * read the half-real implementation below as evidence that setsid works.
+ * This replaces firebox#Y42's half-real body. That body made the caller a group
+ * leader and returned getpid() for a session it never created. No rule is
+ * applied here: the host is the only layer that can see which groups exist.
  */
 pid_t setsid(void)
 {
 #ifdef __wasilibc_unmodified_upstream
 	return syscall(SYS_setsid);
 #else
-	/* The backed half: become a process-group leader for real. */
-	if (setpgid(0, 0) != 0)
+	uint32_t sid = 0;
+	__wasi_errno_t error = __wasix_proc_setsid(&sid);
+	if (error != 0) {
+		errno = __wasilibc_errno_from_wasi(error);
 		return -1;
-	/* The unbacked half: no session is created. See the comment above. */
-	return getpid();
+	}
+	return (pid_t) sid;
 #endif
 }

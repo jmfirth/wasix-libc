@@ -38,9 +38,11 @@
  * the host's, because the host is the only layer that can see which pids exist
  * and who their parents are. Duplicating any of them here would recreate
  * exactly the guessing this change removes. See `proc_set_pgid.rs` in the
- * wasmer fork for those rules, and for the two POSIX refusals -- EACCES for a
- * child that has already exec'd, EPERM for a target in another session --
- * recorded there as honest gaps rather than approximated.
+ * wasmer fork for those rules, including the session EPERMs that firebox#7RS
+ * added (a child in another session, a session-leader target, a group that
+ * does not exist in the caller's session), and for the one POSIX refusal still
+ * recorded there as an honest gap rather than approximated: EACCES for a child
+ * that has already exec'd.
  */
 int setpgid(pid_t pid, pid_t pgid)
 {

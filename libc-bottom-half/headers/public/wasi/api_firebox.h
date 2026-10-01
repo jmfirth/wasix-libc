@@ -222,6 +222,21 @@ __wasi_errno_t __wasix_proc_get_sigmask(uint64_t *mask);
  * Host: lib/wasix/src/syscalls/wasix/proc_stage_spawn_pgid.rs. */
 __wasi_errno_t __wasix_proc_stage_spawn_pgid(uint32_t pgid);
 
+/* firebox#7RS — POSIX sessions, backed by the host's per-process `sid` (beside
+ * `pgid`, inherited across fork/spawn, kept across exec).
+ *
+ * __wasix_proc_setsid: make the caller the leader of a new session and of a
+ * new process group, both named after its pid, and write that id to *ret_sid.
+ * __WASI_ERRNO_PERM when a process group with the caller's pid as its id
+ * already exists (in particular when the caller is a group leader).
+ *
+ * __wasix_proc_get_sid: write the session id of `pid` (0 = the caller) to
+ * *ret_sid. __WASI_ERRNO_SRCH for a negative or unknown pid.
+ *
+ * Host: lib/wasix/src/syscalls/wasix/proc_setsid.rs, proc_get_sid.rs. */
+__wasi_errno_t __wasix_proc_setsid(uint32_t *ret_sid);
+__wasi_errno_t __wasix_proc_get_sid(uint32_t pid, uint32_t *ret_sid);
+
 #ifdef __cplusplus
 }
 #endif
