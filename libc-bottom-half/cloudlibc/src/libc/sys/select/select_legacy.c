@@ -23,7 +23,10 @@
 #include <errno.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <wasi/api.h>
 
 #include <__macro_FD_SETSIZE.h>
 #include <__struct_timeval.h>
@@ -43,6 +46,15 @@ int __pselect_fdmask(int, unsigned long *, unsigned long *, unsigned long *,
 // name, e.g. through FFI or a hand-written prototype). Refuse it loudly rather
 // than walking past the object. Negative fds cannot be represented by any
 // bitmask and are never open: EBADF, as the host would have reported.
+//
+// Review F4: the bitmask handed on below spans every listed fd, so its size
+// is chosen by the caller's VALUES, not by the at most FD_SETSIZE entries. One
+// entry naming INT_MAX-1 with nfds == INT_MAX sized it at ~256 MiB per set,
+// on the stack, before anything was validated. A listed fd at or above
+// FD_SETSIZE is therefore proven open here, BEFORE anything is allocated: one
+// that is not is EBADF, exactly what the host reports for it. The span is then
+// bounded by a descriptor that exists, and the masks below never take an
+// input-sized stack allocation.
 static int legacy_check(const legacy_fd_set *set, int nfds, int *top) {
   if (set == NULL)
     return 0;
@@ -57,6 +69,13 @@ static int legacy_check(const legacy_fd_set *set, int nfds, int *top) {
     if (fd < 0) {
       errno = EBADF;
       return -1;
+    }
+    if (fd >= FD_SETSIZE) {
+      __wasi_fdstat_t st;
+      if (__wasi_fd_fdstat_get(fd, &st) != 0) {
+        errno = EBADF;
+        return -1;
+      }
     }
     if (fd + 1 > *top)
       *top = fd + 1;
@@ -98,12 +117,25 @@ int pselect(int nfds, legacy_fd_set *restrict readfds,
     return -1;
   }
 
-  // `top` never exceeds the largest listed fd + 1, so these are bounded by
-  // the (at most FD_SETSIZE) entries the caller actually listed.
-  size_t words = ((size_t)top + FDMASK_BITS - 1) / FDMASK_BITS + 1;
-  unsigned long rmask[words], wmask[words];
-  for (size_t w = 0; w < words; ++w)
-    rmask[w] = wmask[w] = 0;
+  // `top` is at most the largest listed fd + 1, and legacy_check proved any
+  // fd at or above FD_SETSIZE open. The common case fits the fixed FD_SETSIZE
+  // masks; a span past them (a raised RLIMIT_NOFILE) is heap-allocated, sized
+  // by a descriptor that exists.
+  enum { SMALL_WORDS = FD_SETSIZE / FDMASK_BITS };
+  unsigned long small[2][SMALL_WORDS];
+  unsigned long *rmask = small[0], *wmask = small[1], *heap = NULL;
+  size_t words = ((size_t)top + FDMASK_BITS - 1) / FDMASK_BITS;
+  if (words > SMALL_WORDS) {
+    heap = calloc(2 * words, sizeof(unsigned long));
+    if (heap == NULL) {
+      errno = ENOMEM;
+      return -1;
+    }
+    rmask = heap;
+    wmask = heap + words;
+  } else {
+    memset(small, 0, sizeof small);
+  }
   if (readfds != NULL)
     legacy_to_mask(readfds, top, rmask);
   if (writefds != NULL)
@@ -112,15 +144,19 @@ int pselect(int nfds, legacy_fd_set *restrict readfds,
   int ready = __pselect_fdmask(top, readfds != NULL ? rmask : NULL,
                                writefds != NULL ? wmask : NULL, NULL, timeout,
                                sigmask);
-  if (ready < 0)
-    return -1;
-
-  if (readfds != NULL)
-    mask_to_legacy(rmask, top, readfds);
-  if (writefds != NULL)
-    mask_to_legacy(wmask, top, writefds);
-  if (errorfds != NULL)
-    errorfds->__nfds = 0;
+  if (ready >= 0) {
+    if (readfds != NULL)
+      mask_to_legacy(rmask, top, readfds);
+    if (writefds != NULL)
+      mask_to_legacy(wmask, top, writefds);
+    if (errorfds != NULL)
+      errorfds->__nfds = 0;
+  }
+  if (heap != NULL) {
+    int saved = errno;
+    free(heap);
+    errno = saved;
+  }
   return ready;
 }
 
