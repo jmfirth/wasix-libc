@@ -328,71 +328,52 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 	const posix_spawnattr_t __fbx_default_attr = {0};
 	if (!attr) attr = &__fbx_default_attr;
 
-	/* firebox#7K0 — POSIX_SPAWN_SETSID and POSIX_SPAWN_RESETIDS.
+	/* firebox#7K0 — POSIX_SPAWN_RESETIDS.
 	 *
-	 * Both flags are read ONLY in the `__wasilibc_unmodified_upstream` block
-	 * above (the SETSID read and the RESETIDS read that sit beside the fork
-	 * path's SETPGROUP). This — the live `proc_spawn2` path — read neither, so
-	 * a caller set the flag, got 0 back, and received a child in the parent's
-	 * session under the parent's effective ids with nothing anywhere saying so.
-	 * That is the false success invariant 0 forbids outright: an honest ENOSYS
-	 * is faithful, a fabricated 0 never is. Invariant 4 adds that an absent
-	 * capability must be discoverable through a standard POSIX mechanism, and
-	 * `posix_spawn`'s is its RETURN VALUE — it reports the error number
-	 * directly and does not set `errno`.
+	 * It is read ONLY in the `__wasilibc_unmodified_upstream` block above. The
+	 * live `proc_spawn2` path ignored it, so a caller who set the flag got 0
+	 * back and a child still under the parent's effective ids, with nothing
+	 * saying so. Invariant 0 forbids that false success: an honest ENOSYS is
+	 * faithful, a made-up 0 never is. Invariant 4 also requires an absent
+	 * capability to be discoverable through a standard POSIX mechanism. For
+	 * `posix_spawn` that mechanism is its RETURN VALUE, which carries the error
+	 * number directly and does not set `errno`.
 	 *
-	 * Refused HERE, at the top, before `fdops` is allocated and before any
-	 * host call: POSIX lets the implementation fail the call outright, and a
-	 * caller that asked for a guarantee we cannot give is better served by no
-	 * child at all than by a half-configured one it believes is correct.
+	 * The flag is refused HERE, at the top, before `fdops` is allocated and
+	 * before any host call. POSIX lets the implementation fail the call
+	 * outright, and a caller who asked for a guarantee we cannot give is better
+	 * served by no child than by a half-configured one it believes is correct.
 	 *
-	 * ⛔ THE TWO FLAGS ARE REFUSED TOGETHER BUT THEY ARE NOT THE SAME CLASS,
-	 * and the retirement criteria differ. MEASURED in the wasmer fork, 2026-09-19:
+	 * RESETIDS is a missing CHANNEL, not a missing mechanism. The host carries
+	 * the full POSIX id triple (`os/task/process.rs`:
+	 * `Credential { ruid, euid, suid, rgid, egid, sgid, groups }`), with real
+	 * `setuid`/`setreuid`/`setresuid` transitions and the
+	 * `proc_getcred`/`proc_setcred` syscalls (firebox#MHZ/#BDY). What is missing
+	 * is the WIRING: `proc_spawn2` never mentions `cred`/`Credential`, so the
+	 * parent cannot ask for the child's effective ids to be reset to its real
+	 * ids. That is the firebox#BZ5 class, and it RETIRES the way #BZ5 and SETSID
+	 * did: through a staging call on the calling `WasiThread` that
+	 * `proc_spawn2` consumes before dispatch.
 	 *
-	 *   SETSID   — genuinely unmodelled host-side. There is no session (`sid`)
-	 *              concept at all: `syscalls/wasix/proc_set_pgid.rs` says
-	 *              "`setsid`/`getsid` remain unmodelled" and
-	 *              `syscalls/wasix/proc_signal.rs` reasons from "there is no
-	 *              `setsid`, so sender and target always share a session".
-	 *              RETIRES when the host grows a session model.
-	 *
-	 *   RESETIDS — NOT "no primitive exists"; that framing is REFUTED. The host
-	 *              carries the full POSIX id triple (`os/task/process.rs`:
-	 *              `Credential { ruid, euid, suid, rgid, egid, sgid, groups }`)
-	 *              with real `setuid`/`setreuid`/`setresuid` transitions and
-	 *              `proc_getcred`/`proc_setcred` syscalls, all landed by
-	 *              firebox#MHZ/#BDY. What is missing is the WIRING: `proc_spawn2`
-	 *              contains ZERO references to `cred`/`Credential`, so there is
-	 *              no channel on which the parent could ask for the child's
-	 *              effective ids to be reset to the parent's real ids. This is
-	 *              the firebox#BZ5 class — a wiring gap, not an absent mechanism
-	 *              — and it RETIRES the same way #BZ5 did, via a staging call on
-	 *              the calling `WasiThread` that `proc_spawn2` consumes before
-	 *              dispatch. It is refused rather than staged today only because
-	 *              no such channel exists yet.
+	 * POSIX_SPAWN_SETSID was refused here too until firebox#7RS gave the host a
+	 * session model. It is now staged below, beside SETPGROUP.
 	 *
 	 * ⛔ DO NOT FOLD IN SETSCHEDPARAM / SETSCHEDULER / USEVFORK. musl upstream
-	 * ignores those in BOTH paths, so silence there MATCHES the reference
-	 * implementation; refusing them would be a divergence FROM musl dressed up
+	 * ignores those in BOTH paths, so ignoring them here MATCHES the reference
+	 * implementation. Refusing them would be a divergence FROM musl presented
 	 * as faithfulness, and would break callers that pass them harmlessly today.
 	 *
-	 * BLAST RADIUS, censused over shipped `packages/` before this landed
-	 * (2026-09-19): every `posix_spawnattr_setflags` call site in the tree sets
-	 * a LITERAL that excludes both flags — `packages/tini/tini.c`
-	 * (SETSIGMASK|SETSIGDEF), cmake's vendored libuv patch (SETSIGDEF|SETSIGMASK,
-	 * and it already returns ENOSYS itself for UV_PROCESS_DETACHED rather than
-	 * requesting SETSID), cmake's kwsys patch (SETSIGDEF alone), and ccache's
-	 * patched `execute.c`, which passes a NULL `attrp` outright. The two
-	 * conditional carriers cannot reach it on this target either: rust std
-	 * (`packages/rust-src/.../process/unix/unix.rs`) gates SETSID on
-	 * `cfg(all(target_os = "linux", target_env = "gnu"))` and otherwise returns
-	 * `Ok(None)` to fall back to fork, and CPython's `posixmodule.c` sets either
-	 * flag only when a Python caller passes `setsid=True`/`resetids=True` to
-	 * `os.posix_spawn` — an opt-in whose documented contract is already an
-	 * error, not a silent no-op. So no shipped artifact's default path changes
-	 * behaviour here; what changes is that a caller who explicitly asks now
-	 * learns the truth. */
-	if (attr->__flags & (POSIX_SPAWN_SETSID | POSIX_SPAWN_RESETIDS))
+	 * BLAST RADIUS. The shipped `packages/` were censused before this landed
+	 * (2026-09-19). Every `posix_spawnattr_setflags` call site in the tree sets
+	 * a literal that excludes RESETIDS:
+	 *   - `packages/tini/tini.c` (SETSIGMASK|SETSIGDEF)
+	 *   - cmake's vendored libuv patch (SETSIGDEF|SETSIGMASK)
+	 *   - cmake's kwsys patch (SETSIGDEF alone)
+	 *   - ccache's patched `execute.c`, which passes a NULL `attrp` outright.
+	 * CPython's `posixmodule.c` sets the flag only when a Python caller passes
+	 * `resetids=True` to `os.posix_spawn`, an opt-in whose documented contract
+	 * already allows an error. */
+	if (attr->__flags & POSIX_SPAWN_RESETIDS)
 		return ENOSYS;
 
 	int nfdops = 0;
@@ -600,6 +581,39 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 	 * request — notably a runtime predating this staging call — is ENOSYS, the
 	 * POSIX answer for an unsupported optional feature. Reporting either beats
 	 * the pre-fix 0, which told the caller a guarantee held when it did not. */
+	/* firebox#7RS — POSIX_SPAWN_SETSID, staged for the same reason and on the
+	 * same terms as SETPGROUP below: the child must lead its new session before
+	 * it can run, and `proc_spawn2` returns with the child already dispatched.
+	 * The host applies SETSID before SETPGROUP, in musl's child order, so the
+	 * pair is EPERM there as on Linux (a session leader cannot change group).
+	 *
+	 * ⛔ STAGED FIRST, AND ONLY AFTER THE ONE SETPGROUP FAILURE THE HOST COULD
+	 * REPORT. A staged request is consumed only by `proc_spawn2`, so one that
+	 * is staged and then followed by an early return here would be applied to
+	 * some LATER, unrelated child. The negative-pgid EINVAL is therefore
+	 * decided before anything is staged. That is the same rule the host
+	 * applies, and Linux's child would hit it in `setpgid` too. After that, the
+	 * SETPGROUP staging below cannot fail on a runtime that has this import,
+	 * because the import is newer than that one. A runtime without this import
+	 * is ENOSYS, with nothing staged. */
+	if ((attr->__flags & POSIX_SPAWN_SETPGROUP) && attr->__pgrp < 0)
+	{
+		free(signals);
+		if (fdops)
+			free(fdops);
+		return EINVAL;
+	}
+	if (attr->__flags & POSIX_SPAWN_SETSID)
+	{
+		if (__wasix_proc_stage_spawn_setsid() != __WASI_ERRNO_SUCCESS)
+		{
+			free(signals);
+			if (fdops)
+				free(fdops);
+			return ENOSYS;
+		}
+	}
+
 	if (attr->__flags & POSIX_SPAWN_SETPGROUP)
 	{
 		__wasi_errno_t pgerr =

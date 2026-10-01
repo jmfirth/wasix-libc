@@ -233,9 +233,16 @@ __wasi_errno_t __wasix_proc_stage_spawn_pgid(uint32_t pgid);
  * __wasix_proc_get_sid: write the session id of `pid` (0 = the caller) to
  * *ret_sid. __WASI_ERRNO_SRCH for a negative or unknown pid.
  *
- * Host: lib/wasix/src/syscalls/wasix/proc_setsid.rs, proc_get_sid.rs. */
+ * __wasix_proc_stage_spawn_setsid: POSIX_SPAWN_SETSID for the NEXT proc_spawn2
+ * from this thread, staged and consumed exactly like
+ * __wasix_proc_stage_spawn_pgid above. The host applies it before SETPGROUP,
+ * in musl's child order. Always __WASI_ERRNO_SUCCESS on a runtime that has it.
+ *
+ * Host: lib/wasix/src/syscalls/wasix/proc_setsid.rs, proc_get_sid.rs,
+ * proc_stage_spawn_pgid.rs. */
 __wasi_errno_t __wasix_proc_setsid(uint32_t *ret_sid);
 __wasi_errno_t __wasix_proc_get_sid(uint32_t pid, uint32_t *ret_sid);
+__wasi_errno_t __wasix_proc_stage_spawn_setsid(void);
 
 #ifdef __cplusplus
 }
