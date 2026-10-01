@@ -128,6 +128,7 @@ __imported_wasix_32v1_thread_sleep
 __imported_wasix_32v1_thread_spawn_v2
 __imported_wasix_32v1_tty_get
 __imported_wasix_32v1_tty_set
+__imported_wasix_fbx_port_if_list
 __letf2
 __lttf2
 __netf2

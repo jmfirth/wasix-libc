@@ -99,6 +99,9 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         network/res_search.c \
         network/res_state.c \
         network/if_freenameindex.c \
+        network/if_nameindex.c \
+        network/if_nametoindex.c \
+        network/if_indextoname.c \
         network/in6addr_any.c \
         network/in6addr_loopback.c \
         network/proto.c \

@@ -575,7 +575,9 @@ __wasilibc_tls_size
 __wasilibc_unlinkat
 __wasilibc_utimens
 __wasix_context_main
+__wasix_if_list_fetch
 __wasix_init_tls
+__wasix_port_if_list
 __wasm_call_dtors
 __wasm_sigaction
 __wasm_signal
@@ -1068,6 +1070,9 @@ hypotl
 iconv
 iconv_close
 iconv_open
+if_indextoname
+if_nameindex
+if_nametoindex
 ilogb
 ilogbf
 ilogbl

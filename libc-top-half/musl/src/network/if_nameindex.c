@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#ifdef __wasilibc_unmodified_upstream /* netlink / SIOCGIF* */
 #include <net/if.h>
 #include <errno.h>
 #include <unistd.h>
@@ -112,3 +113,60 @@ err:
 	errno = ENOBUFS;
 	return ifs;
 }
+#else
+/* firebox#25D / #9FB: WASIX has no netlink and no SIOCGIF* ioctls, so musl's
+ * body (kept above for upstream diffs) cannot run. This one derives from
+ * __wasix_port_if_list, the same host list getifaddrs reads, so the four
+ * interface functions cannot disagree. Without an interface model (no --net;
+ * the browser) the list fails with ENOTSUP and so does this. */
+#include <net/if.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wasi/api.h>
+#include <wasi/libc.h>
+
+/* One allocation, as musl's: the array (terminated by a {0, NULL} entry) then
+ * the names, so if_freenameindex stays a plain free(). One entry per distinct
+ * index, in the order the host lists interfaces. */
+struct if_nameindex *if_nameindex()
+{
+	struct __wasix_if_rec *recs;
+	size_t n, i, j, num = 0;
+	__wasi_errno_t err = __wasix_if_list_fetch(&recs, &n);
+	if (err) {
+		errno = __wasilibc_errno_from_wasi(err);
+		return 0;
+	}
+	unsigned *seen = malloc((n ? n : 1) * sizeof *seen);
+	size_t *pick = malloc((n ? n : 1) * sizeof *pick);
+	if (!seen || !pick) {
+		free(seen); free(pick); free(recs);
+		errno = ENOBUFS;
+		return 0;
+	}
+	for (i = 0; i < n; i++) {
+		for (j = 0; j < num && seen[j] != recs[i].index; j++);
+		if (j == num) {
+			seen[num] = recs[i].index;
+			pick[num++] = i;
+		}
+	}
+	struct if_nameindex *ifs = malloc((num+1) * sizeof *ifs + num * IF_NAMESIZE);
+	if (ifs) {
+		char *p = (char *)(ifs + num + 1);
+		for (j = 0; j < num; j++, p += IF_NAMESIZE) {
+			memcpy(p, recs[pick[j]].name, IF_NAMESIZE);
+			p[IF_NAMESIZE-1] = 0;
+			ifs[j].if_index = seen[j];
+			ifs[j].if_name = p;
+		}
+		ifs[num].if_index = 0;
+		ifs[num].if_name = 0;
+	} else {
+		errno = ENOBUFS;
+	}
+	free(seen); free(pick); free(recs);
+	return ifs;
+}
+#endif

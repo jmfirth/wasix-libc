@@ -244,6 +244,48 @@ __wasi_errno_t __wasix_proc_setsid(uint32_t *ret_sid);
 __wasi_errno_t __wasix_proc_get_sid(uint32_t pid, uint32_t *ret_sid);
 __wasi_errno_t __wasix_proc_stage_spawn_setsid(void);
 
+/* firebox#25D / #9FB — network-interface enumeration, the one source for
+ * getifaddrs, if_nameindex, if_nametoindex and if_indextoname.
+ *
+ * Fixed 64-byte records with no pointers, so the layout is identical under
+ * wasix_32v1 and wasix_64v1. `flags` are Linux IFF_* values; `name` is the
+ * host's interface name, NUL-padded. A LINK record carries the hardware address
+ * in `addr[0..hwaddr_len)`; an INET record carries the address (network order)
+ * in `addr`, the prefix length, the broadcast (IFF_BROADCAST) or peer
+ * (IFF_POINTOPOINT) address in `aux` (all zero when absent) and the IPv6 scope.
+ * Records come in getifaddrs order: per interface, the LINK record first, then
+ * its INET records.
+ *
+ * *count: in = capacity of `buf` in records, out = records required. Returns
+ * __WASI_ERRNO_OVERFLOW (with *count written, buf untouched) when the capacity
+ * is short, __WASI_ERRNO_NOTSUP when the network backend has no interface model
+ * (no --net; the browser).
+ * Host: lib/wasix/src/syscalls/wasix/port_if_list.rs. */
+#define __WASIX_IF_KIND_LINK  0
+#define __WASIX_IF_KIND_INET4 1
+#define __WASIX_IF_KIND_INET6 2
+struct __wasix_if_rec {
+    uint32_t index;
+    uint32_t flags;
+    uint8_t  name[16];
+    uint8_t  kind;
+    uint8_t  prefix_len;
+    uint8_t  hwaddr_len;
+    uint8_t  _pad;
+    uint8_t  addr[16];
+    uint8_t  aux[16];
+    uint32_t scope_id;
+};
+#ifndef __cplusplus
+_Static_assert(sizeof(struct __wasix_if_rec) == 64, "__wasix_if_rec is a 64-byte ABI record");
+#endif
+__wasi_errno_t __wasix_port_if_list(struct __wasix_if_rec *buf, uint64_t *count);
+
+/* firebox#25D: the whole list in one malloc'd array (free() it), retrying while
+ * the host reports EOVERFLOW. Returns 0 or a __wasi_errno_t; ENOMEM on
+ * allocation failure. Internal to libc (getifaddrs, if_*). */
+__wasi_errno_t __wasix_if_list_fetch(struct __wasix_if_rec **out, size_t *count);
+
 #ifdef __cplusplus
 }
 #endif

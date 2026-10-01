@@ -280,3 +280,10 @@ int32_t __imported_wasix_fbx_proc_get_sid(int32_t,intptr_t) __attribute__((__imp
 __wasi_errno_t __wasix_proc_get_sid(uint32_t pid,uint32_t *ret_sid){return (uint16_t)__imported_wasix_fbx_proc_get_sid((int32_t)pid,(intptr_t)ret_sid);}
 int32_t __imported_wasix_fbx_proc_stage_spawn_setsid(void) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_stage_spawn_setsid")));
 __wasi_errno_t __wasix_proc_stage_spawn_setsid(void){return (uint16_t)__imported_wasix_fbx_proc_stage_spawn_setsid();}
+/* firebox#25D / #9FB — interface enumeration. Both operands are pointers, so
+ * intptr_t makes ONE declaration resolve under wasix_32v1 (i32,i32)->i32 and
+ * wasix_64v1 (i64,i64)->i32, matching the host's WasmPtr<u8,M>/WasmPtr<u64,M>.
+ * The record and the count are width-independent (see api_firebox.h).
+ * Host: lib/wasix/src/syscalls/wasix/port_if_list.rs. */
+int32_t __imported_wasix_fbx_port_if_list(intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("port_if_list")));
+__wasi_errno_t __wasix_port_if_list(struct __wasix_if_rec *buf,uint64_t *count){return (uint16_t)__imported_wasix_fbx_port_if_list((intptr_t)buf,(intptr_t)count);}

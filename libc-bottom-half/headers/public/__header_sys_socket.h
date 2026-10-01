@@ -120,11 +120,16 @@
 #define AF_INET6 __WASI_ADDRESS_FAMILY_INET6
 #define AF_UNIX __WASI_ADDRESS_FAMILY_UNIX
 #define AF_LOCAL AF_UNIX
+/* firebox#25D: getifaddrs reports each interface's link-layer address as an
+ * AF_PACKET `struct sockaddr_ll` (<netpacket/packet.h>), as Linux does, so the
+ * family must be nameable. Linux's value; it collides with no WASI family. */
+#define AF_PACKET 17
 
 #define PF_UNSPEC       AF_UNSPEC
 #define PF_INET         AF_INET
 #define PF_UNIX         AF_UNIX
 #define PF_INET6        AF_INET6
+#define PF_PACKET       AF_PACKET
 
 #define SOMAXCONN       128
 

@@ -546,6 +546,8 @@ __wasilibc_tls_align
 __wasilibc_tls_size
 __wasilibc_unlinkat
 __wasilibc_utimens
+__wasix_if_list_fetch
+__wasix_port_if_list
 __wasm_call_dtors
 __wasm_signal
 __wcscoll_l
@@ -1027,6 +1029,9 @@ hypotl
 iconv
 iconv_close
 iconv_open
+if_indextoname
+if_nameindex
+if_nametoindex
 ilogb
 ilogbf
 ilogbl
