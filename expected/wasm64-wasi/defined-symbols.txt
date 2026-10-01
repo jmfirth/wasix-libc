@@ -1191,6 +1191,7 @@ memmove
 mempcpy
 memrchr
 memset
+mincore
 mkdir
 mkdirat
 mkdtemp

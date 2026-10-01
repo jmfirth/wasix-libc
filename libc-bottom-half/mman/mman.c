@@ -2209,6 +2209,77 @@ int msync (void *addr, size_t length, int flags) {
     return rc;
 }
 
+// firebox#25D: does [a, b) overlap a HOLE mman itself tracks (a munmap'd owned
+// range, or an unused tail of a grow)? Those are the only in-bounds pages mman can
+// PROVE are unmapped. Takes g_res_lock.
+static int wasix_res_overlaps_hole(uintptr_t a, uintptr_t b) {
+    int hit = 0;
+    wasix_res_lock_acquire();
+    for (struct wasix_res_node *n = g_res_free_head; n != NULL; n = n->next) {
+        uintptr_t nbase = (uintptr_t)n;
+        if (nbase >= b) break;                    // address-ordered
+        if (nbase + n->len > a) { hit = 1; break; }
+    }
+    wasix_res_lock_release();
+    return hit;
+}
+
+// firebox#25D: is some page of [addr, addr+len) provably NOT mapped? len != 0.
+// Out of linear memory (wasix_range_unmapped), or overlapping a tracked hole.
+// Static data, the stack, the malloc heap, live mappings and shm windows are all
+// in-bounds and not holes, so they count as mapped. Not detectable: an in-bounds
+// page mman never owned and never freed (the no-MMU gap mlock already documents).
+static int wasix_pages_unmapped(const void *addr, size_t len) {
+    uintptr_t a = (uintptr_t)addr, end;
+    if (wasix_range_unmapped(addr, len)) return 1;
+    end = a + len;                                // no overflow: checked above
+    return wasix_res_overlaps_hole(a & ~(uintptr_t)(WASIX_MMAN_PAGE_SIZE - 1),
+                                   (end + (WASIX_MMAN_PAGE_SIZE - 1)) &
+                                       ~(uintptr_t)(WASIX_MMAN_PAGE_SIZE - 1));
+}
+
+// firebox#25D: mincore reports, per page, whether it is resident. WASM linear
+// memory is committed and there is no swap and no populate step, so every MAPPED
+// page is resident: the state Linux reports for a process after
+// mlockall(MCL_CURRENT|MCL_FUTURE), which is the same model as mlock above. Only
+// bit 0 is set; the other bits are clear. Linux order: EINVAL (addr not
+// page-aligned), ENOMEM (length wraps, then any page unmapped), len == 0 -> 0,
+// EFAULT (vec).
+//
+// EFAULT: a store outside linear memory would TRAP the guest, so a vec that
+// escapes [0, memory.size) (or is NULL) is EFAULT here, which is what Linux
+// answers for an unwritable vec. Also detected: a vec inside a tracked hole. Not
+// detectable: an in-bounds vec on a PROT_READ/PROT_NONE page (the store succeeds,
+// or faults in the host where enforcement exists), or one in an untracked hole.
+int mincore(void *addr, size_t length, unsigned char *vec) {
+    if (((uintptr_t)addr & (WASIX_MMAN_PAGE_SIZE - 1)) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t span;
+    if (__builtin_add_overflow(length, (size_t)WASIX_MMAN_PAGE_SIZE - 1, &span)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    span &= ~((size_t)WASIX_MMAN_PAGE_SIZE - 1);
+    if (span == 0) {
+        return 0;
+    }
+    if (wasix_pages_unmapped(addr, span)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    size_t npages = span / WASIX_MMAN_PAGE_SIZE;
+    if (vec == NULL || wasix_pages_unmapped(vec, npages)) {
+        errno = EFAULT;
+        return -1;
+    }
+    for (size_t i = 0; i < npages; i++) {
+        vec[i] = 1;
+    }
+    return 0;
+}
+
 // madvise: hint the kernel about future memory access patterns.
 //
 // WebAssembly has no MMU, no page caching, and the userspace emulated
