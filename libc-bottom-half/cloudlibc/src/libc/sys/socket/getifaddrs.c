@@ -9,16 +9,17 @@
  * node had ifa_name == NULL — which crashes nearly every consumer.
  *
  * Now one node per host record, in the host's getifaddrs order:
- *   - a LINK record becomes an AF_PACKET `struct sockaddr_ll` (Linux's shape),
- *     carrying the hardware address, the index, and a hatype derived from what
- *     the record shows (loopback, 6-byte Ethernet address, or none);
+ *   - a LINK record becomes an AF_PACKET `struct sockaddr_ll` (Linux's shape)
+ *     carrying the index, the host's hardware type (ARPHRD_*) and the whole
+ *     hardware address (up to MAX_ADDR_LEN, 32); its link broadcast/peer
+ *     address, when the host has one, becomes ifa_broadaddr, as on Linux;
  *   - an INET record becomes AF_INET/AF_INET6 with ifa_netmask built from the
- *     prefix length, and ifa_broadaddr (IFF_BROADCAST) or ifa_dstaddr
- *     (IFF_POINTOPOINT) from the record's aux address.
- * Names are the host's own (lo0/en0 on a macOS host): guest sockets are host
- * sockets. ifa_data (Linux link statistics) is NULL: the host does not supply
- * them, and an absent pointer is a loud failure where invented counters would
- * be a quiet lie.
+ *     prefix length, and ifa_broadaddr / ifa_dstaddr from the record's aux
+ *     address, which carries its own IPv6 scope id.
+ * Names are the host's own bytes (lo0/en0 on a macOS host): guest sockets are
+ * host sockets. ifa_data (Linux link statistics) is NULL: the host does not
+ * supply them, and an absent pointer is a loud failure where invented counters
+ * would be a quiet lie.
  *
  * Every member of a node is its own allocation, which is the contract
  * freeifaddrs.c frees by. Without an interface model (no --net; the browser)
@@ -40,20 +41,31 @@
 #include <wasi/api.h>
 #include <wasi/libc.h>
 
-#define ARPHRD_ETHER    1
-#define ARPHRD_LOOPBACK 772
-#define ARPHRD_NONE     0xFFFE
-
-/* sockaddr_ll's sll_addr holds 8 bytes; a record may carry up to 16
- * (Infiniband-class addresses). musl's getifaddrs extends the array the same
- * way; callers still read it through struct sockaddr_ll. */
+/* sockaddr_ll's sll_addr holds 8 bytes; a record may carry up to 32 (Linux
+ * MAX_ADDR_LEN, e.g. 20-byte InfiniBand). musl's getifaddrs extends the array
+ * the same way; callers still read it through struct sockaddr_ll. */
 struct sockaddr_ll_wide {
   unsigned short sll_family, sll_protocol;
   int sll_ifindex;
   unsigned short sll_hatype;
   unsigned char sll_pkttype, sll_halen;
-  unsigned char sll_addr[24];
+  unsigned char sll_addr[32];
 };
+
+static struct sockaddr *link_sockaddr(const struct __wasix_if_rec *r,
+                                      const uint8_t *bytes, unsigned len) {
+  struct sockaddr_ll_wide *ll = calloc(1, sizeof *ll);
+  if (ll == NULL)
+    return NULL;
+  if (len > sizeof ll->sll_addr)
+    len = sizeof ll->sll_addr; /* the host never sends more (EOVERFLOW) */
+  ll->sll_family = AF_PACKET;
+  ll->sll_ifindex = (int)r->index;
+  ll->sll_hatype = r->hatype;
+  ll->sll_halen = (unsigned char)len;
+  memcpy(ll->sll_addr, bytes, len);
+  return (struct sockaddr *)ll;
+}
 
 static struct sockaddr *inet_sockaddr(int family, const uint8_t *bytes,
                                       uint32_t scope_id) {
@@ -84,13 +96,6 @@ static void mask_of(uint8_t *mask, unsigned width, unsigned prefix) {
     mask[prefix / 8] = (uint8_t)(0xff << (8 - prefix % 8));
 }
 
-static int is_zero(const uint8_t *p, unsigned n) {
-  for (unsigned i = 0; i < n; i++)
-    if (p[i])
-      return 0;
-  return 1;
-}
-
 /* Fills `ifa` from `r`. Returns 0, or -1 on allocation failure (the node's
  * partial members are freed by the caller's freeifaddrs). */
 static int fill(struct ifaddrs *ifa, const struct __wasix_if_rec *r) {
@@ -100,18 +105,14 @@ static int fill(struct ifaddrs *ifa, const struct __wasix_if_rec *r) {
   ifa->ifa_flags = r->flags;
 
   if (r->kind == __WASIX_IF_KIND_LINK) {
-    struct sockaddr_ll_wide *ll = calloc(1, sizeof *ll);
-    if (ll == NULL)
+    ifa->ifa_addr = link_sockaddr(r, r->addr, r->addr_len);
+    if (ifa->ifa_addr == NULL)
       return -1;
-    unsigned halen = r->hwaddr_len > sizeof r->addr ? sizeof r->addr : r->hwaddr_len;
-    ll->sll_family = AF_PACKET;
-    ll->sll_ifindex = (int)r->index;
-    ll->sll_hatype = (r->flags & IFF_LOOPBACK) ? ARPHRD_LOOPBACK
-                     : halen == 6               ? ARPHRD_ETHER
-                                                : ARPHRD_NONE;
-    ll->sll_halen = (unsigned char)halen;
-    memcpy(ll->sll_addr, r->addr, halen);
-    ifa->ifa_addr = (struct sockaddr *)ll;
+    if (r->aux_len) {
+      ifa->ifa_broadaddr = link_sockaddr(r, r->aux, r->aux_len);
+      if (ifa->ifa_broadaddr == NULL)
+        return -1;
+    }
     return 0;
   }
 
@@ -125,9 +126,9 @@ static int fill(struct ifaddrs *ifa, const struct __wasix_if_rec *r) {
   ifa->ifa_netmask = inet_sockaddr(family, mask, 0);
   if (ifa->ifa_netmask == NULL)
     return -1;
-  if ((r->flags & (IFF_BROADCAST | IFF_POINTOPOINT)) && !is_zero(r->aux, width)) {
+  if (r->aux_len) {
     /* One allocation behind the ifa_broadaddr/ifa_dstaddr union. */
-    ifa->ifa_broadaddr = inet_sockaddr(family, r->aux, 0);
+    ifa->ifa_broadaddr = inet_sockaddr(family, r->aux, r->aux_scope_id);
     if (ifa->ifa_broadaddr == NULL)
       return -1;
   }

@@ -135,7 +135,10 @@ struct if_nameindex *if_nameindex()
 	size_t n, i, j, num = 0;
 	__wasi_errno_t err = __wasix_if_list_fetch(&recs, &n);
 	if (err) {
-		errno = __wasilibc_errno_from_wasi(err);
+		/* POSIX: an allocation failure is ENOBUFS, including the record
+		 * buffer the fetch allocates. */
+		errno = err == __WASI_ERRNO_NOMEM ? ENOBUFS
+		                                  : __wasilibc_errno_from_wasi(err);
 		return 0;
 	}
 	unsigned *seen = malloc((n ? n : 1) * sizeof *seen);

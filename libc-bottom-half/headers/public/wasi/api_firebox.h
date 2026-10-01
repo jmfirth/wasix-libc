@@ -247,37 +247,45 @@ __wasi_errno_t __wasix_proc_stage_spawn_setsid(void);
 /* firebox#25D / #9FB — network-interface enumeration, the one source for
  * getifaddrs, if_nameindex, if_nametoindex and if_indextoname.
  *
- * Fixed 64-byte records with no pointers, so the layout is identical under
- * wasix_32v1 and wasix_64v1. `flags` are Linux IFF_* values; `name` is the
- * host's interface name, NUL-padded. A LINK record carries the hardware address
- * in `addr[0..hwaddr_len)`; an INET record carries the address (network order)
- * in `addr`, the prefix length, the broadcast (IFF_BROADCAST) or peer
- * (IFF_POINTOPOINT) address in `aux` (all zero when absent) and the IPv6 scope.
+ * Fixed 104-byte records with no pointers, so the layout is identical under
+ * wasix_32v1 and wasix_64v1. `flags` are Linux IFF_* values and `hatype` a
+ * Linux ARPHRD_* value. `name` is the host's interface name as bytes (not
+ * necessarily UTF-8), NUL-padded.
+ *   LINK record:  addr[0..addr_len) is the hardware address (up to Linux
+ *                 MAX_ADDR_LEN, 32), aux[0..aux_len) the link broadcast/peer
+ *                 address, hatype the hardware type.
+ *   INET record:  addr[0..addr_len) is the address in network order with its
+ *                 prefix length and scope_id; aux[0..aux_len) the broadcast
+ *                 (IFF_BROADCAST) or peer (IFF_POINTOPOINT) address with its
+ *                 own aux_scope_id. aux_len 0 means absent.
  * Records come in getifaddrs order: per interface, the LINK record first, then
  * its INET records.
  *
  * *count: in = capacity of `buf` in records, out = records required. Returns
  * __WASI_ERRNO_OVERFLOW (with *count written, buf untouched) when the capacity
  * is short, __WASI_ERRNO_NOTSUP when the network backend has no interface model
- * (no --net; the browser).
+ * (no --net; the browser). A bad pointer writes nothing.
  * Host: lib/wasix/src/syscalls/wasix/port_if_list.rs. */
 #define __WASIX_IF_KIND_LINK  0
 #define __WASIX_IF_KIND_INET4 1
 #define __WASIX_IF_KIND_INET6 2
 struct __wasix_if_rec {
-    uint32_t index;
-    uint32_t flags;
-    uint8_t  name[16];
-    uint8_t  kind;
-    uint8_t  prefix_len;
-    uint8_t  hwaddr_len;
-    uint8_t  _pad;
-    uint8_t  addr[16];
-    uint8_t  aux[16];
-    uint32_t scope_id;
-};
+    uint32_t index;        /*   0 */
+    uint32_t flags;        /*   4 */
+    uint8_t  name[16];     /*   8 */
+    uint8_t  kind;         /*  24 */
+    uint8_t  prefix_len;   /*  25 */
+    uint8_t  addr_len;     /*  26 */
+    uint8_t  aux_len;      /*  27 */
+    uint16_t hatype;       /*  28 */
+    uint16_t _pad;         /*  30 */
+    uint32_t scope_id;     /*  32 */
+    uint32_t aux_scope_id; /*  36 */
+    uint8_t  addr[32];     /*  40 */
+    uint8_t  aux[32];      /*  72 */
+};                         /* 104 */
 #ifndef __cplusplus
-_Static_assert(sizeof(struct __wasix_if_rec) == 64, "__wasix_if_rec is a 64-byte ABI record");
+_Static_assert(sizeof(struct __wasix_if_rec) == 104, "__wasix_if_rec is a 104-byte ABI record");
 #endif
 __wasi_errno_t __wasix_port_if_list(struct __wasix_if_rec *buf, uint64_t *count);
 
