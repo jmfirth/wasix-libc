@@ -31,6 +31,12 @@
 
 TYPEDEF float float_t;
 TYPEDEF double double_t;
+/* firebox#25D: clockid_t is `int`, as on wasm32 (f5166ea6 added this line to
+ * wasm32 only). Without it the __typedef_clockid_t.h block below marks
+ * clockid_t DEFINED while declaring no typedef, so a header that asks only
+ * for __NEED_clockid_t (<sys/timex.h>) failed to compile on wasm64:
+ * `int clock_adjtime(clockid_t, ...)` -> "expected identifier". */
+TYPEDEF int clockid_t;
 
 #if defined(__NEED_max_align_t) && !defined(__DEFINED_max_align_t)
 #define __need_max_align_t

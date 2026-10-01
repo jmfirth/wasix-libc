@@ -294,6 +294,31 @@ __wasi_errno_t __wasix_port_if_list(struct __wasix_if_rec *buf, uint64_t *count)
  * allocation failure. Internal to libc (getifaddrs, if_*). */
 __wasi_errno_t __wasix_if_list_fetch(struct __wasix_if_rec **out, size_t *count);
 
+/* firebox#25D — the host's sysinfo(2) facts. out = uint64_t[12]:
+ *   { uptime_s, load1, load5, load15 (<< SI_LOAD_SHIFT),
+ *     totalram, freeram, sharedram, bufferram, totalswap, freeswap (bytes),
+ *     procs, 0 }
+ * A pointer-free record, so one layout under wasix_32v1 (i32)->i32 and
+ * wasix_64v1 (i64)->i32. __WASI_ERRNO_NOSYS when the runtime has no host
+ * source (the browser); __WASI_ERRNO_FAULT for a bad `out`.
+ * Host: lib/wasix/src/syscalls/wasix/system_info.rs. */
+#define __WASIX_SYSTEM_INFO_WORDS 12
+__wasi_errno_t __wasix_system_info(uint64_t *out);
+
+/* firebox#25D — the host kernel's CLOCK_REALTIME discipline as a read-only
+ * adjtimex(modes = 0) reports it. out = int64_t[20]:
+ *   { state (TIME_OK..TIME_ERROR), status (STA_*, STA_NANO verbatim),
+ *     offset, freq, maxerror, esterror, constant, precision, tolerance, tai,
+ *     ppsfreq, jitter, shift, stabil, jitcnt, calcnt, errcnt, stbcnt,
+ *     adjtime_offset (pending adjtime() slew, us), valid }
+ * `valid` bit __WASIX_CLOCK_DISCIPLINE_ADJTIME_VALID says adjtime_offset
+ * carries a host value (a macOS host has no unprivileged source for it).
+ * Read-only: there is no write half. Same widths and errnos as system_info.
+ * Host: lib/wasix/src/syscalls/wasix/system_info.rs. */
+#define __WASIX_CLOCK_DISCIPLINE_WORDS 20
+#define __WASIX_CLOCK_DISCIPLINE_ADJTIME_VALID 1
+__wasi_errno_t __wasix_clock_discipline_get(int64_t *out);
+
 #ifdef __cplusplus
 }
 #endif

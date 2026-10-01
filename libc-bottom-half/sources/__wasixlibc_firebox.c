@@ -287,3 +287,12 @@ __wasi_errno_t __wasix_proc_stage_spawn_setsid(void){return (uint16_t)__imported
  * Host: lib/wasix/src/syscalls/wasix/port_if_list.rs. */
 int32_t __imported_wasix_fbx_port_if_list(intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("port_if_list")));
 __wasi_errno_t __wasix_port_if_list(struct __wasix_if_rec *buf,uint64_t *count){return (uint16_t)__imported_wasix_fbx_port_if_list((intptr_t)buf,(intptr_t)count);}
+/* firebox#25D — host system facts (sysinfo) and clock discipline (adjtimex).
+ * One pointer operand each, so intptr_t makes ONE declaration resolve under
+ * wasix_32v1 (i32)->i32 and wasix_64v1 (i64)->i32, matching the host's
+ * WasmPtr<u64,M>/WasmPtr<i64,M>. Records are width-independent (api_firebox.h).
+ * Host: lib/wasix/src/syscalls/wasix/system_info.rs. */
+int32_t __imported_wasix_fbx_system_info(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("system_info")));
+__wasi_errno_t __wasix_system_info(uint64_t *out){return (uint16_t)__imported_wasix_fbx_system_info((intptr_t)out);}
+int32_t __imported_wasix_fbx_clock_discipline_get(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("clock_discipline_get")));
+__wasi_errno_t __wasix_clock_discipline_get(int64_t *out){return (uint16_t)__imported_wasix_fbx_clock_discipline_get((intptr_t)out);}

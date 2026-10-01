@@ -129,7 +129,9 @@ __imported_wasix_64v1_thread_sleep
 __imported_wasix_64v1_thread_spawn_v2
 __imported_wasix_64v1_tty_get
 __imported_wasix_64v1_tty_set
+__imported_wasix_fbx_clock_discipline_get
 __imported_wasix_fbx_port_if_list
+__imported_wasix_fbx_system_info
 __letf2
 __lttf2
 __main_argc_argv

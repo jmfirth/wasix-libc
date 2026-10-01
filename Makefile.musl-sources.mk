@@ -179,6 +179,9 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         linux/epoll.c \
         linux/eventfd.c \
         linux/setgroups.c \
+        linux/sysinfo.c \
+        linux/adjtimex.c \
+        linux/clock_adjtime.c \
         $(LIBC_TOP_HALF_LDSO_SOURCES) \
         stat/futimesat.c \
         stat/mknodat.c \

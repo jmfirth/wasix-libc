@@ -197,6 +197,7 @@ __lookup_name
 __lookup_serv
 __lookup_serv_wasi
 __lseek
+__lsysinfo
 __main_void
 __malloc_atfork
 __math_divzero
@@ -580,10 +581,12 @@ __wasilibc_tls_align
 __wasilibc_tls_size
 __wasilibc_unlinkat
 __wasilibc_utimens
+__wasix_clock_discipline_get
 __wasix_context_main
 __wasix_if_list_fetch
 __wasix_init_tls
 __wasix_port_if_list
+__wasix_system_info
 __wasm_call_dtors
 __wasm_longjmp
 __wasm_setjmp
@@ -619,6 +622,7 @@ acoshf
 acoshl
 acosl
 add_entry
+adjtimex
 alarm
 aligned_alloc
 alphasort
@@ -722,6 +726,7 @@ clearenv
 clearerr
 clearerr_unlocked
 clock
+clock_adjtime
 clock_getres
 clock_gettime
 clock_nanosleep
@@ -1680,6 +1685,7 @@ swscanf
 symlink
 symlinkat
 sysconf
+sysinfo
 syslog
 system
 tan

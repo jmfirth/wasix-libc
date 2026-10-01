@@ -300,19 +300,30 @@ long sysconf(int name)
 			return n_cpus;
 		}
 #endif
-#ifdef __wasilibc_unmodified_upstream // WASI has no sysinfo
 	case JT_PHYS_PAGES & 255:
 	case JT_AVPHYS_PAGES & 255: ;
 		unsigned long long mem;
 		struct sysinfo si;
+#ifdef __wasilibc_unmodified_upstream
 		__lsysinfo(&si);
+#else
+		/* firebox#25D: sysinfo now answers from the host. Before it existed
+		 * this block was compiled out and both names fell through to
+		 * `return values[name]`, i.e. the jump-table code JT(8)/JT(9)
+		 * (-248/-247) returned as a page count with errno untouched. With no
+		 * host source (the browser) the variable is unsupported, which is
+		 * -1/EINVAL, the discoverable POSIX form. */
+		if (__lsysinfo(&si)) {
+			errno = EINVAL;
+			return -1;
+		}
+#endif
 		if (!si.mem_unit) si.mem_unit = 1;
 		if (name==_SC_PHYS_PAGES) mem = si.totalram;
 		else mem = si.freeram + si.bufferram;
 		mem *= si.mem_unit;
 		mem /= PAGE_SIZE;
 		return (mem > LONG_MAX) ? LONG_MAX : mem;
-#endif
 	case JT_ZERO & 255:
 		return 0;
 	}
