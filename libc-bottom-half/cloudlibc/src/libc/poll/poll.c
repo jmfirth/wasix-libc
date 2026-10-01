@@ -41,6 +41,11 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
   bool demoted[nfds ? nfds : 1];
   memset(demoted, 0, sizeof demoted);
   bool any_demoted = false;
+  // Review F3 (round 2): the LAST wait is capped by the timeout, not by a
+  // slice, and demoted entries sit it out. Before such a wait may end the call
+  // with 0, every demoted entry gets one more probe, so no path returns 0
+  // without having asked about them after the last of the time ran out.
+  bool final_probe_done = false;
   int slice = 1;
   struct timespec started;
   if (timeout > 0)
@@ -242,6 +247,15 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     any_demoted = false;
     if (slice < 64)
       slice *= 2;
+    continue;
+  }
+  // Review F3 (round 2): the timeout ended a wait that some entries sat out.
+  // Probe them once more with no time left (`remaining` is 0, so the wait is a
+  // zero-length readiness check) before reporting nothing.
+  if (retval == 0 && clock_fired && any_demoted && !final_probe_done) {
+    memset(demoted, 0, sizeof demoted);
+    any_demoted = false;
+    final_probe_done = true;
     continue;
   }
   return retval;
