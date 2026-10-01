@@ -26,12 +26,22 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
   // WASI has no "status only" subscription, so such an entry gets a STATUS
   // subscription on its readable side (its writable side for a write-only fd)
   // and only error/hangup results are kept for it. A status subscription that
-  // merely reports READY is not reportable; that entry is DEMOTED (left out
-  // for the rest of this call) and the poll re-issued with the time that
-  // remains, so readiness nobody asked for can neither wake the caller nor
-  // spin it.
+  // merely reports READY is not reportable; that entry is DEMOTED and the poll
+  // re-issued with the time that remains, so readiness nobody asked for can
+  // neither wake the caller nor spin it.
+  //
+  // Review F3: demotion is for ONE WAIT SLICE, not for the rest of the call.
+  // A demoted entry is still owed POLLHUP/POLLERR, which Linux reports however
+  // long the call waits; dropped for good, a pipe that held data and then lost
+  // its writer slept out the whole timeout (or forever). While any entry is
+  // demoted, each wait is capped at a slice and the status entries are probed
+  // again when it ends. The slice doubles from 1 ms to 64 ms, so a hangup is
+  // seen within one slice and an idle wait costs at most ~30 wake-ups a
+  // second. The cap is the cost of WASI having no hangup-only interest.
   bool demoted[nfds ? nfds : 1];
   memset(demoted, 0, sizeof demoted);
+  bool any_demoted = false;
+  int slice = 1;
   struct timespec started;
   if (timeout > 0)
     clock_gettime(CLOCK_MONOTONIC, &started);
@@ -97,14 +107,24 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     }
   }
 
+  // Review F3: with a demoted entry the wait is one slice long, after which
+  // the status entries are probed again. `sliced` records that the CLOCK below
+  // is the slice, not the caller's timeout.
+  int wait = remaining;
+  bool sliced = false;
+  if (any_demoted && (wait < 0 || wait > slice)) {
+    wait = slice;
+    sliced = true;
+  }
+
   // Create extra event for the timeout.
-  if (remaining >= 0) {
+  if (wait >= 0) {
     // firebox#RDN — WASI relative zero is an immediate readiness check.
     __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
     *subscription = (__wasi_subscription_t){
         .u.tag = __WASI_EVENTTYPE_CLOCK,
         .u.u.clock.id = __WASI_CLOCKID_REALTIME,
-        .u.u.clock.timeout = (__wasi_timestamp_t)(remaining * 1000000LL),
+        .u.u.clock.timeout = (__wasi_timestamp_t)(wait * 1000000LL),
     };
   }
 
@@ -211,8 +231,19 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
   }
   // firebox#XD4 — only a demotion with nothing to report and time left makes
   // another round; anything reportable, or the timeout, ends the call.
-  if (retval == 0 && newly_demoted && !clock_fired)
+  if (retval == 0 && newly_demoted && !clock_fired) {
+    any_demoted = true;
     continue;
+  }
+  // Review F3: the slice ended with nothing to report. Re-arm every demoted
+  // entry so the next round probes it for a hangup, and lengthen the slice.
+  if (retval == 0 && clock_fired && sliced) {
+    memset(demoted, 0, sizeof demoted);
+    any_demoted = false;
+    if (slice < 64)
+      slice *= 2;
+    continue;
+  }
   return retval;
   }
 }
