@@ -57,6 +57,7 @@ __dl_seterr
 __dl_thread_cleanup
 __dl_vseterr
 __dlerror_lockptr
+__dlsym_fdmask
 __do_cleanup_pop
 __do_cleanup_push
 __do_des

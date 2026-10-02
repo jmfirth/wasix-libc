@@ -94,7 +94,8 @@ LIBC_TOP_HALF_LDSO_SOURCES = \
     ldso/dlerror.c \
     ldso/dlinfo.c \
     ldso/dlopen.c \
-    ldso/dlsym.c
+    ldso/dlsym.c \
+    ldso/dlsym_fdmask.c
 
 include Makefile.musl-sources.mk
 
