@@ -179,6 +179,9 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         $(LIBC_TOP_HALF_LDSO_SOURCES) \
         stat/futimesat.c \
         stat/mknodat.c \
+        stat/mknod.c \
+        stat/mkfifo.c \
+        stat/mkfifoat.c \
         legacy/getpagesize.c \
         legacy/getpass.c \
         legacy/daemon.c \
