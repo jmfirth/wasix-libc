@@ -79,6 +79,16 @@ __wasi_errno_t __wasix_path_access(__wasi_fd_t fd, const char *path, size_t path
 __wasi_errno_t __wasix_fd_chdir(__wasi_fd_t fd);
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode, uint64_t dev);
 
+/* firebox#DNG — the file-mode creation mask lives in the RUNTIME, as Linux's
+ * lives in the kernel: it survives exec and posix_spawn, and the runtime applies
+ * it to every create (open O_CREAT, mkdir, mknod, AF_UNIX bind), including the
+ * ones that carry no mode. `mask` with __WASIX_UMASK_QUERY set reads the mask
+ * into *ret_old and changes nothing; otherwise the mask becomes mask & 0777 and
+ * *ret_old receives the previous one. */
+#define __WASIX_UMASK_QUERY (UINT32_C(0x80000000))
+__wasi_errno_t __wasix_proc_umask(uint32_t mask, uint32_t *ret_old);
+
+
 /* fd_ioctl ASYMMETRY: on wasm32 __wasi_fd_ioctl is part of the committed generation
  * (api_wasix.h); only the wasm64 regen drops it, so it is declared here for wasm64
  * only (declaring it for wasm32 too would duplicate the generated prototype). */

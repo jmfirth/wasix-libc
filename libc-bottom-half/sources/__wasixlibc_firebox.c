@@ -74,6 +74,9 @@ int32_t __imported_wasix_fbx_fd_chdir(int32_t) __attribute__((__import_module__(
 __wasi_errno_t __wasix_fd_chdir(__wasi_fd_t fd){return (uint16_t)__imported_wasix_fbx_fd_chdir((int32_t)fd);}
 int32_t __imported_wasix_fbx_path_mknod(int32_t,intptr_t,intptr_t,int32_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_mknod")));
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t mode,uint64_t dev){return (uint16_t)__imported_wasix_fbx_path_mknod((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)mode,(int64_t)dev);}
+/* firebox#DNG — the runtime-owned umask; see api_firebox.h. */
+int32_t __imported_wasix_fbx_proc_umask(int32_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_umask")));
+__wasi_errno_t __wasix_proc_umask(uint32_t mask,uint32_t *ret_old){return (uint16_t)__imported_wasix_fbx_proc_umask((int32_t)mask,(intptr_t)ret_old);}
 
 #ifdef __wasm64__
 int32_t __imported_wasix_fbx_fd_ioctl(int32_t,int32_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_ioctl")));

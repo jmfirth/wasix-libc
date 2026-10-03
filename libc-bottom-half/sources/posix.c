@@ -62,20 +62,14 @@ static int validate_access_pathname(const char *path, int mode, int flags) {
     return 0;
 }
 
-// firebox#HXN: process-wide file-mode creation mask (umask). WASI/WASIX has no
-// kernel umask, so libc maintains it in guest memory. It rides proc_fork's
-// private-memory copy, so a child inherits the parent's umask exactly as on
-// Linux. Accessed with __atomic builtins so a threaded program's concurrent
-// umask()/open() are well-defined (matching the sibling accounting in mman.c).
-// Only the low 0777 permission bits are significant (POSIX: "only the file
-// permission bits of cmask are used"). The default 022 is the conventional
-// Linux login default; it also reproduces the 0644 the host historically
-// stamped for the common open(..., 0666) create, so honoring the mode is a
-// no-op for that case while newly respecting explicit modes.
-static int __wasilibc_umask_value = 0022;
-
+// firebox#DNG: the file-mode creation mask lives in the runtime (proc_umask),
+// as Linux's lives in the kernel. The create-then-chmod paths below read it
+// with the query form, which changes nothing, so a concurrent umask() in
+// another thread is never raced by a set-then-restore.
 static mode_t __wasilibc_umask_get(void) {
-    return (mode_t)(__atomic_load_n(&__wasilibc_umask_value, __ATOMIC_SEQ_CST) & 0777);
+    uint32_t mask = 0;
+    (void)__wasix_proc_umask(__WASIX_UMASK_QUERY, &mask);
+    return (mode_t)(mask & 0777);
 }
 
 // firebox#HXN: apply a caller-supplied creation mode to a freshly-created
@@ -367,15 +361,13 @@ int mkdir(const char *path, mode_t mode) {
 }
 
 mode_t umask(mode_t mode) {
-    // firebox#HXN: a real per-process umask. WASI/WASIX has no kernel umask, so
-    // libc maintains it (see __wasilibc_umask_value). Per POSIX, umask() sets
-    // the file-mode creation mask to the low 0777 bits of `mode` and returns
-    // the PREVIOUS mask; open()/openat()/mkdir()/mkdirat() then create objects
-    // with (requested_mode & ~umask). Atomic swap so a concurrent umask()/open()
-    // pair is well-defined.
-    int prev = __atomic_exchange_n(&__wasilibc_umask_value,
-                                   (int)(mode & 0777), __ATOMIC_SEQ_CST);
-    return (mode_t)(prev & 0777);
+    // firebox#DNG: the mask lives in the runtime (proc_umask), as Linux's lives
+    // in the kernel, so it survives exec and posix_spawn and reaches the creates
+    // that pass no mode (fopen, bind, mknod). POSIX: only the low 0777 bits are
+    // used, and umask() returns the previous mask; it cannot fail.
+    uint32_t old = 0;
+    (void)__wasix_proc_umask((uint32_t)(mode & 0777), &old);
+    return (mode_t)(old & 0777);
 }
 
 int chmod(const char *path, mode_t mode) {
