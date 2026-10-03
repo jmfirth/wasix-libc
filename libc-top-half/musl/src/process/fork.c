@@ -52,18 +52,31 @@ weak_alias(dummy_0, __tl_lock);
 weak_alias(dummy_0, __tl_unlock);
 #endif
 
-static void reown_or_unlock(FILE *f, pthread_t self)
+static int held_by_forker(FILE *f, pthread_t self)
 {
 	FILE *held;
+	if (!f->lockcount) return 0;
+	for (held = self->stdio_locks; held; held = held->next_locked)
+		if (held == f) return 1;
+	return 0;
+}
+
+/* Every FILE the forking thread holds through flockfile() is held by the child
+ * too, but the lock word names the PARENT thread's tid and the child's thread
+ * has a new one: stdio on that stream would block until the final unlock.
+ * Needed whether or not other threads ever existed, so it does not depend on
+ * libc.need_locks (which is back to -1 once the last worker has exited). */
+static void repair_forker_held_locks(pthread_t self)
+{
+	FILE *f;
+	for (f = self->stdio_locks; f; f = f->next_locked)
+		f->lock = self->tid;
+}
+
+static void reown_or_unlock(FILE *f, pthread_t self)
+{
 	if (f->lock < 0) return;
-	if (f->lockcount) {
-		for (held = self->stdio_locks; held; held = held->next_locked) {
-			if (held == f) {
-				f->lock = self->tid;
-				return;
-			}
-		}
-	}
+	if (held_by_forker(f, self)) return;
 	f->lock = 0;
 	f->lockcount = 0;
 }
@@ -80,7 +93,8 @@ static void reown_or_unlock(FILE *f, pthread_t self)
  * A FILE the forking thread itself holds through flockfile() stays held: the
  * child is a copy of that thread and continues to own it. Its lock word names
  * the parent thread's tid, and the child's thread has a new one, so the word is
- * re-pointed at the child's tid; the lockcount and the thread's stdio_locks
+ * re-pointed at the child's tid (repair_forker_held_locks, which runs even when
+ * no other thread ever existed); the lockcount and the thread's stdio_locks
  * list entry are untouched, so funlockfile() keeps working. Every other FILE is
  * unlocked and its lockcount cleared; its next_locked/prev_locked links belong
  * to a dead thread's list and are never read once lockcount is 0.
@@ -167,6 +181,7 @@ pid_t _fork_internal(int copy_mem)
 	pthread_t self=__pthread_self(), next=self->next;
 	pid_t ret = _Fork(copy_mem);
 	int errno_save = errno;
+	if (!ret) repair_forker_held_locks(self);
 	if (need_locks) {
 		if (!ret) {
 			for (pthread_t td=next; td!=self; td=td->next)
