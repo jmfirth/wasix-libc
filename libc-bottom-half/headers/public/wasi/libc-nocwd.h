@@ -42,10 +42,10 @@ int __wasilibc_nocwd_fstatat(int, const char *__restrict, struct stat *__restric
     __attribute__((__warn_unused_result__));
 int __wasilibc_nocwd_mkdirat_nomode(int, const char *)
     __attribute__((__warn_unused_result__));
-/* firebox#HXN: create-mode-honoring variants of the *_nomode forms. WASI's
- * path_open/path_create_directory carry no mode, so these apply the caller's
- * create mode (mode & ~umask) after a real create via __wasix_fd_chmod /
- * __wasix_path_chmod. See libc-bottom-half/sources/posix.c. */
+/* firebox#HXN, firebox#DNG/#J04: create-mode-honoring variants of the *_nomode
+ * forms. They pass the caller's mode to the runtime's mode-carrying imports
+ * (__wasix_path_open_mode / __wasix_path_create_directory_mode), which create at
+ * mode & ~umask atomically. See cloudlibc fcntl/openat.c and sys/stat/mkdirat.c. */
 int __wasilibc_nocwd_openat_mode(int, const char *, int, mode_t)
     __attribute__((__warn_unused_result__));
 int __wasilibc_nocwd_mkdirat_mode(int, const char *, mode_t)

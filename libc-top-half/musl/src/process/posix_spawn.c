@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
 #ifdef __wasilibc_unmodified_upstream
@@ -19,6 +20,18 @@
 #include "fdop.h"
 #include "libc.h"
 #include <wasi/libc.h>
+
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#DNG/#J04 — where an OPEN_MODE action's create mode lives: the uint32_t
+ * right after `fdflagsext`, inside what the generated struct leaves as tail
+ * padding, so the wire size (and every older guest's array stride) is unchanged.
+ * The runtime's ProcSpawnFdOp declares the same field at the same offset. */
+#define FBX_SPAWN_FD_OP_MODE_OFFSET \
+	(offsetof(__wasi_proc_spawn_fd_op_t, fdflagsext) + sizeof(__wasi_fdflagsext_t))
+_Static_assert(FBX_SPAWN_FD_OP_MODE_OFFSET % 4 == 0, "mode is 4-aligned");
+_Static_assert(FBX_SPAWN_FD_OP_MODE_OFFSET + 4 <= sizeof(__wasi_proc_spawn_fd_op_t),
+	       "mode fits in the tail padding");
+#endif
 
 #ifdef __wasilibc_unmodified_upstream
 #else
@@ -181,7 +194,9 @@ static int child(void *args_vp)
 #ifdef __wasilibc_unmodified_upstream
 				fd = __sys_open(op->path, op->oflag, op->mode);
 #else
-				fd = open(op->path, op->oflag | op->mode);
+				/* firebox#DNG/#J04 — the mode is open's third argument (it
+				 * was OR-ed into the flags, so the create mode was garbage). */
+				fd = open(op->path, op->oflag, op->mode);
 #endif
 				if ((ret=fd) < 0) goto fail;
 				if (fd != op->fd) {
@@ -399,7 +414,10 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 			switch (op->cmd)
 			{
 			case FDOP_OPEN:
-				op_name = __WASI_PROC_SPAWN_FD_OP_NAME_OPEN;
+				// firebox#DNG/#J04 — carry the addopen mode so the runtime
+				// creates at mode & ~umask in one step (plain OPEN creates
+				// at 0666 & ~umask: the mode argument was dropped).
+				op_name = __WASIX_PROC_SPAWN_FD_OP_NAME_OPEN_MODE;
 				break;
 			case FDOP_CLOSE:
 				op_name = __WASI_PROC_SPAWN_FD_OP_NAME_CLOSE;
@@ -467,7 +485,7 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 			uint8_t *path =
 				op->cmd == FDOP_OPEN || op->cmd == FDOP_CHDIR ? (uint8_t *)op->path : NULL;
 
-			*(wop++) = (__wasi_proc_spawn_fd_op_t){
+			*wop = (__wasi_proc_spawn_fd_op_t){
 				.cmd = op_name,
 				.fd = op->fd,
 				.src_fd = op->srcfd,
@@ -483,6 +501,13 @@ int __posix_spawn(pid_t *restrict res, const char *restrict path,
 				.fs_rights_base = rights,
 				.fs_rights_inheriting = rights,
 			};
+			// firebox#DNG/#J04 — the create mode rides the struct's tail
+			// padding, read by the runtime only for OPEN_MODE.
+			if (op_name == __WASIX_PROC_SPAWN_FD_OP_NAME_OPEN_MODE) {
+				uint32_t mode = (uint32_t)op->mode;
+				memcpy((char *)wop + FBX_SPAWN_FD_OP_MODE_OFFSET, &mode, sizeof mode);
+			}
+			wop++;
 		}
 	}
 

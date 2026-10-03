@@ -19,7 +19,11 @@
 // depend on any relationship between the two numbering spaces. The authority
 // for these numbers is Linux uapi, and the oracle is a running guest.
 
-int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
+// firebox#DNG/#J04 — the one body behind both opens below. `has_mode` selects
+// the mode-carrying import, which creates at `mode & ~umask` atomically; without
+// it the runtime creates at 0666 & ~umask (what fopen/tmpfile get).
+static int openat_impl(int fd, const char *path, int oflag, int has_mode,
+                       mode_t mode) {
   // Compute rights corresponding with the access modes provided.
   // Attempt to obtain all rights, except the ones that contradict the
   // access mode provided to openat().
@@ -86,10 +90,16 @@ int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
   // already-pending cancel BEFORE parking in the host await.
   __cloudlibc_testcancel();
 
-  error = __wasi_path_open2(fd, lookup_flags, path,
-                                 __wasilibc_oflags_to_wasi(oflag),
-                                 fs_rights_base, fs_rights_inheriting, fs_flags,
-                                 fd_flags, &newfd);
+  if (has_mode)
+    error = __wasix_path_open_mode(fd, lookup_flags, path, strlen(path),
+                                   __wasilibc_oflags_to_wasi(oflag),
+                                   fs_rights_base, fs_rights_inheriting,
+                                   fs_flags, fd_flags, (uint32_t)mode, &newfd);
+  else
+    error = __wasi_path_open2(fd, lookup_flags, path,
+                              __wasilibc_oflags_to_wasi(oflag),
+                              fs_rights_base, fs_rights_inheriting, fs_flags,
+                              fd_flags, &newfd);
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED
@@ -100,4 +110,19 @@ int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
     return -1;
   }
   return newfd;
+}
+
+int __wasilibc_nocwd_openat_nomode(int fd, const char *path, int oflag) {
+  return openat_impl(fd, path, oflag, 0, 0);
+}
+
+// firebox#DNG/#J04 — open(2)/openat(2) with their mode argument. The runtime
+// stamps `mode & ~umask` on a file this call creates IN the create, so it is
+// never observable at another mode — the create-then-fchmod this replaces let a
+// concurrent lstat see a 0600 key at 0644 — and never touches an existing
+// file's mode (Linux ignores the argument then). No probe, no chmod, so the
+// caller's errno is untouched on success.
+int __wasilibc_nocwd_openat_mode(int fd, const char *path, int oflag,
+                                 mode_t mode) {
+  return openat_impl(fd, path, oflag, 1, mode);
 }

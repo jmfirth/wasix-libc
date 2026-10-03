@@ -88,6 +88,21 @@ __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd, const char *path, size_t path_
 #define __WASIX_UMASK_QUERY (UINT32_C(0x80000000))
 __wasi_errno_t __wasix_proc_umask(uint32_t mask, uint32_t *ret_old);
 
+/* firebox#DNG/#J04 — create-with-mode in ONE step. __wasi_path_open2 plus the
+ * open(2) mode: a file the call creates gets mode & 07777 & ~umask in the create
+ * itself, so no observer sees it at another mode (create-then-fchmod let one).
+ * An existing file's mode is untouched. Flag words are the same wire values
+ * __wasi_path_open2 takes. */
+__wasi_errno_t __wasix_path_open_mode(__wasi_fd_t fd, __wasi_lookupflags_t dirflags, const char *path, size_t path_len, uint16_t oflags, uint64_t fs_rights_base, uint64_t fs_rights_inheriting, uint16_t fdflags, uint16_t fdflagsext, uint32_t mode, __wasi_fd_t *retptr0);
+/* firebox#DNG/#J04 — mkdir(2) with its mode in one step: mode & 01777 & ~umask. */
+__wasi_errno_t __wasix_path_create_directory_mode(__wasi_fd_t fd, const char *path, size_t path_len, uint32_t mode);
+
+/* firebox#DNG/#J04 — a posix_spawn `addopen` action whose create mode is valid:
+ * the mode is a uint32_t in __wasi_proc_spawn_fd_op_t's tail padding, right after
+ * `fdflagsext` (offset 52 on wasm32, 60 on wasm64; the struct size is unchanged).
+ * A separate command, because a runtime reading an older guest's plain OPEN must
+ * not trust padding bytes. */
+#define __WASIX_PROC_SPAWN_FD_OP_NAME_OPEN_MODE (UINT8_C(5))
 
 /* fd_ioctl ASYMMETRY: on wasm32 __wasi_fd_ioctl is part of the committed generation
  * (api_wasix.h); only the wasm64 regen drops it, so it is declared here for wasm64
