@@ -4,6 +4,7 @@
 #include "lock.h"
 #include "pthread_impl.h"
 #include "fork_impl.h"
+#include "stdio_impl.h"
 
 static volatile int *const dummy_lockptr = 0;
 
@@ -50,6 +51,76 @@ static void dummy_0(void) { }
 weak_alias(dummy_0, __tl_lock);
 weak_alias(dummy_0, __tl_unlock);
 #endif
+
+static int held_by_forker(FILE *f, pthread_t self)
+{
+	FILE *held;
+	if (!f->lockcount) return 0;
+	for (held = self->stdio_locks; held; held = held->next_locked)
+		if (held == f) return 1;
+	return 0;
+}
+
+/* Every FILE the forking thread holds through flockfile() is held by the child
+ * too, but the lock word names the PARENT thread's tid and the child's thread
+ * has a new one: stdio on that stream would block until the final unlock.
+ * Needed whether or not other threads ever existed, so it does not depend on
+ * libc.need_locks (which is back to -1 once the last worker has exited). */
+static void repair_forker_held_locks(pthread_t self)
+{
+	FILE *f;
+	for (f = self->stdio_locks; f; f = f->next_locked)
+		f->lock = self->tid;
+}
+
+static void reown_or_unlock(FILE *f, pthread_t self)
+{
+	if (f->lock < 0) return;
+	if (held_by_forker(f, self)) return;
+	f->lock = 0;
+	f->lockcount = 0;
+}
+
+/* firebox#E3X — the child must not inherit per-FILE stdio locks held by the
+ * parent's OTHER threads.
+ *
+ * Those threads do not exist in the child, so a FILE lock word naming one of
+ * them is never released: the first stdio call on that FILE blocks forever, and
+ * so does exit(), because __stdio_exit takes every FILE's lock to flush it
+ * (seen as intermittent pthread_exit/6-1 timeouts, firebox#N6E). glibc resets
+ * the locks in the child (fresetlockfiles); this does the same.
+ *
+ * A FILE the forking thread itself holds through flockfile() stays held: the
+ * child is a copy of that thread and continues to own it. Its lock word names
+ * the parent thread's tid, and the child's thread has a new one, so the word is
+ * re-pointed at the child's tid (repair_forker_held_locks, which runs even when
+ * no other thread ever existed); the lockcount and the thread's stdio_locks
+ * list entry are untouched, so funlockfile() keeps working. Every other FILE is
+ * unlocked and its lockcount cleared; its next_locked/prev_locked links belong
+ * to a dead thread's list and are never read once lockcount is 0.
+ *
+ * A negative lock word is FFINALLOCK's "being closed" state; those are left
+ * alone, as FLOCK already skips them.
+ *
+ * The parent is NOT made to take every FILE's lock before _Fork: a thread
+ * blocked in a read on stdin holds stdin's lock for as long as the read blocks,
+ * and a fork() that waited on it would hang in the parent. Only the child is
+ * touched. The cost is the one glibc has: a buffer another thread was midway
+ * through writing is copied as it stood. */
+static void reset_stdio_locks_in_child(pthread_t self)
+{
+	FILE *f;
+	FILE *const std[] = { __stdin_used, __stdout_used, __stderr_used };
+	int i;
+
+	for (i = 0; i < sizeof std / sizeof *std; i++)
+		if (std[i]) reown_or_unlock(std[i], self);
+	/* The ofl lock itself was just reset by the atfork loop in the caller, and
+	 * this is the child's only thread, so taking it cannot block. */
+	for (f = *__ofl_lock(); f; f = f->next)
+		reown_or_unlock(f, self);
+	__ofl_unlock();
+}
 
 /* firebox#CBP — fork() is DEFINED in EH builds too.
  *
@@ -110,6 +181,7 @@ pid_t _fork_internal(int copy_mem)
 	pthread_t self=__pthread_self(), next=self->next;
 	pid_t ret = _Fork(copy_mem);
 	int errno_save = errno;
+	if (!ret) repair_forker_held_locks(self);
 	if (need_locks) {
 		if (!ret) {
 			for (pthread_t td=next; td!=self; td=td->next)
@@ -125,6 +197,7 @@ pid_t _fork_internal(int copy_mem)
 			if (*atfork_locks[i])
 				if (ret) UNLOCK(*atfork_locks[i]);
 				else **atfork_locks[i] = 0;
+		if (!ret) reset_stdio_locks_in_child(self);
 		__release_ptc();
 		__ldso_atfork(!ret);
 	}

@@ -40,6 +40,17 @@ int dlinfo(void *, int, void *);
 __REDIR(dlsym, __dlsym_time64);
 #endif
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#D9H: code compiled against the bitmask <sys/select.h> binds `select`
+ * and `pselect` to __select_fdmask / __pselect_fdmask (firebox#D7S), but the
+ * host's by-name dlsym knows only the exported link names, and `select` there
+ * is the LEGACY {count, list} decoder. __dlsym_fdmask maps those two names
+ * before the lookup, so dlsym("select") from new-header code returns the
+ * decoder for the layout that code was compiled with. Same mechanism as musl's
+ * __dlsym_time64. Old code keeps calling plain `dlsym` and the legacy names. */
+__REDIR(dlsym, __dlsym_fdmask);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

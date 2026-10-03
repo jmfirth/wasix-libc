@@ -1,4 +1,6 @@
-#include "dlfcn.h"
+/* firebox#D9H: <dlfcn.h> is NOT included. It redirects `dlsym` to
+ * __dlsym_fdmask, which would rename the definition below. */
+void *dlsym(void *restrict p, const char *restrict s);
 #include "dynlink.h"
 #include "wasi/api.h"
 #include "string.h"
