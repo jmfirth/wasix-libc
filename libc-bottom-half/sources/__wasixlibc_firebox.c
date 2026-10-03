@@ -74,6 +74,16 @@ int32_t __imported_wasix_fbx_fd_chdir(int32_t) __attribute__((__import_module__(
 __wasi_errno_t __wasix_fd_chdir(__wasi_fd_t fd){return (uint16_t)__imported_wasix_fbx_fd_chdir((int32_t)fd);}
 int32_t __imported_wasix_fbx_path_mknod(int32_t,intptr_t,intptr_t,int32_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_mknod")));
 __wasi_errno_t __wasix_path_mknod(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t mode,uint64_t dev){return (uint16_t)__imported_wasix_fbx_path_mknod((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)mode,(int64_t)dev);}
+/* firebox#DNG — the runtime-owned umask; see api_firebox.h. */
+int32_t __imported_wasix_fbx_proc_umask(int32_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("proc_umask")));
+__wasi_errno_t __wasix_proc_umask(uint32_t mask,uint32_t *ret_old){return (uint16_t)__imported_wasix_fbx_proc_umask((int32_t)mask,(intptr_t)ret_old);}
+/* firebox#DNG/#J04 — create-with-mode, atomic; see api_firebox.h. The flag/rights
+   argument types mirror path_open2's generated import exactly (i32 for the 16-bit
+   flag words, i64 rights), plus the i32 mode before the out-pointer. */
+int32_t __imported_wasix_fbx_path_open_mode(int32_t,int32_t,intptr_t,intptr_t,int32_t,int64_t,int64_t,int32_t,int32_t,int32_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_open_mode")));
+__wasi_errno_t __wasix_path_open_mode(__wasi_fd_t fd,__wasi_lookupflags_t dirflags,const char *path,size_t path_len,uint16_t oflags,uint64_t fs_rights_base,uint64_t fs_rights_inheriting,uint16_t fdflags,uint16_t fdflagsext,uint32_t mode,__wasi_fd_t *retptr0){return (uint16_t)__imported_wasix_fbx_path_open_mode((int32_t)fd,(int32_t)dirflags,(intptr_t)path,(intptr_t)path_len,(int32_t)oflags,(int64_t)fs_rights_base,(int64_t)fs_rights_inheriting,(int32_t)fdflags,(int32_t)fdflagsext,(int32_t)mode,(intptr_t)retptr0);}
+int32_t __imported_wasix_fbx_path_create_directory_mode(int32_t,intptr_t,intptr_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("path_create_directory_mode")));
+__wasi_errno_t __wasix_path_create_directory_mode(__wasi_fd_t fd,const char *path,size_t path_len,uint32_t mode){return (uint16_t)__imported_wasix_fbx_path_create_directory_mode((int32_t)fd,(intptr_t)path,(intptr_t)path_len,(int32_t)mode);}
 
 #ifdef __wasm64__
 int32_t __imported_wasix_fbx_fd_ioctl(int32_t,int32_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_ioctl")));
