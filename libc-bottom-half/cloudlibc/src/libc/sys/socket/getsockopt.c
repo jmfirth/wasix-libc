@@ -1,167 +1,94 @@
-#include <sys/socket.h>
-#include <__header_netinet_in.h>
+// firebox#VA3 -- getsockopt(), driven by the table in sockopt_impl.h.
 
-#include <wasi/api.h>
-#include <errno.h>
-#include <string.h>
-#include <wasi/libc.h>
+#include "sockopt_impl.h"
 
-int getsockopt(int socket, int level, int option_name,
-               void *restrict option_value, socklen_t *restrict option_len) {
-  if (level == IPPROTO_IPV6 && option_name == IPV6_V6ONLY) {
-    level = SOL_SOCKET;
-    option_name = SO_ONLYV6;
-  }
-  if (level == IPPROTO_TCP && option_name == TCP_NODELAY) {
-    level = SOL_SOCKET;
-    option_name = SO_NODELAY;
-  }
+static int fail(int error) {
+  errno = error;
+  return -1;
+}
 
-  if (level != SOL_SOCKET) {
-    errno = ENOPROTOOPT;
-    return -1;
-  }
+// Hands `size` bytes back the way Linux does: as many as the caller has room
+// for, and the count it wrote. The old code always reported the full size,
+// whatever it had copied.
+static int give(void *restrict option_value, socklen_t *restrict option_len, const void *value,
+                size_t size) {
+  socklen_t n = *option_len < size ? *option_len : (socklen_t)size;
+  memcpy(option_value, value, n);
+  *option_len = n;
+  return 0;
+}
 
-  switch (option_name) {
-    case SO_ACCEPTCONN:
-    case SO_BROADCAST:
-    case SO_DONTROUTE:
-    case SO_NODELAY:
-    case SO_OOBINLINE:
-    case SO_ONLYV6:
-    case SO_REUSEPORT:
-    case SO_REUSEADDR:
-    case SO_MCASTLOOPV4:
-    case SO_MCASTLOOPV6:
-    case SO_KEEPALIVE: {
+int getsockopt(int socket, int level, int option_name, void *restrict option_value,
+               socklen_t *restrict option_len) {
+  struct sockopt_fd fd;
+  int error = sockopt_classify(socket, &fd);
+  if (error != 0) return fail(error);
+
+  const struct sockopt_row *row = sockopt_find(level, option_name);
+  if (row == NULL || row->access == SOCKOPT_WO) return fail(sockopt_unknown(&fd, level, 1));
+
+  switch (row->kind) {
+    case SOCKOPT_FLAG:
+    case SOCKOPT_BYTE_FLAG: {
       __wasi_bool_t on = 0;
-      __wasi_errno_t error = __wasi_sock_get_opt_flag(socket, option_name, &on);
-      if (error != 0) {
-        errno = __wasilibc_errno_from_wasi(error);
-        return -1;
-      }
-      
+      __wasi_errno_t wasi = __wasi_sock_get_opt_flag(socket, row->option, &on);
+      if (wasi != 0) return fail(__wasilibc_errno_from_wasi(wasi));
       int value = on == __WASI_BOOL_TRUE ? 1 : 0;
-      memcpy(option_value, &value, *option_len < sizeof(int) ? *option_len : sizeof(int));
-      *option_len = sizeof(int);
-      return 0;
+      return give(option_value, option_len, &value, sizeof value);
     }
-    case SO_ERROR: {
-      // firebox#H8V: this used to write a literal 0 and return success without
-      // ever asking the runtime, so every socket in every state reported "the
-      // connection succeeded". That is the completion check of the standard
-      // non-blocking connect idiom -- connect() -> EINPROGRESS, poll(POLLOUT),
-      // getsockopt(SO_ERROR) -- so a guest that got the idiom right was still
-      // told a dead socket was healthy: broken state indistinguishable from
-      // working state.
-      //
-      // SO_ERROR is __WASI_SOCK_OPTION_LAST_ERROR, which the runtime answers
-      // through sock_get_opt_size. The value travels as the wasi errno number
-      // (0 == no pending error), so convert it back to a POSIX errno for the
-      // caller. The error is consumed by this read, exactly as Linux clears
-      // sk->sk_err.
-      __wasi_filesize_t pending = 0;
-      __wasi_errno_t error = __wasi_sock_get_opt_size(socket, option_name, &pending);
-      if (error != 0) {
-        errno = __wasilibc_errno_from_wasi(error);
-        return -1;
-      }
-      int value = pending == 0
-                      ? 0
-                      : __wasilibc_errno_from_wasi((__wasi_errno_t)pending);
-      memcpy(option_value, &value, *option_len < sizeof(int) ? *option_len : sizeof(int));
-      *option_len = sizeof(int);
-      return 0;
-    }
-    case SO_LINGER: {
-      __wasi_option_timestamp_t tm;
-      __wasi_errno_t error = __wasi_sock_get_opt_time(socket, option_name, &tm);
-      if (error != 0) {
-        errno = __wasilibc_errno_from_wasi(error);
-        return -1;
-      }
 
+    case SOCKOPT_INT:
+    case SOCKOPT_BYTE_INT: {
+      __wasi_filesize_t size = 0;
+      __wasi_errno_t wasi = __wasi_sock_get_opt_size(socket, row->option, &size);
+      if (wasi != 0) return fail(__wasilibc_errno_from_wasi(wasi));
+      int value = (int)(int64_t)size;
+      return give(option_value, option_len, &value, sizeof value);
+    }
+
+    case SOCKOPT_INADDR: {
+      __wasi_filesize_t size = 0;
+      __wasi_errno_t wasi = __wasi_sock_get_opt_size(socket, row->option, &size);
+      if (wasi != 0) return fail(__wasilibc_errno_from_wasi(wasi));
+      struct in_addr addr = {htonl((uint32_t)size)};
+      return give(option_value, option_len, &addr, sizeof addr);
+    }
+
+    case SOCKOPT_ERROR: {
+      // firebox#H8V: the pending error travels as the wasi errno number
+      // (0 == none) and is consumed by this read, as Linux clears sk->sk_err.
+      __wasi_filesize_t pending = 0;
+      __wasi_errno_t wasi = __wasi_sock_get_opt_size(socket, row->option, &pending);
+      if (wasi != 0) return fail(__wasilibc_errno_from_wasi(wasi));
+      int value = pending == 0 ? 0 : __wasilibc_errno_from_wasi((__wasi_errno_t)pending);
+      return give(option_value, option_len, &value, sizeof value);
+    }
+
+    case SOCKOPT_TYPE:
+      return give(option_value, option_len, &fd.type, sizeof fd.type);
+
+    case SOCKOPT_LINGER: {
+      __wasi_option_timestamp_t tm;
+      __wasi_errno_t wasi = __wasi_sock_get_opt_time(socket, row->option, &tm);
+      if (wasi != 0) return fail(__wasilibc_errno_from_wasi(wasi));
       struct linger linger;
       linger.l_onoff = tm.tag == __WASI_OPTION_SOME ? 1 : 0;
-      linger.l_linger = tm.u.some / 1000000000ULL;
-      memcpy(option_value, &linger, *option_len < sizeof(struct linger) ? *option_len : sizeof(struct linger));
-      *option_len = sizeof(struct linger);
-      return 0;
+      linger.l_linger = (int)(tm.u.some / 1000000000ULL);
+      return give(option_value, option_len, &linger, sizeof linger);
     }
-    case SO_RCVTIMEO:
-    case SO_SNDTIMEO:
-    case SO_CONNTIMEO:
-    case SO_ACCPTIMEO: {
-      __wasi_option_timestamp_t tm;
-      __wasi_errno_t error = __wasi_sock_get_opt_time(socket, option_name, &tm);
-      if (error != 0) {
-        errno = __wasilibc_errno_from_wasi(error);
-        return -1;
-      }
 
+    case SOCKOPT_TIMEVAL: {
+      __wasi_option_timestamp_t tm;
+      __wasi_errno_t wasi = __wasi_sock_get_opt_time(socket, row->option, &tm);
+      if (wasi != 0) return fail(__wasilibc_errno_from_wasi(wasi));
       struct timeval tv;
-      memset(&tv, 0, sizeof(struct timeval));
+      memset(&tv, 0, sizeof tv);
       if (tm.tag == __WASI_OPTION_SOME) {
         tv.tv_sec = tm.u.some / 1000000000ULL;
         tv.tv_usec = (tm.u.some % 1000000000ULL) / 1000ULL;
       }
-      memcpy(option_value, &tv, *option_len < sizeof(struct timeval) ? *option_len : sizeof(struct timeval));
-      *option_len = sizeof(struct timeval);
-      return 0;
-    }
-    case SO_RCVBUF:
-    case SO_SNDBUF:
-    case SO_TTL:
-    case SO_MCASTTTLV4: {
-      __wasi_filesize_t fs;
-      __wasi_errno_t error = __wasi_sock_get_opt_size(socket, option_name, &fs);
-      if (error != 0) {
-        errno = __wasilibc_errno_from_wasi(error);
-        return -1;
-      }
-      socklen_t len = fs;
-      memcpy(option_value, &len, *option_len < sizeof(socklen_t ) ? *option_len : sizeof(socklen_t ));
-      *option_len = sizeof(socklen_t );
-      return 0;
-    }
-    case SO_PROTOCOL: {
-      __wasi_filesize_t fs;
-      __wasi_errno_t error = __wasi_sock_get_opt_size(socket, option_name, &fs);
-      if (error != 0) {
-        errno = __wasilibc_errno_from_wasi(error);
-        return -1;
-      }
-      int value = 0;
-      memcpy(option_value, &value, *option_len < sizeof(int) ? *option_len : sizeof(int));
-      *option_len = sizeof(int);
-      return 0;
-    }
-    case SO_TYPE: {
-      __wasi_fdstat_t fsb;
-      if (__wasi_fd_fdstat_get(socket, &fsb) != 0) {
-        errno = EBADF;
-        return -1;
-      }
-      if (fsb.fs_filetype != __WASI_FILETYPE_SOCKET_DGRAM &&
-          fsb.fs_filetype != __WASI_FILETYPE_SOCKET_STREAM &&
-          fsb.fs_filetype != __WASI_FILETYPE_SOCKET_SEQPACKET &&
-          fsb.fs_filetype != __WASI_FILETYPE_SOCKET_RAW) {
-        errno = ENOTSOCK;
-        return -1;
-      }
-      int value = fsb.fs_filetype;
-      switch(fsb.fs_filetype) {
-        case __WASI_FILETYPE_SOCKET_DGRAM: value = SOCK_DGRAM; break;
-        case __WASI_FILETYPE_SOCKET_STREAM: value = SOCK_STREAM; break;
-        case __WASI_FILETYPE_SOCKET_SEQPACKET: value = SOCK_SEQPACKET; break;
-        case __WASI_FILETYPE_SOCKET_RAW: value = SOCK_RAW; break;
-      }
-      memcpy(option_value, &value, *option_len < sizeof(int) ? *option_len : sizeof(int));
-      *option_len = sizeof(int);
-      return 0;
+      return give(option_value, option_len, &tv, sizeof tv);
     }
   }
-
-  errno = ENOPROTOOPT;
-  return -1;
+  return fail(sockopt_unknown(&fd, level, 1));
 }

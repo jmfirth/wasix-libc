@@ -26,6 +26,26 @@ extern "C" {
 #define __WASI_FILETYPE_FIFO (UINT8_C(10))
 #endif
 
+/* firebox#VA3 -- socket options the upstream `sock_option` enum has no number
+ * for. They ride the EXISTING sock_{set,get}_opt_{flag,size} imports: no import
+ * is added, the enum is extended. Numbered from 128 so a future upstream
+ * addition (upstream stops at 26) cannot land on one. A runtime that predates
+ * these reads an unknown number as NOOP and refuses it. The one table that maps
+ * (level, optname) onto them is cloudlibc's sys/socket/sockopt_impl.h; the
+ * runtime's copy is `Sockoption` in wasmer's lib/wasi-types. */
+#define __WASI_SOCK_OPTION_KEEP_IDLE (UINT8_C(128))
+#define __WASI_SOCK_OPTION_KEEP_INTERVAL (UINT8_C(129))
+#define __WASI_SOCK_OPTION_KEEP_COUNT (UINT8_C(130))
+#define __WASI_SOCK_OPTION_CORK (UINT8_C(131))
+#define __WASI_SOCK_OPTION_QUICK_ACK (UINT8_C(132))
+#define __WASI_SOCK_OPTION_USER_TIMEOUT (UINT8_C(133))
+#define __WASI_SOCK_OPTION_TOS (UINT8_C(134))
+#define __WASI_SOCK_OPTION_MULTICAST_IF_V4 (UINT8_C(135))
+#define __WASI_SOCK_OPTION_UNICAST_HOPS_V6 (UINT8_C(136))
+#define __WASI_SOCK_OPTION_MULTICAST_HOPS_V6 (UINT8_C(137))
+#define __WASI_SOCK_OPTION_MULTICAST_IF_V6 (UINT8_C(138))
+#define __WASI_SOCK_OPTION_DOMAIN (UINT8_C(139))
+
 /* POSIX permission + advisory-lock extensions (jmfirth/wasmer#firebox-patches). */
 __wasi_errno_t __wasix_fd_lock(__wasi_fd_t fd, uint32_t op);
 __wasi_errno_t __wasix_fd_lock_range(__wasi_fd_t fd, uint32_t op, uint32_t l_type, uint32_t whence, int64_t start, int64_t len);
