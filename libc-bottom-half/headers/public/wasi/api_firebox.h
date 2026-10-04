@@ -46,6 +46,25 @@ extern "C" {
 #define __WASI_SOCK_OPTION_MULTICAST_IF_V6 (UINT8_C(138))
 #define __WASI_SOCK_OPTION_DOMAIN (UINT8_C(139))
 
+/* firebox#VA3 -- the boolean options again, as sock_{set,get}_opt_flag carries
+ * them from this libc on. The upstream numbers for the same options are FROZEN
+ * on those two imports at what the runtime did before #VA3: setsockopt() before
+ * this mint read the pointer instead of the value and so sent TRUE for every
+ * flag, "off" included, and static artifacts still carry it. A runtime cannot
+ * honour a number that cannot say "off"; these can. sockopt_impl.h sends the
+ * upstream number only to a runtime that predates the option table. Retirement
+ * of the upstream numbers: firebox#E3T. */
+#define __WASI_SOCK_OPTION_FLAG_REUSE_PORT (UINT8_C(140))
+#define __WASI_SOCK_OPTION_FLAG_REUSE_ADDR (UINT8_C(141))
+#define __WASI_SOCK_OPTION_FLAG_NO_DELAY (UINT8_C(142))
+#define __WASI_SOCK_OPTION_FLAG_DONT_ROUTE (UINT8_C(143))
+#define __WASI_SOCK_OPTION_FLAG_ONLY_V6 (UINT8_C(144))
+#define __WASI_SOCK_OPTION_FLAG_BROADCAST (UINT8_C(145))
+#define __WASI_SOCK_OPTION_FLAG_MULTICAST_LOOP_V4 (UINT8_C(146))
+#define __WASI_SOCK_OPTION_FLAG_MULTICAST_LOOP_V6 (UINT8_C(147))
+#define __WASI_SOCK_OPTION_FLAG_KEEP_ALIVE (UINT8_C(148))
+#define __WASI_SOCK_OPTION_FLAG_OOB_INLINE (UINT8_C(149))
+
 /* POSIX permission + advisory-lock extensions (jmfirth/wasmer#firebox-patches). */
 __wasi_errno_t __wasix_fd_lock(__wasi_fd_t fd, uint32_t op);
 __wasi_errno_t __wasix_fd_lock_range(__wasi_fd_t fd, uint32_t op, uint32_t l_type, uint32_t whence, int64_t start, int64_t len);

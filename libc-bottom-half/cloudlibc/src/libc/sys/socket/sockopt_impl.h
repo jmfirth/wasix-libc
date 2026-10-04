@@ -182,6 +182,28 @@ static inline int sockopt_legacy(const struct sockopt_fd *fd, const struct socko
   return fd->legacy && row->option >= __WASI_SOCK_OPTION_KEEP_IDLE;
 }
 
+// The wire number a flag row travels under. A runtime with the option table
+// takes a boolean under its FLAG number; the upstream number for the same
+// option is frozen there at what it did before the table (see api_firebox.h),
+// and is what a runtime that predates the table knows.
+static inline __wasi_sock_option_t sockopt_flag_wire(const struct sockopt_fd *fd,
+                                                     const struct sockopt_row *row) {
+  if (fd->legacy) return row->option;
+  switch (row->option) {
+    case __WASI_SOCK_OPTION_REUSE_PORT: return __WASI_SOCK_OPTION_FLAG_REUSE_PORT;
+    case __WASI_SOCK_OPTION_REUSE_ADDR: return __WASI_SOCK_OPTION_FLAG_REUSE_ADDR;
+    case __WASI_SOCK_OPTION_NO_DELAY: return __WASI_SOCK_OPTION_FLAG_NO_DELAY;
+    case __WASI_SOCK_OPTION_DONT_ROUTE: return __WASI_SOCK_OPTION_FLAG_DONT_ROUTE;
+    case __WASI_SOCK_OPTION_ONLY_V6: return __WASI_SOCK_OPTION_FLAG_ONLY_V6;
+    case __WASI_SOCK_OPTION_BROADCAST: return __WASI_SOCK_OPTION_FLAG_BROADCAST;
+    case __WASI_SOCK_OPTION_MULTICAST_LOOP_V4: return __WASI_SOCK_OPTION_FLAG_MULTICAST_LOOP_V4;
+    case __WASI_SOCK_OPTION_MULTICAST_LOOP_V6: return __WASI_SOCK_OPTION_FLAG_MULTICAST_LOOP_V6;
+    case __WASI_SOCK_OPTION_KEEP_ALIVE: return __WASI_SOCK_OPTION_FLAG_KEEP_ALIVE;
+    case __WASI_SOCK_OPTION_OOB_INLINE: return __WASI_SOCK_OPTION_FLAG_OOB_INLINE;
+    default: return row->option;
+  }
+}
+
 // The errno for an option the table does not carry, which is what Linux
 // answers for one its protocol does not define. Setting is ENOPROTOOPT.
 // Reading is ENOPROTOOPT at a level the socket has and EOPNOTSUPP at one it

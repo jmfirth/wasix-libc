@@ -59,7 +59,7 @@ int setsockopt(int socket, int level, int option_name, const void *restrict opti
     case SOCKOPT_BYTE_FLAG:
       error = read_int(option_value, option_len, row->kind == SOCKOPT_BYTE_FLAG, &value);
       if (error != 0) return fail(error);
-      return done(__wasi_sock_set_opt_flag(socket, row->option,
+      return done(__wasi_sock_set_opt_flag(socket, sockopt_flag_wire(&fd, row),
                                            value != 0 ? __WASI_BOOL_TRUE : __WASI_BOOL_FALSE));
 
     case SOCKOPT_INT:

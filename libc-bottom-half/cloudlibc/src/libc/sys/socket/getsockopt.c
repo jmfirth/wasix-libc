@@ -37,7 +37,7 @@ int getsockopt(int socket, int level, int option_name, void *restrict option_val
     case SOCKOPT_FLAG:
     case SOCKOPT_BYTE_FLAG: {
       __wasi_bool_t on = 0;
-      __wasi_errno_t wasi = __wasi_sock_get_opt_flag(socket, row->option, &on);
+      __wasi_errno_t wasi = __wasi_sock_get_opt_flag(socket, sockopt_flag_wire(&fd, row), &on);
       if (wasi != 0) return fail(__wasilibc_errno_from_wasi(wasi));
       int value = on == __WASI_BOOL_TRUE ? 1 : 0;
       return give(option_value, option_len, &value, sizeof value);
