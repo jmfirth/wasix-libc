@@ -39,7 +39,7 @@ enum sockopt_kind {
   SOCKOPT_LINGER,    // struct linger               -> sock_{set,get}_opt_time
   SOCKOPT_TIMEVAL,   // struct timeval              -> sock_{set,get}_opt_time
   SOCKOPT_ERROR,     // int errno, read-only        -> sock_get_opt_size
-  SOCKOPT_TYPE,      // int SOCK_*, read-only       -> fd_fdstat_get
+  SOCKOPT_TYPE,      // int SOCK_*, read-only       -> sockopt_classify()
   SOCKOPT_JOIN4,     // struct ip_mreq, write-only  -> sock_join_multicast_v4
   SOCKOPT_LEAVE4,
   SOCKOPT_JOIN6,     // struct ipv6_mreq, write-only
@@ -122,10 +122,18 @@ static inline const struct sockopt_row *sockopt_find(int level, int name) {
 // (a bad length on a pipe is ENOTSOCK, not EINVAL).
 struct sockopt_fd {
   int family; // AF_*, or -1 when the runtime does not report it
-  int type;   // SOCK_*
+  int type;   // SOCK_*, or -1 when the runtime does not report it
+  int legacy; // the runtime predates the option table; see sockopt_legacy()
 };
 
 // Returns 0 and fills `out`, or returns the errno.
+//
+// The filetype says ENOTSOCK only when it names something that is not a
+// socket. __WASI_FILETYPE_UNKNOWN names nothing: a runtime older than this
+// file reports it for a listening TCP socket, a bound UDP socket and every
+// AF_UNIX socket past socket(), and concluding ENOTSOCK from it took every
+// option away from those sockets. Whether such a descriptor is a socket is
+// then the socket imports' to say, and they say ENOTSOCK for one that is not.
 static inline int sockopt_classify(int fd, struct sockopt_fd *out) {
   __wasi_fdstat_t fsb;
   __wasi_errno_t error = __wasi_fd_fdstat_get(fd, &fsb);
@@ -135,12 +143,43 @@ static inline int sockopt_classify(int fd, struct sockopt_fd *out) {
     case __WASI_FILETYPE_SOCKET_STREAM: out->type = SOCK_STREAM; break;
     case __WASI_FILETYPE_SOCKET_SEQPACKET: out->type = SOCK_SEQPACKET; break;
     case __WASI_FILETYPE_SOCKET_RAW: out->type = SOCK_RAW; break;
+    case __WASI_FILETYPE_UNKNOWN: out->type = -1; break;
     default: return ENOTSOCK;
   }
-  __wasi_filesize_t family = 0;
-  error = __wasi_sock_get_opt_size(fd, __WASI_SOCK_OPTION_DOMAIN, &family);
-  out->family = error == 0 ? (int)family : -1;
+  __wasi_filesize_t answer = 0;
+  error = __wasi_sock_get_opt_size(fd, __WASI_SOCK_OPTION_DOMAIN, &answer);
+  if (error == __WASI_ERRNO_NOTSOCK) return ENOTSOCK;
+  if (error == __WASI_ERRNO_BADF) return EBADF;
+  out->legacy = error != 0;
+  out->family = error == 0 ? (int)answer : -1;
+  if (out->legacy) {
+    // The family of the socket's own address, which every runtime reports.
+    __wasi_addr_port_t local;
+    if (__wasi_sock_addr_local(fd, &local) == 0) out->family = (int)local.tag;
+  }
+  if (out->type < 0) {
+    error = __wasi_sock_get_opt_size(fd, __WASI_SOCK_OPTION_TYPE, &answer);
+    if (error == __WASI_ERRNO_NOTSOCK) return ENOTSOCK;
+    if (error == 0) out->type = (int)answer;
+  }
+  if (out->type < 0 && out->legacy && (out->family == AF_INET || out->family == AF_INET6)) {
+    // Such a runtime leaves two internet sockets unnamed, a listening TCP
+    // socket and a bound UDP socket, and answers SO_BROADCAST for the
+    // datagram one alone.
+    __wasi_bool_t on = __WASI_BOOL_FALSE;
+    error = __wasi_sock_get_opt_flag(fd, __WASI_SOCK_OPTION_BROADCAST, &on);
+    out->type = error == 0 ? SOCK_DGRAM : SOCK_STREAM;
+  }
   return 0;
+}
+
+// A runtime that does not answer SO_DOMAIN predates the option table, and has
+// none of the options the table added either (the wire numbers from
+// __WASI_SOCK_OPTION_KEEP_IDLE up). It answers those numbers with whatever it
+// answers a number it has never heard of, so on such a runtime they are
+// options the socket does not have, which is the truth.
+static inline int sockopt_legacy(const struct sockopt_fd *fd, const struct sockopt_row *row) {
+  return fd->legacy && row->option >= __WASI_SOCK_OPTION_KEEP_IDLE;
 }
 
 // The errno for an option the table does not carry, which is what Linux

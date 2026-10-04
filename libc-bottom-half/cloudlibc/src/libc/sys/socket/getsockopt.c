@@ -12,6 +12,9 @@ static int fail(int error) {
 // whatever it had copied.
 static int give(void *restrict option_value, socklen_t *restrict option_len, const void *value,
                 size_t size) {
+  // The length was read before the option was; the value is written last,
+  // so a null buffer is found out here, as on Linux.
+  if (option_value == NULL) return fail(EFAULT);
   socklen_t n = *option_len < size ? *option_len : (socklen_t)size;
   memcpy(option_value, value, n);
   *option_len = n;
@@ -24,8 +27,11 @@ int getsockopt(int socket, int level, int option_name, void *restrict option_val
   int error = sockopt_classify(socket, &fd);
   if (error != 0) return fail(error);
 
+  if (option_len == NULL) return fail(EFAULT);
+
   const struct sockopt_row *row = sockopt_find(level, option_name);
-  if (row == NULL || row->access == SOCKOPT_WO) return fail(sockopt_unknown(&fd, level, 1));
+  if (row == NULL || row->access == SOCKOPT_WO || sockopt_legacy(&fd, row))
+    return fail(sockopt_unknown(&fd, level, 1));
 
   switch (row->kind) {
     case SOCKOPT_FLAG:
@@ -65,6 +71,9 @@ int getsockopt(int socket, int level, int option_name, void *restrict option_val
     }
 
     case SOCKOPT_TYPE:
+      // A socket whose type the runtime reports nowhere is not one this
+      // file may invent a type for.
+      if (fd.type < 0) return fail(ENOPROTOOPT);
       return give(option_value, option_len, &fd.type, sizeof fd.type);
 
     case SOCKOPT_LINGER: {
