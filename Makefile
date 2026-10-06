@@ -119,7 +119,7 @@ LIBC_TOP_HALF_ALL_SOURCES = \
 # Add any extra flags
 CFLAGS = $(EXTRA_CFLAGS)
 # Set the target.
-CFLAGS += --target=$(TARGET_TRIPLE) -D__WASILIBC_BUILDING_LIBC
+CFLAGS += --target=$(TARGET_TRIPLE)
 ASMFLAGS += --target=$(TARGET_TRIPLE)
 # WebAssembly floating-point match doesn't trap.
 # TODO: Add -fno-signaling-nans when the compiler supports it.
