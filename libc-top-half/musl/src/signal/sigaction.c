@@ -213,9 +213,17 @@ volatile int __eintr_handler_lock[1];
  * - No code outside this helper may assign __eintr_handler_callbacks[sig] or
  *   __eintr_handler_callbacks[sig].handler.
  */
-static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
+static int __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 	unsigned long user_flags)
 {
+	uint64_t action[4] = {
+		ksa->handler == SIG_DFL ? 0 : ksa->handler == SIG_IGN ? 1 : 2,
+		(uintptr_t)ksa->handler, user_flags, 0
+	};
+	memcpy(&action[3], &ksa->mask, _NSIG/8);
+	__wasi_errno_t err = __wasix_proc_sigaction(sig, action, NULL);
+	if (err) { errno = __wasilibc_errno_from_wasi(err); return -1; }
+
 	unsigned long *word = __fbx_handler_set+(sig-1)/(8*sizeof(long));
 	unsigned long bit = 1UL<<(sig-1)%(8*sizeof(long));
 
@@ -259,6 +267,7 @@ static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 
 	a_barrier();
 	__fbx_disposition_gen++;
+	return 0;
 }
 
 /* firebox#35F — the process-wide `__wasm_signals_blocked` flag that used to
@@ -2187,10 +2196,22 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 	}
 	int r = 0;
 	LOCK(__eintr_handler_lock);
-	ksa_old = __eintr_handler_callbacks[sig];
-	if (sa)
-		__fbx_replace_action_locked(sig, &ksa, sa->sa_flags);
+	uint64_t previous[4];
+	__wasi_errno_t err = __wasix_proc_sigaction(sig, NULL, old ? previous : NULL);
+	if (err) {
+		errno = __wasilibc_errno_from_wasi(err);
+		r = -1;
+	} else {
+		if (old) {
+			memset(&ksa_old, 0, sizeof ksa_old);
+			ksa_old.handler = previous[0] == 0 ? SIG_DFL : previous[0] == 1 ? SIG_IGN : (sighandler_t)(uintptr_t)previous[1];
+			ksa_old.flags = previous[2];
+			memcpy(&ksa_old.mask, &previous[3], _NSIG/8);
+		}
+		if (sa) r = __fbx_replace_action_locked(sig, &ksa, sa->sa_flags);
+	}
 	UNLOCK(__eintr_handler_lock);
+	if (r) return -1;
 #endif
 	if (old && !r) {
 		old->sa_handler = ksa_old.handler;
@@ -2453,18 +2474,21 @@ void __wasi_init_signals() {
     __wasi_size_t signal_count;
     err = __wasi_proc_signals_sizes_get(&signal_count);
     if (err != __WASI_ERRNO_SUCCESS) {
-        _Exit(EX_OSERR);
+        errno = __wasilibc_errno_from_wasi(err);
+        goto register_signal_callback;
     }
 	
 	__wasi_signal_disposition_t *sig_dispositions = calloc(signal_count, sizeof(__wasi_signal_disposition_t));
-    if (sig_dispositions == NULL) {
-        _Exit(EX_SOFTWARE);
+    if (sig_dispositions == NULL && signal_count) {
+        errno = ENOMEM;
+        goto register_signal_callback;
     }
 
     err = __wasi_proc_signals_get((uint8_t *)sig_dispositions);
     if (err != __WASI_ERRNO_SUCCESS) {
         free(sig_dispositions);
-        _Exit(EX_OSERR);
+        errno = __wasilibc_errno_from_wasi(err);
+        goto register_signal_callback;
     }
 
 	/* firebox#9AV — a disposition entry we cannot apply must NEVER be fatal.
@@ -2489,7 +2513,9 @@ void __wasi_init_signals() {
 	errno = 0;
 
 	free(sig_dispositions);
+	(void)__libc_sigaction(SIGHUP, NULL, NULL);
 
+register_signal_callback:
 	// Unconditionally register the signal handler at startup - otherwise, the host will
 	// eat up signals that are sent before the first sigaction call.
 	if (a_cas(&__eintr_callback_registered, 0, 1) == 0) {

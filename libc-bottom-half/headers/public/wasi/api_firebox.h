@@ -252,6 +252,10 @@ __wasi_errno_t __wasix_resource_get_nofile(uint64_t *out);
  * firebox#9AV posture for the disposition replay this sits in front of.
  * Host: lib/wasix/src/syscalls/wasix/proc_get_sigmask.rs. */
 __wasi_errno_t __wasix_proc_get_sigmask(uint64_t *mask);
+/* Runtime sigaction record: {disposition (0/1/2), handler token, flags, mask}.
+ * NULL action queries; NULL old discards the previous action. Width independent. */
+__wasi_errno_t __wasix_proc_sigaction(uint32_t sig, const uint64_t *action, uint64_t *old);
+
 
 /* firebox#BZ5 — stage the process-group id that POSIX_SPAWN_SETPGROUP asks the
  * NEXT `proc_spawn2` from THIS THREAD to stamp on its child, before that child
