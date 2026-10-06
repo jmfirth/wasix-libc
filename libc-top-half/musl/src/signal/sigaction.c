@@ -257,12 +257,8 @@ static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 	__fbx_disposition_gen++;
 	a_barrier();
 
-	int ignored = ksa->handler == SIG_IGN || (user_flags & __FBX_SA_IGNORE);
-	if (ignored) user_flags |= __FBX_SA_IGNORE;
-	struct k_sigaction stored = *ksa;
-	if (ignored) stored.handler = SIG_IGN;
-	stored.flags = (stored.flags & ~__FBX_SA_IGNORE) | (user_flags & __FBX_SA_IGNORE);
-	__eintr_handler_callbacks[sig] = stored;
+	int ignored = ksa->handler == SIG_IGN;
+	__eintr_handler_callbacks[sig] = *ksa;
 	if (ksa->handler != SIG_DFL && !ignored)
 		a_or_l(word, bit);
 	else
@@ -270,7 +266,7 @@ static void __fbx_replace_action_locked(int sig, const struct k_sigaction *ksa,
 	unsigned long *ignore = __fbx_handler_set+FBX_SIGNAL_WORDS+2+(sig-1)/(8*sizeof(long));
 	if (ignored) a_or_l(ignore, bit);
 	else a_and_l(ignore, ~bit);
-	__fbx_sa_flags[sig] = (uint32_t)(user_flags & ~__FBX_SA_IGNORE);
+	__fbx_sa_flags[sig] = (uint32_t)user_flags;
 
 	a_barrier();
 	__fbx_disposition_gen++;

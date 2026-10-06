@@ -225,12 +225,7 @@ int sigismember(const sigset_t *, int);
 
 int sigprocmask(int, const sigset_t *__restrict, sigset_t *__restrict);
 int sigsuspend(const sigset_t *);
-#if !defined(__wasilibc_unmodified_upstream) && !defined(__WASILIBC_BUILDING_LIBC)
-int __fbx_sigaction_raw(int, const struct sigaction *__restrict, struct sigaction *__restrict) __asm__("sigaction");
-static __inline int sigaction(int, const struct sigaction *__restrict, struct sigaction *__restrict) __asm__("__fbx_sigaction_inline");
-#else
 int sigaction(int, const struct sigaction *__restrict, struct sigaction *__restrict);
-#endif
 int sigpending(sigset_t *);
 int sigwait(const sigset_t *__restrict, int *__restrict);
 int sigwaitinfo(const sigset_t *__restrict, siginfo_t *__restrict);
@@ -341,48 +336,13 @@ void __SIG_IGN(int);
 #define SIG_IGN  (__SIG_IGN)
 #endif
 
-/* SIG_IGN is a callable wasm function, whose GOT and element indices may
- * differ. Tag requests at the caller, where its identity is known. The libc
- * normalizes only tagged ignore requests and keeps a private query flag, so
- * old runtimes still call the no-op. No table identity changes or additional ABI symbols are needed. */
-#define __FBX_SA_IGNORE 0x00400000U
-#if !defined(__wasilibc_unmodified_upstream) && !defined(__WASILIBC_BUILDING_LIBC)
-static __inline int sigaction(int sig, const struct sigaction *sa, struct sigaction *old)
-{
-    struct sigaction tagged;
-    if (sa) {
-        tagged = *sa;
-        tagged.sa_flags &= ~__FBX_SA_IGNORE;
-        if (tagged.sa_handler == SIG_IGN) tagged.sa_flags |= __FBX_SA_IGNORE;
-        sa = &tagged;
-    }
-    int rc = __fbx_sigaction_raw(sig, sa, old);
-    if (!rc && old) {
-        if (old->sa_flags & __FBX_SA_IGNORE) old->sa_handler = SIG_IGN;
-        old->sa_flags &= ~__FBX_SA_IGNORE;
-    }
-    return rc;
-}
-static __inline void (*signal(int, void (*)(int)))(int) __asm__("__fbx_signal_inline");
-static __inline void (*signal(int sig, void (*handler)(int)))(int)
-{
-    struct sigaction sa = {0}, old;
-    sa.sa_handler = handler;
-    sa.sa_flags = SA_RESTART;
-    if (sigaction(sig, &sa, &old)) return SIG_ERR;
-    return old.sa_handler;
-}
-#endif
-
 #ifdef __wasilibc_unmodified_upstream /* Make sig_atomic_t 64-bit on wasm64 */
 typedef int sig_atomic_t;
 #else
 typedef long sig_atomic_t;
 #endif
 
-#if defined(__wasilibc_unmodified_upstream) || defined(__WASILIBC_BUILDING_LIBC)
 void (*signal(int, void (*)(int)))(int);
-#endif
 int raise(int);
 
 #ifdef __wasilibc_unmodified_upstream /* WASI has no sigtimedwait */
