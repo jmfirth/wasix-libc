@@ -27,13 +27,6 @@
 #define FBX_WASIX_V1 "wasix_32v1"
 #endif
 
-int32_t __imported_wasix_fbx_proc_sigaction(int32_t, intptr_t, intptr_t)
-    __attribute__((__import_module__(FBX_WASIX_V1), __import_name__("proc_sigaction")));
-__wasi_errno_t __wasix_proc_sigaction(uint32_t sig, const uint64_t *action, uint64_t *old)
-{
-    return (uint16_t)__imported_wasix_fbx_proc_sigaction((int32_t)sig, (intptr_t)action, (intptr_t)old);
-}
-
 int32_t __imported_wasix_fbx_fd_lock(int32_t,int32_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_lock")));
 __wasi_errno_t __wasix_fd_lock(__wasi_fd_t fd,uint32_t op){return (uint16_t)__imported_wasix_fbx_fd_lock((int32_t)fd,(int32_t)op);}
 int32_t __imported_wasix_fbx_fd_lock_range(int32_t,int32_t,int32_t,int32_t,int64_t,int64_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("fd_lock_range")));

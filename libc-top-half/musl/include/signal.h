@@ -336,6 +336,40 @@ void __SIG_IGN(int);
 #define SIG_IGN  (__SIG_IGN)
 #endif
 
+/* SIG_IGN is a callable wasm function, whose GOT and element indices may
+ * differ. Tag requests at the caller, where its identity is known. The libc
+ * normalizes only tagged ignore requests and keeps a private query flag, so
+ * old runtimes still call the no-op. No table identity changes or additional ABI symbols are needed. */
+#define __FBX_SA_IGNORE 0x00400000U
+#if !defined(__wasilibc_unmodified_upstream) && !defined(__WASILIBC_BUILDING_LIBC)
+static __inline int __fbx_sigaction(int sig, const struct sigaction *sa, struct sigaction *old)
+{
+    struct sigaction tagged;
+    if (sa) {
+        tagged = *sa;
+        tagged.sa_flags &= ~__FBX_SA_IGNORE;
+        if (tagged.sa_handler == SIG_IGN) tagged.sa_flags |= __FBX_SA_IGNORE;
+        sa = &tagged;
+    }
+    int rc = sigaction(sig, sa, old);
+    if (!rc && old) {
+        if (old->sa_flags & __FBX_SA_IGNORE) old->sa_handler = SIG_IGN;
+        old->sa_flags &= ~__FBX_SA_IGNORE;
+    }
+    return rc;
+}
+static __inline void (*__fbx_signal(int sig, void (*handler)(int)))(int)
+{
+    struct sigaction sa = {0}, old;
+    sa.sa_handler = handler;
+    sa.sa_flags = SA_RESTART;
+    if (__fbx_sigaction(sig, &sa, &old)) return SIG_ERR;
+    return old.sa_handler;
+}
+#define sigaction(...) __fbx_sigaction(__VA_ARGS__)
+#define signal(...) __fbx_signal(__VA_ARGS__)
+#endif
+
 #ifdef __wasilibc_unmodified_upstream /* Make sig_atomic_t 64-bit on wasm64 */
 typedef int sig_atomic_t;
 #else
