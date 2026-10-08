@@ -1136,6 +1136,12 @@ typedef uint16_t __wasi_eventrwflags_t;
  */
 #define __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP ((__wasi_eventrwflags_t)+(1 << 0))
 
+/* A socket error is pending (SO_ERROR). Additive event payload extension:
+ * old libc masks HANGUP and ignores bit 1; old runtimes never set bit 1. */
+#define __WASI_EVENTRWFLAGS_FD_READWRITE_ERROR ((__wasi_eventrwflags_t)+(1 << 1))
+/* Stream peer read-half closure, distinct from pipe EOF. Also additive. */
+#define __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED ((__wasi_eventrwflags_t)+(1 << 2))
+
 /**
  * The contents of an `event` when type is `eventtype::fd_read` or
  * `eventtype::fd_write`.
@@ -3440,6 +3446,12 @@ typedef uint16_t __wasi_eventrwflags_t;
  * The peer of this socket has closed or disconnected.
  */
 #define __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP ((__wasi_eventrwflags_t)+(1 << 0))
+
+/* A socket error is pending (SO_ERROR). Additive event payload extension:
+ * old libc masks HANGUP and ignores bit 1; old runtimes never set bit 1. */
+#define __WASI_EVENTRWFLAGS_FD_READWRITE_ERROR ((__wasi_eventrwflags_t)+(1 << 1))
+/* Stream peer read-half closure, distinct from pipe EOF. Also additive. */
+#define __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED ((__wasi_eventrwflags_t)+(1 << 2))
 
 /**
  * The contents of an `event` when type is `eventtype::fd_read` or

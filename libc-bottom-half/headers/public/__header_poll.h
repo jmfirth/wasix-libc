@@ -9,6 +9,8 @@
 
 #define POLLIN POLLRDNORM
 #define POLLOUT POLLWRNORM
+/* Stream peer has shut down its sending direction; reported when requested. */
+#define POLLRDHUP 0x8
 
 #define POLLERR 0x1000
 #define POLLHUP 0x2000

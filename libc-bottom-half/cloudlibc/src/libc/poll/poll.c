@@ -13,7 +13,7 @@
 
 // firebox#XD4 — does this entry ask for input or output readiness at all?
 static bool wants_io(const struct pollfd *pollfd) {
-  return (pollfd->events & (POLLRDNORM | POLLIN | POLLWRNORM | POLLOUT)) != 0;
+  return (pollfd->events & (POLLRDNORM | POLLIN | POLLWRNORM | POLLOUT | POLLRDHUP)) != 0;
 }
 
 int poll(struct pollfd *fds, size_t nfds, int timeout) {
@@ -94,7 +94,7 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     // but equivalent for TCP sockets, pipes, and regular files.  Callers
     // that set POLLIN (curl, Rust std) must see the same behaviour as
     // callers that set POLLRDNORM (POSIX equivalence).
-    if ((pollfd->events & (POLLRDNORM | POLLIN)) != 0) {
+    if ((pollfd->events & (POLLRDNORM | POLLIN | POLLRDHUP)) != 0) {
       __wasi_subscription_t *subscription = &subscriptions[nsubscriptions++];
       *subscription = (__wasi_subscription_t){
           .userdata = (uintptr_t)pollfd,
@@ -185,7 +185,10 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
     if (event->type == __WASI_EVENTTYPE_FD_READ ||
         event->type == __WASI_EVENTTYPE_FD_WRITE) {
       struct pollfd *pollfd = (struct pollfd *)(uintptr_t)event->userdata;
+      if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_ERROR)
+        pollfd->revents |= POLLERR;
       if (!wants_io(pollfd) && event->error == 0 &&
+          (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_ERROR) == 0 &&
           (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) == 0) {
         // firebox#XD4 — a status subscription that only reports READY:
         // nothing the caller asked about. Demote it and poll again.
@@ -195,27 +198,38 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
       }
       if (!wants_io(pollfd) && event->error == 0) {
         // firebox#XD4 — status entry with a hangup: report only POLLHUP.
-        pollfd->revents |= POLLHUP;
+        if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP)
+          pollfd->revents |= POLLHUP;
+        if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED)
+          pollfd->revents |= pollfd->events & POLLRDHUP;
         continue;
       }
       if (event->error == __WASI_ERRNO_BADF) {
         // Invalid file descriptor.
         pollfd->revents |= POLLNVAL;
       } else if (event->error == __WASI_ERRNO_PIPE) {
-        // Hangup on write side of pipe.
-        pollfd->revents |= POLLHUP;
+        // Linux reports an error when a pipe has no reader.
+        pollfd->revents |= POLLERR;
       } else if (event->error != 0) {
         // Another error occurred.
         pollfd->revents |= POLLERR;
       } else {
         // Data can be read or written.
         if (event->type == __WASI_EVENTTYPE_FD_READ) {
-            pollfd->revents |= POLLRDNORM | POLLIN;
+            // Linux pipe EOF is HUP alone; a stream EOF remains readable.
+            if (event->fd_readwrite.nbytes != 0 ||
+                !(event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) ||
+                (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED))
+              pollfd->revents |= pollfd->events & (POLLRDNORM | POLLIN);
+            if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED)
+              pollfd->revents |= pollfd->events & POLLRDHUP;
             if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) {
               pollfd->revents |= POLLHUP;
             }
         } else if (event->type == __WASI_EVENTTYPE_FD_WRITE) {
-            pollfd->revents |= POLLWRNORM | POLLOUT;
+            pollfd->revents |= pollfd->events & (POLLWRNORM | POLLOUT);
+            if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED)
+              pollfd->revents |= pollfd->events & POLLRDHUP;
             if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) {
               pollfd->revents |= POLLHUP;
             }
@@ -228,9 +242,8 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
   int retval = 0;
   for (size_t i = 0; i < nfds; ++i) {
     struct pollfd *pollfd = &fds[i];
-    // POLLHUP contradicts with POLLWRNORM.
-    if ((pollfd->revents & POLLHUP) != 0)
-      pollfd->revents &= ~POLLWRNORM;
+    // Socket hangup and writability coexist on Linux. Pipe write errors
+    // arrive as ERR above and do not acquire writable readiness here.
     if (pollfd->revents != 0)
       ++retval;
   }
