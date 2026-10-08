@@ -216,11 +216,16 @@ int poll(struct pollfd *fds, size_t nfds, int timeout) {
       } else {
         // Data can be read or written.
         if (event->type == __WASI_EVENTTYPE_FD_READ) {
-            // Linux pipe EOF is HUP alone; a stream EOF remains readable.
-            if (event->fd_readwrite.nbytes != 0 ||
-                !(event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) ||
-                (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED))
-              pollfd->revents |= pollfd->events & (POLLRDNORM | POLLIN);
+            // A read-ready event is readable whatever else it carries. Do
+            // NOT infer "pipe at EOF, so not readable" from `nbytes == 0`
+            // with HANGUP: the runtime reports exactly that for a regular
+            // file and for /dev/zero, with or without data, and Linux polls
+            // those POLLIN always. Dropping POLLIN there turns `poll()` on
+            // a file into a bare POLLHUP and the caller never reads it
+            // (firebox#DSR review). A widowed, drained pipe therefore still
+            // reports POLLIN beside POLLHUP, as it did before this change;
+            // the read returns 0.
+            pollfd->revents |= pollfd->events & (POLLRDNORM | POLLIN);
             if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_READ_CLOSED)
               pollfd->revents |= pollfd->events & POLLRDHUP;
             if (event->fd_readwrite.flags & __WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP) {
