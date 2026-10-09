@@ -43,7 +43,17 @@ int main(int argc, char **argv)
     row("socket", sock, ENOTTY);
     close(f);
     row("closed", f, EBADF);
-    if (argc > 2 && !strcmp(argv[2], "terminal")) row("terminal", 0, 0);
+    if (argc > 2 && !strcmp(argv[2], "terminal")) {
+        row("terminal", 0, 0);
+        row("inherited-fd5", 5, 0);
+        int duplicated = fcntl(0, F_DUPFD, 10);
+        if (duplicated < 0) { perror("dup terminal"); return 2; }
+        row("duplicated", duplicated, 0);
+        int fresh = open("/dev/tty", O_RDWR);
+        if (fresh < 0) { perror("open /dev/tty"); return 2; }
+        row("fresh-tty", fresh, 0);
+        close(duplicated); close(fresh);
+    }
     close(p[0]); close(p[1]); close(nullfd); close(sock);
     return failures != 0;
 }

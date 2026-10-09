@@ -9,9 +9,20 @@
 extern "C" {
 #endif
 
-/* The tty ABI is process-wide. Validate the descriptor before using it. */
-__wasi_errno_t __wasilibc_tty_get_for_fd(int fd, __wasi_tty_t *tty)
-    __attribute__((visibility("hidden")));
+/* fd_fdstat_get asks the runtime about the descriptor object, including dup'd
+ * terminals and freshly opened /dev/tty. tty_get supplies process-wide geometry
+ * only after that descriptor-specific check. Inline so no ABI symbol is added. */
+static inline __wasi_errno_t __wasilibc_tty_get_for_fd(int fd, __wasi_tty_t *tty)
+{
+    __wasi_fdstat_t stat;
+    __wasi_errno_t error = __wasi_fd_fdstat_get(fd, &stat);
+    if (error) return error;
+    if (stat.fs_filetype != __WASI_FILETYPE_CHARACTER_DEVICE ||
+        (stat.fs_rights_base & (__WASI_RIGHTS_FD_SEEK | __WASI_RIGHTS_FD_TELL)))
+        return __WASI_ERRNO_NOTTY;
+    error = __wasi_tty_get(tty);
+    return error == __WASI_ERRNO_NOTSUP ? __WASI_ERRNO_NOTTY : error;
+}
 
 struct stat;
 struct timespec;

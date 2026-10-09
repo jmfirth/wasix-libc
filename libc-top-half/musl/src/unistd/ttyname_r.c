@@ -33,25 +33,14 @@ int ttyname_r(int fd, char *name, size_t size)
 
 	return 0;
 #else
-	const char *path = fd == 0 ? "/dev/stdin" : fd == 1 ? "/dev/stdout" : "/dev/stderr";
+	const char *path = fd == 0 ? "/dev/stdin" : fd == 1 ? "/dev/stdout" : fd == 2 ? "/dev/stderr" : "/dev/tty";
 	__wasi_tty_t tty;
 	int r = __wasilibc_tty_get_for_fd(fd, &tty);
 	if (r != 0) {
 		return __wasilibc_errno_from_wasi(r);
 	}
 	if (size <= strlen(path)) return ERANGE;
-	if (fd == 0 && tty.stdin_tty == __WASI_BOOL_TRUE)  {
-		strncpy(name, "/dev/stdin", size);
-		return 0;
-	}
-	if (fd == 1 && tty.stdout_tty == __WASI_BOOL_TRUE)  {
-		strncpy(name, "/dev/stdout", size);
-		return 0;
-	}
-	if (fd == 2 && tty.stderr_tty == __WASI_BOOL_TRUE)  {
-		strncpy(name, "/dev/stderr", size);
-		return 0;
-	}
-	return ENOTTY;
+	strcpy(name, path);
+	return 0;
 #endif
 }
