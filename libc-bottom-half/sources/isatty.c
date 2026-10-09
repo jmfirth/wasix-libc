@@ -12,9 +12,9 @@ int __isatty(int fd) {
         return 0;
     }
 
-    // A tty is a character device that we can't seek or tell on.
-    if (statbuf.fs_filetype != __WASI_FILETYPE_CHARACTER_DEVICE ||
-        (statbuf.fs_rights_base & (__WASI_RIGHTS_FD_SEEK | __WASI_RIGHTS_FD_TELL)) != 0) {
+    // The runtime refines non-terminal character devices to REGULAR_FILE in
+    // fd_fdstat_get. Rights describe permissions, not whether the object is a tty.
+    if (statbuf.fs_filetype != __WASI_FILETYPE_CHARACTER_DEVICE) {
         /* firebox#87F: the only site in the tree that named a WASI errno
          * constant on the guest side of the boundary. This is not a
          * translation -- nothing came back from the host here, the value is
