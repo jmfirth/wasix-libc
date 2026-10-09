@@ -9,6 +9,10 @@
 extern "C" {
 #endif
 
+/* The tty ABI is process-wide. Validate the descriptor before using it. */
+__wasi_errno_t __wasilibc_tty_get_for_fd(int fd, __wasi_tty_t *tty)
+    __attribute__((visibility("hidden")));
+
 struct stat;
 struct timespec;
 

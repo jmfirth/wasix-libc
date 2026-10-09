@@ -15,7 +15,7 @@ int tcsetwinsize(int fd, const struct winsize *wsz)
 	return syscall(SYS_ioctl, fd, TIOCSWINSZ, wsz);
 #else
 	__wasi_tty_t tty;
-	int r = __wasi_tty_get(&tty);
+	int r = __wasilibc_tty_get_for_fd(fd, &tty);
 	if (r != 0) {
 		errno = __wasilibc_errno_from_wasi(r);
 		return -1;

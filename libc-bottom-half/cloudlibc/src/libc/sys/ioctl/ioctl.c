@@ -86,7 +86,7 @@ int ioctl(int fildes, int request, ...) {
       va_end(ap);
 
       __wasi_tty_t tty;
-      int r = __wasi_tty_get(&tty);
+      int r = __wasilibc_tty_get_for_fd(fildes, &tty);
       if (r != 0) {
         errno = __wasilibc_errno_from_wasi(r);
         return -1;
@@ -106,6 +106,11 @@ int ioctl(int fildes, int request, ...) {
       va_end(ap);
 
       __wasi_tty_t tty;
+      int error = __wasilibc_tty_get_for_fd(fildes, &tty);
+      if (error) {
+        errno = __wasilibc_errno_from_wasi(error);
+        return -1;
+      }
       tty.cols = wsz->ws_col;
       tty.rows = wsz->ws_row;
       tty.width = wsz->ws_xpixel;
