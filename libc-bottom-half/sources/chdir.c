@@ -21,20 +21,27 @@ static int __wasilibc_cwd_is_synced = 0;
 
 int chdir_legacy(const char *path)
 {
-    static char *relative_buf = NULL;
-    static size_t relative_buf_len = 0;
+    // firebox#PHH: owned by this call. Upstream keeps one static buffer here,
+    // which two threads calling chdir() at once would both resize and fill.
+    char *relative_buf = NULL;
+    size_t relative_buf_len = 0;
     // Find a preopen'd directory as well as a relative path we're anchored
     // from which we're changing directories to.
     const char *abs;
     int parent_fd = __wasilibc_find_relpath_alloc(path, &abs, &relative_buf, &relative_buf_len, 1);
-    if (parent_fd == -1)
+    if (parent_fd == -1) {
+        free(relative_buf);
         return -1;
+    }
     // Make sure that this directory we're accessing is indeed a directory.
     struct stat dirinfo;
     int ret = fstatat(parent_fd, relative_buf, &dirinfo, 0);
-    if (ret == -1)
+    if (ret == -1) {
+        free(relative_buf);
         return -1;
+    }
     if (!S_ISDIR(dirinfo.st_mode)) {
+        free(relative_buf);
         errno = ENOTDIR;
         return -1;
     }
@@ -50,6 +57,7 @@ int chdir_legacy(const char *path)
     int mid = copy_relative && abs[0] != 0;
     char *new_cwd = malloc(1 + abs_len + mid + (copy_relative ? strlen(relative_buf) : 0) + 1);
     if (new_cwd == NULL) {
+        free(relative_buf);
         errno = ENOMEM;
         return -1;
     }
@@ -59,6 +67,7 @@ int chdir_legacy(const char *path)
         new_cwd[1 + abs_len] = '/';
     if (copy_relative)
         strcpy(new_cwd + 1 + abs_len + mid, relative_buf);
+    free(relative_buf);
 
     __wasilibc_cwd_lock();
     char *prev_cwd = __wasilibc_cwd;
@@ -107,15 +116,28 @@ int __wasilibc_resync_cwd(void)
     return 0;
 }
 
-static const char *make_absolute(const char *path) {
+// firebox#PHH: the absolute form of `path` is built in storage that belongs to
+// the CALLER — `inline_buf` when it fits, otherwise a block returned through
+// `*heap` that the caller frees. Upstream builds it in one process-wide static
+// buffer and fills that buffer after dropping the cwd lock, so threads
+// resolving relative pathnames at once shared it: a thread was answered for
+// another thread's pathname, and `__wasilibc_find_relpath_alloc` measured the
+// string, sized its own buffer, then copied a string another thread had
+// meanwhile made longer — a write past the end of a heap block (`git status`
+// preload workers: "malloc(): heap corruption or invalid pointer").
+// A static per-thread buffer would also be correct but is never released when
+// its thread exits; nothing outlives the call here.
+#define MAKE_ABSOLUTE_INLINE 256
+static const char *make_absolute(const char *path, char *inline_buf, char **heap) {
+    *heap = NULL;
     // if the libc has not synced with the runtime yet, call into the runtime to get the cwd
     if (!__wasilibc_cwd_is_synced) {
         char cwd[256];
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
             char *new_cwd = malloc(strlen(cwd) + 1);
-            if (new_cwd != NULL) {
-                strcpy(new_cwd, cwd);
-            }
+            if (new_cwd == NULL)
+                return NULL;
+            strcpy(new_cwd, cwd);
 
             __wasilibc_cwd_lock();
             char *prev_cwd = __wasilibc_cwd;
@@ -132,9 +154,6 @@ static const char *make_absolute(const char *path) {
         }
     }
 
-    
-    static char *make_absolute_buf = NULL;
-    static size_t make_absolute_len = 0;
 
     // If this path is absolute, then we return it as-is.
     if (path[0] == '/') {
@@ -161,18 +180,16 @@ static const char *make_absolute(const char *path) {
     size_t path_len = path ? strlen(path) : 0;
     int need_slash = __wasilibc_cwd[cwd_len - 1] == '/' ? 0 : 1;
     size_t alloc_len = cwd_len + path_len + 1 + need_slash;
-    if (alloc_len > make_absolute_len) {
-        // firebox #4SF: same malloc-on-NULL class as __wasilibc_find_relpath_alloc below —
-        // make_absolute_buf starts NULL, so the first call would realloc(NULL,n). Not exercised by
-        // flockfile-list (it hits the relpath buffer), but fixed together (Inv-1: fix the class).
-        char *tmp = make_absolute_buf ? realloc(make_absolute_buf, alloc_len) : malloc(alloc_len);
-        if (tmp == NULL) {
+    char *make_absolute_buf = inline_buf;
+    if (alloc_len > MAKE_ABSOLUTE_INLINE) {
+        make_absolute_buf = malloc(alloc_len);
+        if (make_absolute_buf == NULL) {
             __wasilibc_cwd_unlock();
             return NULL;
         }
-        make_absolute_buf = tmp;
-        make_absolute_len = alloc_len;
+        *heap = make_absolute_buf;
     }
+    // The cwd is copied under its lock; the rest is this call's own storage.
     strcpy(make_absolute_buf, __wasilibc_cwd);
     __wasilibc_cwd_unlock();
 
@@ -198,8 +215,11 @@ int __wasilibc_find_relpath_alloc(
     size_t *relative_buf_len,
     int can_realloc
 ) {
-    // First, make our path absolute taking the cwd into account.
-    const char *abspath = make_absolute(path);
+    // First, make our path absolute taking the cwd into account. `rel` below
+    // points into it, so it lives until `rel` has been copied out.
+    char inline_buf[MAKE_ABSOLUTE_INLINE];
+    char *heap;
+    const char *abspath = make_absolute(path, inline_buf, &heap);
     if (abspath == NULL) {
         errno = ENOMEM;
         return -1;
@@ -210,12 +230,15 @@ int __wasilibc_find_relpath_alloc(
     // into `relative_buf`.
     const char *rel;
     int fd = __wasilibc_find_abspath(abspath, abs_prefix, &rel);
-    if (fd == -1)
+    if (fd == -1) {
+        free(heap);
         return -1;
+    }
 
     size_t rel_len = strlen(rel);
     if (*relative_buf_len < rel_len + 1) {
         if (!can_realloc) {
+            free(heap);
             errno = ERANGE;
             return -1;
         }
@@ -226,6 +249,7 @@ int __wasilibc_find_relpath_alloc(
         // fill so the allocation profile matches what portable code — and Linux musl — expects.
         char *tmp = *relative_buf ? realloc(*relative_buf, rel_len + 1) : malloc(rel_len + 1);
         if (tmp == NULL) {
+            free(heap);
             errno = ENOMEM;
             return -1;
         }
@@ -233,6 +257,7 @@ int __wasilibc_find_relpath_alloc(
         *relative_buf_len = rel_len + 1;
     }
     strcpy(*relative_buf, rel);
+    free(heap);
     return fd;
 }
 
