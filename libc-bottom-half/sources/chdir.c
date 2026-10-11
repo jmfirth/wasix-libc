@@ -17,9 +17,19 @@ void __wasilibc_cwd_unlock(void);
 #endif
 extern char *__wasilibc_cwd;
 static int __wasilibc_cwd_mallocd = 0;
+// Both are written only under the cwd lock and read without it, which is why
+// every access goes through these. `__wasilibc_cwd_generation` counts
+// publications of the mirror.
 static int __wasilibc_cwd_is_synced = 0;
+static unsigned __wasilibc_cwd_generation = 0;
+#define cwd_synced() __atomic_load_n(&__wasilibc_cwd_is_synced, __ATOMIC_ACQUIRE)
+#define cwd_set_synced(v) __atomic_store_n(&__wasilibc_cwd_is_synced, (v), __ATOMIC_RELEASE)
+#define cwd_generation() __atomic_load_n(&__wasilibc_cwd_generation, __ATOMIC_ACQUIRE)
 
-int chdir_legacy(const char *path)
+// Checks that `path` names a directory this process can reach, and hands back
+// the legacy spelling of it (malloc'd): "/" + preopen prefix + "/" + rest,
+// not normalized.
+static int chdir_resolve(const char *path, char **new_cwd_out)
 {
     // firebox#PHH: owned by this call. Upstream keeps one static buffer here,
     // which two threads calling chdir() at once would both resize and fill.
@@ -68,52 +78,143 @@ int chdir_legacy(const char *path)
     if (copy_relative)
         strcpy(new_cwd + 1 + abs_len + mid, relative_buf);
     free(relative_buf);
-
-    __wasilibc_cwd_lock();
-    char *prev_cwd = __wasilibc_cwd;
-    __wasilibc_cwd = new_cwd;
-
-    if (__wasilibc_cwd_mallocd)
-        free(prev_cwd);
-
-    __wasilibc_cwd_mallocd = 1;
-    __wasilibc_cwd_unlock();
+    *new_cwd_out = new_cwd;
     return 0;
 }
 
-// firebox#1K9: re-read the runtime's authoritative cwd into the libc mirror.
+// Caller holds the cwd lock. Takes ownership of `new_cwd` and returns the
+// string it replaced when that one is the mirror's to free, which the caller
+// does after unlocking: nothing with a loop in it runs under this lock here.
+static char *cwd_publish_locked(char *new_cwd)
+{
+    char *prev_cwd = __wasilibc_cwd_mallocd ? __wasilibc_cwd : NULL;
+    __wasilibc_cwd = new_cwd;
+    __wasilibc_cwd_mallocd = 1;
+    __atomic_store_n(&__wasilibc_cwd_generation, __wasilibc_cwd_generation + 1, __ATOMIC_RELEASE);
+    return prev_cwd;
+}
+
+// The mirror could not be refilled. Counts as a publication, so a refill that
+// asked its question before this one failed asks again instead of declaring
+// the mirror synced with an answer that may predate the change behind it.
+static void cwd_mark_unsynced(void)
+{
+    __wasilibc_cwd_lock();
+    cwd_set_synced(0);
+    __atomic_store_n(&__wasilibc_cwd_generation, __wasilibc_cwd_generation + 1, __ATOMIC_RELEASE);
+    __wasilibc_cwd_unlock();
+}
+
+// Moves the libc mirror ONLY; the runtime's cwd is untouched. Kept for callers
+// of this exported name. chdir() below no longer goes through it.
+int chdir_legacy(const char *path)
+{
+    char *new_cwd;
+    if (chdir_resolve(path, &new_cwd) != 0)
+        return -1;
+    __wasilibc_cwd_lock();
+    char *prev_cwd = cwd_publish_locked(new_cwd);
+    __wasilibc_cwd_unlock();
+    free(prev_cwd);
+    return 0;
+}
+
+// firebox#PHH: the mirror is a cache of the runtime's cwd, and it is filled in
+// ONE way: ask the runtime, then publish the answer only if no other
+// publication happened since the question was asked; otherwise ask again.
+// chdir() and fchdir() change the runtime's cwd first and then refill; the
+// first sync in make_absolute() refills.
 //
-// wasi-libc resolves relative paths in userspace against `__wasilibc_cwd`, so
-// any operation that moves the cwd host-side WITHOUT a path in hand has to
-// refresh the mirror or every later relative path resolves against a stale
-// directory. `chdir()` does not need this — it has the path and feeds it to
-// chdir_legacy. `fchdir()` (fchdir.c) moves the cwd by DESCRIPTOR and has no
-// path, so it calls here.
+// Before this there were three ways, and they disagreed. The first sync tested
+// its flag and queried the runtime with no lock, so an answer read before
+// another thread's chdir could be published after it and pin the old directory
+// for good. chdir() published its own spelling of the new directory BEFORE the
+// runtime had accepted the change, so a refused chdir still moved the mirror,
+// and two chdir() calls could reach the mirror and the runtime in opposite
+// orders. Now nothing is published for a change the runtime refused, and
+// whichever refill publishes last asked its question after the last change:
+// a refill that asked earlier finds the generation moved and asks again.
 //
-// Returns 0 on success. On failure the mirror is left explicitly UNSYNCED so
-// the next make_absolute() below re-reads it, rather than leaving a stale cwd
-// sitting behind a value that looks current.
+// The runtime is asked with NO lock held, and the lock covers only the
+// compare-and-publish, which has no call and no loop in it. That is deliberate:
+// the runtime delivers signals inside its calls and at loop back-edges, a
+// handler may resolve a relative pathname, and that takes this lock.
+//
+// What this does not give: while one thread is inside chdir(), between the
+// runtime's change and the refill, another thread can see getcwd() report the
+// new directory and still resolve a relative name in the old one. The order
+// before this change had the same window the other way round.
+//
+// `only_if_unsynced` is the first sync: it gives up its answer if another
+// refill has synced the mirror meanwhile. Returns 0, or -1 with errno set to
+// what the runtime reported (ENOMEM only when an allocation failed) and the
+// mirror marked UNSYNCED, so the next resolution asks again rather than
+// trusting a value that merely looks current.
+static int cwd_refresh(int only_if_unsynced)
+{
+    for (;;) {
+        unsigned asked_at = cwd_generation();
+
+        // The common cwd fits the first block. A longer one is sized from
+        // the length the runtime reports with ERANGE; a runtime that reports
+        // none still terminates, by doubling. Each block is zeroed and one
+        // byte longer than the runtime is told, so the string is terminated
+        // whether or not the runtime writes the terminator itself.
+        size_t cap = 256;
+        char *fresh = NULL;
+        __wasi_errno_t error;
+        for (;;) {
+            fresh = calloc(1, cap + 1);
+            if (fresh == NULL) {
+                cwd_mark_unsynced();
+                errno = ENOMEM;
+                return -1;
+            }
+            __wasi_pointersize_t size = cap;
+            error = __wasi_getcwd((uint8_t *)fresh, &size);
+            if (error != __WASI_ERRNO_RANGE)
+                break;
+            free(fresh);
+            fresh = NULL;
+            cap = (size_t)size > cap ? (size_t)size : cap * 2;
+            if (cap > (size_t)1 << 24)
+                break; // still ERANGE: not a pathname any caller could use
+        }
+        if (error != 0) {
+            free(fresh);
+            cwd_mark_unsynced();
+            errno = __wasilibc_errno_from_wasi(error);
+            return -1;
+        }
+
+        __wasilibc_cwd_lock();
+        if (only_if_unsynced && __wasilibc_cwd_is_synced) {
+            __wasilibc_cwd_unlock();
+            free(fresh);
+            return 0;
+        }
+        if (__wasilibc_cwd_generation != asked_at) {
+            // Someone published since we asked; our answer may predate
+            // their change.
+            __wasilibc_cwd_unlock();
+            free(fresh);
+            continue;
+        }
+        char *prev_cwd = cwd_publish_locked(fresh);
+        cwd_set_synced(1);
+        __wasilibc_cwd_unlock();
+        free(prev_cwd);
+        return 0;
+    }
+}
+
+// firebox#1K9: re-read the runtime's authoritative cwd into the libc mirror,
+// for fchdir() (fchdir.c), which moves the cwd by DESCRIPTOR and has no path.
+// Returns 0 on success; on failure the mirror is left UNSYNCED (see
+// cwd_refresh).
 int __wasilibc_resync_cwd(void)
 {
-    // getcwd(NULL, 0) asks the runtime and mallocs to fit (getcwd.c), so there
-    // is no buffer size to guess and no truncation case to get wrong.
-    char *fresh = getcwd(NULL, 0);
-    if (fresh == NULL) {
-        __wasilibc_cwd_lock();
-        __wasilibc_cwd_is_synced = 0;
-        __wasilibc_cwd_unlock();
-        return -1;
-    }
-
-    __wasilibc_cwd_lock();
-    char *prev_cwd = __wasilibc_cwd;
-    __wasilibc_cwd = fresh;
-    if (__wasilibc_cwd_mallocd)
-        free(prev_cwd);
-    __wasilibc_cwd_mallocd = 1;
-    __wasilibc_cwd_is_synced = 1;
-    __wasilibc_cwd_unlock();
-    return 0;
+    return cwd_refresh(0);
 }
 
 // firebox#PHH: the absolute form of `path` is built in storage that belongs to
@@ -130,30 +231,10 @@ int __wasilibc_resync_cwd(void)
 #define MAKE_ABSOLUTE_INLINE 256
 static const char *make_absolute(const char *path, char *inline_buf, char **heap) {
     *heap = NULL;
-    // if the libc has not synced with the runtime yet, call into the runtime to get the cwd
-    if (!__wasilibc_cwd_is_synced) {
-        char cwd[256];
-        if (getcwd(cwd, sizeof(cwd)) != NULL) {
-            char *new_cwd = malloc(strlen(cwd) + 1);
-            if (new_cwd == NULL)
-                return NULL;
-            strcpy(new_cwd, cwd);
-
-            __wasilibc_cwd_lock();
-            char *prev_cwd = __wasilibc_cwd;
-            __wasilibc_cwd = new_cwd;
-
-            if (__wasilibc_cwd_mallocd)
-                free(prev_cwd);
-
-            __wasilibc_cwd_is_synced = 1; // we synced the cwd
-            __wasilibc_cwd_mallocd = 1; // we allocated so next time, prev_cwd must be freed.
-            __wasilibc_cwd_unlock();
-        } else {
-            return NULL;
-        }
-    }
-
+    // If the libc has not synced with the runtime yet, ask the runtime for
+    // the cwd. On failure errno is the runtime's.
+    if (!cwd_synced() && cwd_refresh(1) != 0)
+        return NULL;
 
     // If this path is absolute, then we return it as-is.
     if (path[0] == '/') {
@@ -185,6 +266,7 @@ static const char *make_absolute(const char *path, char *inline_buf, char **heap
         make_absolute_buf = malloc(alloc_len);
         if (make_absolute_buf == NULL) {
             __wasilibc_cwd_unlock();
+            errno = ENOMEM;
             return NULL;
         }
         *heap = make_absolute_buf;
@@ -221,7 +303,8 @@ int __wasilibc_find_relpath_alloc(
     char *heap;
     const char *abspath = make_absolute(path, inline_buf, &heap);
     if (abspath == NULL) {
-        errno = ENOMEM;
+        // errno is make_absolute's: the runtime's own error when the cwd could
+        // not be read, ENOMEM only for a failed allocation.
         return -1;
     }
 
@@ -263,18 +346,29 @@ int __wasilibc_find_relpath_alloc(
 
 int chdir(const char *path)
 {
-    // we run the legacy chdir function that emulates real
-    // current directory functionality for backwards compatibility reasons
-    if (chdir_legacy(path) != 0) {
-        // chdir_legacy already sets errno
+    // The libc-side check comes first and decides nothing but the error: it
+    // tells "not a directory" from "no such entry", which the runtime folds
+    // into ENOENT. Its spelling of the directory is not what gets published.
+    char *legacy_spelling;
+    if (chdir_resolve(path, &legacy_spelling) != 0) {
+        // chdir_resolve already sets errno
         return -1;
     }
+    free(legacy_spelling);
 
-    // otherwise we let the operating system know we are changing the current path
+    // Change the runtime's cwd, then publish what it reports (firebox#PHH, at
+    // cwd_refresh): nothing is published for a change the runtime refused,
+    // and the mirror is the runtime's own answer.
     __wasi_errno_t error = __wasi_chdir(path);
     if (error != 0) {
       errno = __wasilibc_errno_from_wasi(error);
       return -1;
     }
+
+    // The cwd HAS moved. A failed re-read leaves the mirror UNSYNCED for the
+    // next resolution to retry; it is not a failed chdir.
+    int saved_errno = errno;
+    (void)cwd_refresh(0);
+    errno = saved_errno;
     return 0;
 }
