@@ -134,7 +134,7 @@ void *sbrk(intptr_t increment) {
     // embedder owns (blink's kSkew-relocated guest). dlmalloc treats the -1 as
     // OOM and returns NULL for that allocation, rather than corrupting the
     // guest region. No-op when unset (UINTPTR_MAX).
-    if ((uintptr_t)new_brk > __wasilibc_sbrk_max) {
+    if ((uintptr_t)new_brk > __atomic_load_n(&__wasilibc_sbrk_max, __ATOMIC_RELAXED)) {
         errno = ENOMEM;
         return (void *)-1;
     }

@@ -8,6 +8,7 @@
 #include <wasi/libc.h>
 #ifndef __wasilibc_unmodified_upstream
 #include <__wasilibc_rlimit.h>
+#include "lock.h"
 // firebox#1GJ: __wasix_resource_set_nofile + __WASI_ERRNO_* (api.h pulls in
 // api_firebox.h) — the host wire that makes RLIMIT_NOFILE actually enforced.
 #include <wasi/api.h>
@@ -47,9 +48,10 @@ static void do_setrlimit(void *p)
 // no runtime initializer and no GNU range-designated static init. RLIM_NLIMITS
 // is 16, so a plain `unsigned` mask is wide enough.
 //
-// Thread-safety matches the sbrk() static-break contract (see sbrk.c): concurrent
-// limit changes are not synchronized. Programs set their rlimits once at startup,
-// and the conformance callers are single-threaded forked children.
+// One lock covers the table, set mask, hard-limit checks and memory ceilings.
+#ifdef _REENTRANT
+static volatile int rlimit_lock[1];
+#endif
 static struct rlimit rlimits[RLIM_NLIMITS];
 static unsigned rlimit_set_mask;
 
@@ -96,7 +98,7 @@ static uintptr_t data_limit_to_ceiling(rlim_t lim) {
 // either of those two resources.
 static void apply_memory_rlimits(void) {
 	if (!sbrk_ceiling_base_captured) {
-		sbrk_ceiling_base = __wasilibc_sbrk_max;
+		sbrk_ceiling_base = __atomic_load_n(&__wasilibc_sbrk_max, __ATOMIC_RELAXED);
 		sbrk_ceiling_base_captured = 1;
 	}
 	uintptr_t ceiling = sbrk_ceiling_base;
@@ -108,10 +110,10 @@ static void apply_memory_rlimits(void) {
 		uintptr_t c = as_limit_to_ceiling(rlimits[RLIMIT_AS].rlim_cur);
 		if (c < ceiling) ceiling = c;
 	}
-	__wasilibc_sbrk_max = ceiling;
+	__atomic_store_n(&__wasilibc_sbrk_max, ceiling, __ATOMIC_RELAXED);
 }
 
-void __wasilibc_get_stored_rlimit(int resource, struct rlimit *rlim) {
+static void get_stored_rlimit_locked(int resource, struct rlimit *rlim) {
 	if (rlimit_set_mask & (1u << resource)) {
 		*rlim = rlimits[resource];
 	} else {
@@ -119,33 +121,14 @@ void __wasilibc_get_stored_rlimit(int resource, struct rlimit *rlim) {
 		rlim->rlim_max = RLIM_INFINITY;
 	}
 }
-#endif
 
-int setrlimit(int resource, const struct rlimit *rlim)
-{
-#ifdef __wasilibc_unmodified_upstream
-	struct rlimit tmp;
-	if (SYSCALL_RLIM_INFINITY != RLIM_INFINITY) {
-		tmp = *rlim;
-		FIX(tmp.rlim_cur);
-		FIX(tmp.rlim_max);
-		rlim = &tmp;
-	}
-	int ret = __syscall(SYS_prlimit64, 0, resource, rlim, 0);
-	if (ret != -ENOSYS) return __syscall_ret(ret);
+void __wasilibc_get_stored_rlimit(int resource, struct rlimit *rlim) {
+	LOCK(rlimit_lock);
+	get_stored_rlimit_locked(resource, rlim);
+	UNLOCK(rlimit_lock);
+}
 
-	struct ctx c = {
-		.lim[0] = MIN(rlim->rlim_cur, MIN(-1UL, SYSCALL_RLIM_INFINITY)),
-		.lim[1] = MIN(rlim->rlim_max, MIN(-1UL, SYSCALL_RLIM_INFINITY)),
-		.res = resource, .err = -1
-	};
-	__synccall(do_setrlimit, &c);
-	if (c.err) {
-		if (c.err>0) errno = c.err;
-		return -1;
-	}
-	return 0;
-#else
+static int setrlimit_locked(int resource, const struct rlimit *rlim) {
 	if (resource < 0 || resource >= RLIM_NLIMITS) {
 		errno = EINVAL;
 		return -1;
@@ -176,7 +159,7 @@ int setrlimit(int resource, const struct rlimit *rlim)
 	// sandbox grants no CAP_SYS_RESOURCE. The default hard limit is
 	// RLIM_INFINITY, so the first setrlimit for a resource always succeeds.
 	struct rlimit cur;
-	__wasilibc_get_stored_rlimit(resource, &cur);
+	get_stored_rlimit_locked(resource, &cur);
 	if (rlim->rlim_max > cur.rlim_max) {
 		errno = EPERM;
 		return -1;
@@ -186,6 +169,38 @@ int setrlimit(int resource, const struct rlimit *rlim)
 	if (resource == RLIMIT_DATA || resource == RLIMIT_AS)
 		apply_memory_rlimits();
 	return 0;
+}
+#endif
+
+int setrlimit(int resource, const struct rlimit *rlim)
+{
+#ifdef __wasilibc_unmodified_upstream
+	struct rlimit tmp;
+	if (SYSCALL_RLIM_INFINITY != RLIM_INFINITY) {
+		tmp = *rlim;
+		FIX(tmp.rlim_cur);
+		FIX(tmp.rlim_max);
+		rlim = &tmp;
+	}
+	int ret = __syscall(SYS_prlimit64, 0, resource, rlim, 0);
+	if (ret != -ENOSYS) return __syscall_ret(ret);
+
+	struct ctx c = {
+		.lim[0] = MIN(rlim->rlim_cur, MIN(-1UL, SYSCALL_RLIM_INFINITY)),
+		.lim[1] = MIN(rlim->rlim_max, MIN(-1UL, SYSCALL_RLIM_INFINITY)),
+		.res = resource, .err = -1
+	};
+	__synccall(do_setrlimit, &c);
+	if (c.err) {
+		if (c.err>0) errno = c.err;
+		return -1;
+	}
+	return 0;
+#else
+	LOCK(rlimit_lock);
+	int ret = setrlimit_locked(resource, rlim);
+	UNLOCK(rlimit_lock);
+	return ret;
 #endif
 }
 
