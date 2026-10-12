@@ -65,9 +65,8 @@ static void assert_invariants(void) {
 }
 #endif
 
-/// Allocate space for more preopens. Returns 0 on success and -1 on failure.
-static int resize(void) {
-    LOCK(lock);
+/// Caller holds lock. Returns 0 on success and -1 on failure.
+static int resize_locked(void) {
     size_t start_capacity = 4;
     size_t old_capacity = preopen_capacity;
     size_t new_capacity = old_capacity == 0 ? start_capacity : old_capacity * 2;
@@ -75,7 +74,6 @@ static int resize(void) {
     preopen *old_preopens = preopens;
     preopen *new_preopens = calloc(sizeof(preopen), new_capacity);
     if (new_preopens == NULL) {
-        UNLOCK(lock);
         return -1;
     }
 
@@ -85,7 +83,6 @@ static int resize(void) {
     free(old_preopens);
 
     assert_invariants();
-    UNLOCK(lock);
     return 0;
 }
 
@@ -121,7 +118,7 @@ static int internal_register_preopened_fd(__wasi_fd_t fd, const char *relprefix)
     assert(fd != -1);
     assert(relprefix != NULL);
 
-    if (num_preopens == preopen_capacity && resize() != 0) {
+    if (num_preopens == preopen_capacity && resize_locked() != 0) {
         UNLOCK(lock);
         return -1;
     }
