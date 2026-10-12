@@ -9,7 +9,11 @@
 #ifndef __wasilibc_unmodified_upstream
 #include <__wasilibc_rlimit.h>
 #include "lock.h"
-#include "fork_impl.h"
+#ifdef _REENTRANT
+#include <pthread.h>
+#include "pthread_impl.h"
+#include "atomic.h"
+#endif
 // firebox#1GJ: __wasix_resource_set_nofile + __WASI_ERRNO_* (api.h pulls in
 // api_firebox.h) — the host wire that makes RLIMIT_NOFILE actually enforced.
 #include <wasi/api.h>
@@ -50,12 +54,42 @@ static void do_setrlimit(void *p)
 // is 16, so a plain `unsigned` mask is wide enough.
 //
 // One lock covers the table, set mask, hard-limit checks and memory ceilings.
-// fork() takes it in the parent and clears it in the child (fork.c's atfork
-// list): _Fork itself reads RLIMIT_NPROC from this table, so a child that
-// inherited the lock held by a thread it does not have could never fork again.
+//
+// The lock is held across fork(). A lock some other thread holds at the instant
+// of the fork stays held for ever in the child, whose only thread never owned
+// it; and _Fork itself reads RLIMIT_NPROC from this table, so such a child
+// could not even fork again. The forking thread therefore takes the lock in an
+// atfork prepare handler and both sides release it afterwards. While it holds
+// the lock that way, its own read inside _Fork must not take it a second time
+// (the lock is not recursive): `rlimit_fork_owner` names the holder, and the
+// holder reads the table directly -- nobody else can be writing it.
+//
+// The handlers are registered through pthread_atfork rather than fork.c's lock
+// list because that list is made of named symbols, and the shared libc exports
+// every symbol it defines: a new one would be a new provider generation.
 #ifdef _REENTRANT
 static volatile int rlimit_lock[1];
-volatile int *const __rlimit_lockptr = rlimit_lock;
+static volatile int rlimit_fork_owner;
+
+static void rlimit_fork_prepare(void) {
+	LOCK(rlimit_lock);
+	a_store(&rlimit_fork_owner, __pthread_self()->tid);
+}
+
+static void rlimit_fork_release(void) {
+	a_store(&rlimit_fork_owner, 0);
+	UNLOCK(rlimit_lock);
+}
+
+__attribute__((constructor))
+static void rlimit_fork_register(void) {
+	pthread_atfork(rlimit_fork_prepare, rlimit_fork_release, rlimit_fork_release);
+}
+
+static int rlimit_held_for_fork_by_caller(void) {
+	int owner = rlimit_fork_owner;
+	return owner != 0 && owner == __pthread_self()->tid;
+}
 #endif
 static struct rlimit rlimits[RLIM_NLIMITS];
 static unsigned rlimit_set_mask;
@@ -128,6 +162,12 @@ static void get_stored_rlimit_locked(int resource, struct rlimit *rlim) {
 }
 
 void __wasilibc_get_stored_rlimit(int resource, struct rlimit *rlim) {
+#ifdef _REENTRANT
+	if (rlimit_held_for_fork_by_caller()) {
+		get_stored_rlimit_locked(resource, rlim);
+		return;
+	}
+#endif
 	LOCK(rlimit_lock);
 	get_stored_rlimit_locked(resource, rlim);
 	UNLOCK(rlimit_lock);
