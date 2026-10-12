@@ -41,7 +41,7 @@ hidden char *__gettextdomain(void);
 #define C_LOCALE ((locale_t)&__c_locale)
 #define UTF8_LOCALE ((locale_t)&__c_dot_utf8_locale)
 
-#if defined(__wasilibc_unmodified_upstream) && defined(_REENTRANT)
+#if defined(_REENTRANT)
 #define CURRENT_LOCALE (__pthread_self()->locale)
 
 #define CURRENT_UTF8 (!!__pthread_self()->locale->cat[LC_CTYPE])
@@ -56,16 +56,7 @@ hidden char *__gettextdomain(void);
         &libc.current_locale; \
     }))
 
-// firebox#QWE: read the LC_CTYPE category through the settable current-locale
-// pointer, not the global struct. In this fork's live (#else) branch
-// CURRENT_LOCALE is the pointer libc.current_locale (uselocale()/iconv's
-// `*ploc = UTF8_LOCALE` move it); the previous `libc.global_locale.cat[...]`
-// read ignored that pointer, so MB_CUR_MAX stayed 1 (byte mode) for every
-// uselocale()'d/iconv UTF-8 ctype — corrupting iconv's UTF-8 intermediate
-// codec (iso-8859 roundtrip). Upstream's CURRENT_UTF8 (line 47) reads through
-// the SAME indirection as CURRENT_LOCALE; this restores that invariant.
-// setlocale() still works: current_locale defaults to &global_locale, so a
-// setlocale(LC_CTYPE) that mutates global_locale.cat is still seen here.
+// Both thread-local and single-threaded builds read the selected locale.
 #define CURRENT_UTF8 (!!CURRENT_LOCALE->cat[LC_CTYPE])
 #endif
 
