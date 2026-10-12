@@ -9,6 +9,7 @@
 #ifndef __wasilibc_unmodified_upstream
 #include <__wasilibc_rlimit.h>
 #include "lock.h"
+#include "fork_impl.h"
 // firebox#1GJ: __wasix_resource_set_nofile + __WASI_ERRNO_* (api.h pulls in
 // api_firebox.h) — the host wire that makes RLIMIT_NOFILE actually enforced.
 #include <wasi/api.h>
@@ -49,8 +50,12 @@ static void do_setrlimit(void *p)
 // is 16, so a plain `unsigned` mask is wide enough.
 //
 // One lock covers the table, set mask, hard-limit checks and memory ceilings.
+// fork() takes it in the parent and clears it in the child (fork.c's atfork
+// list): _Fork itself reads RLIMIT_NPROC from this table, so a child that
+// inherited the lock held by a thread it does not have could never fork again.
 #ifdef _REENTRANT
 static volatile int rlimit_lock[1];
+volatile int *const __rlimit_lockptr = rlimit_lock;
 #endif
 static struct rlimit rlimits[RLIM_NLIMITS];
 static unsigned rlimit_set_mask;

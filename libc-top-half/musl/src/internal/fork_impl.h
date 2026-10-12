@@ -17,6 +17,12 @@ extern hidden volatile int *const __timezone_lockptr;
 
 extern hidden volatile int *const __vmlock_lockptr;
 
+#ifndef __wasilibc_unmodified_upstream
+/* firebox#JAZ, #ZJ9: the limit table's and the service table's locks. */
+extern hidden volatile int *const __rlimit_lockptr;
+extern hidden volatile int *const __services_lockptr;
+#endif
+
 #ifdef __wasilibc_unmodified_upstream
 hidden void __malloc_atfork(int);
 hidden void __ldso_atfork(int);

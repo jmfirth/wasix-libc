@@ -23,6 +23,8 @@ weak_alias(dummy_lockptr, __vmlock_lockptr);
 extern volatile int *const __gettext_lockptr;
 weak_alias(dummy_lockptr, __dlerror_lockptr);
 weak_alias(dummy_lockptr, __bump_lockptr);
+weak_alias(dummy_lockptr, __rlimit_lockptr);
+weak_alias(dummy_lockptr, __services_lockptr);
 #endif
 
 static volatile int *const *const atfork_locks[] = {
@@ -37,6 +39,10 @@ static volatile int *const *const atfork_locks[] = {
 	&__syslog_lockptr,
 	&__timezone_lockptr,
 	&__bump_lockptr,
+#ifndef __wasilibc_unmodified_upstream
+	&__services_lockptr,
+	&__rlimit_lockptr,
+#endif
 };
 
 static void dummy(int x) { }
