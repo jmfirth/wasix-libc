@@ -9,11 +9,6 @@
 #ifndef __wasilibc_unmodified_upstream
 #include <__wasilibc_rlimit.h>
 #include "lock.h"
-#ifdef _REENTRANT
-#include <pthread.h>
-#include "pthread_impl.h"
-#include "atomic.h"
-#endif
 // firebox#1GJ: __wasix_resource_set_nofile + __WASI_ERRNO_* (api.h pulls in
 // api_firebox.h) — the host wire that makes RLIMIT_NOFILE actually enforced.
 #include <wasi/api.h>
@@ -55,41 +50,25 @@ static void do_setrlimit(void *p)
 //
 // One lock covers the table, set mask, hard-limit checks and memory ceilings.
 //
-// The lock is held across fork(). A lock some other thread holds at the instant
-// of the fork stays held for ever in the child, whose only thread never owned
-// it; and _Fork itself reads RLIMIT_NPROC from this table, so such a child
-// could not even fork again. The forking thread therefore takes the lock in an
-// atfork prepare handler and both sides release it afterwards. While it holds
-// the lock that way, its own read inside _Fork must not take it a second time
-// (the lock is not recursive): `rlimit_fork_owner` names the holder, and the
-// holder reads the table directly -- nobody else can be writing it.
+// The lock is not on fork.c's lock list, so a fork child can inherit it held by
+// a thread it does not have -- and _Fork itself reads RLIMIT_NPROC from this
+// table, so such a child could not even fork again. A process with exactly one
+// thread cannot have the lock legitimately held when it enters here (the lock
+// is not recursive and nothing blocks while holding it), so a held lock seen
+// with one thread is that inherited one, and is cleared before it is taken.
 //
-// The handlers are registered through pthread_atfork rather than fork.c's lock
-// list because that list is made of named symbols, and the shared libc exports
-// every symbol it defines: a new one would be a new provider generation.
+// Why not the lock list, or pthread_atfork handlers: the shared libc exports
+// every symbol it defines and imports a function table sized by the addresses
+// it takes, so a named lock pointer or a handler is a new provider generation.
+// Both were tried (36280117, bd8256e0) and both minted one.
 #ifdef _REENTRANT
 static volatile int rlimit_lock[1];
-static volatile int rlimit_fork_owner;
-
-static void rlimit_fork_prepare(void) {
-	LOCK(rlimit_lock);
-	a_store(&rlimit_fork_owner, __pthread_self()->tid);
-}
-
-static void rlimit_fork_release(void) {
-	a_store(&rlimit_fork_owner, 0);
-	UNLOCK(rlimit_lock);
-}
-
-__attribute__((constructor))
-static void rlimit_fork_register(void) {
-	pthread_atfork(rlimit_fork_prepare, rlimit_fork_release, rlimit_fork_release);
-}
-
-static int rlimit_held_for_fork_by_caller(void) {
-	int owner = rlimit_fork_owner;
-	return owner != 0 && owner == __pthread_self()->tid;
-}
+#define RLIMIT_LOCK() do { \
+	if (!libc.threads_minus_1) rlimit_lock[0] = 0; \
+	LOCK(rlimit_lock); \
+} while (0)
+#else
+#define RLIMIT_LOCK() do { } while (0)
 #endif
 static struct rlimit rlimits[RLIM_NLIMITS];
 static unsigned rlimit_set_mask;
@@ -162,13 +141,7 @@ static void get_stored_rlimit_locked(int resource, struct rlimit *rlim) {
 }
 
 void __wasilibc_get_stored_rlimit(int resource, struct rlimit *rlim) {
-#ifdef _REENTRANT
-	if (rlimit_held_for_fork_by_caller()) {
-		get_stored_rlimit_locked(resource, rlim);
-		return;
-	}
-#endif
-	LOCK(rlimit_lock);
+	RLIMIT_LOCK();
 	get_stored_rlimit_locked(resource, rlim);
 	UNLOCK(rlimit_lock);
 }
@@ -242,7 +215,7 @@ int setrlimit(int resource, const struct rlimit *rlim)
 	}
 	return 0;
 #else
-	LOCK(rlimit_lock);
+	RLIMIT_LOCK();
 	int ret = setrlimit_locked(resource, rlim);
 	UNLOCK(rlimit_lock);
 	return ret;
