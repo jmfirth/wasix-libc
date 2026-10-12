@@ -134,14 +134,13 @@ int __lookup_serv_wasi(struct service buf[static MAXSERVS], const char *name, in
   }
 
   int cnt = 0;
-  for (int i = 0; i < svc_entry->len_svcs && i < MAXSERVS; i++) {
-    if (proto != svc_entry->svcs[i].proto) continue;
-    buf[i].port = svc_entry->svcs[i].port;
-    buf[i].socktype = svc_entry->svcs[i].socktype;
-    buf[i].proto = svc_entry->svcs[i].proto;
-    cnt++;
+  for (int i = 0; i < svc_entry->len_svcs && cnt < MAXSERVS; i++) {
+    const struct service *svc = &svc_entry->svcs[i];
+    if (proto && proto != svc->proto) continue;
+    if (socktype && socktype != svc->socktype) continue;
+    buf[cnt++] = *svc;
   }
 
-  return cnt;
+  return cnt > 0 ? cnt : EAI_SERVICE;
 }
 #endif
