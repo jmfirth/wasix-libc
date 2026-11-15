@@ -591,17 +591,18 @@ static volatile int __wasm_nodefer_active[_NSIG];
 struct __fbx_handler_frame {
 	int sig;
 	int drain_depth;
-	unsigned char in_handler, nodefer, depth, alt;
+	unsigned char in_handler, nodefer, depth, alt, host_entry;
 };
 static __FBX_THREAD_LOCAL struct __fbx_handler_frame __fbx_handler_frames[__FBX_HANDLER_FRAMES];
 static __FBX_THREAD_LOCAL volatile int __fbx_handler_frame_count;
 static __FBX_THREAD_LOCAL int __fbx_pending_drain_depth;
 
-static struct __fbx_handler_frame *__fbx_handler_frame_push(int sig) {
+static struct __fbx_handler_frame *__fbx_handler_frame_push(int sig, int host_entry) {
 	int i = __fbx_handler_frame_count++;
 	if (i >= __FBX_HANDLER_FRAMES) return 0;
 	__fbx_handler_frames[i] = (struct __fbx_handler_frame){
-		.sig = sig, .drain_depth = __fbx_pending_drain_depth
+		.sig = sig, .drain_depth = __fbx_pending_drain_depth,
+		.host_entry = host_entry
 	};
 	return &__fbx_handler_frames[i];
 }
@@ -1388,7 +1389,7 @@ static int __fbx_claim_pending_bit(volatile int *word, int bit) {
 	}
 }
 
-void __wasm_signal(int sig);
+static void __fbx_dispatch_signal(int sig, int host_entry);
 
 static int __wasm_drain_pending_pass(struct pthread *self) {
 	int tid = self->tid;
@@ -1427,7 +1428,7 @@ static int __wasm_drain_pending_pass(struct pthread *self) {
 				 * A self-target host nudge is deferred; handing the whole
 				 * batch to it would lose the opportunity to prepare nested
 				 * frames. Default actions remain owned by the host. */
-				if (__fbx_handler_installed(sig)) __wasm_signal(sig);
+				if (__fbx_handler_installed(sig)) __fbx_dispatch_signal(sig, 0);
 				else (void)__wasi_thread_signal(tid, (__wasi_signal_t)sig);
 			}
 		}
@@ -1472,7 +1473,7 @@ static void __fbx_stack_pending_handlers(int current)
 		if (!__fbx_handler_installed(sig)) continue;
 		if (!__fbx_claim_pending_bit(&self->pending_sigs[word], bit)) continue;
 		a_and(&__wasm_pending_sigs[word], ~bit);
-		__wasm_signal(sig);
+		__fbx_dispatch_signal(sig, 0);
 	}
 }
 
@@ -1598,8 +1599,7 @@ static inline void __fbx_prepare_pending_frame(int sig, int on_alt,
 		__fbx_stack_pending_handlers(sig);
 }
 
-__attribute__((export_name("__wasm_signal")))
-void __wasm_signal(int sig) {
+static void __fbx_dispatch_signal(int sig, int host_entry) {
 	/* firebox#93A — SIGCANCEL(33): act on a pending ASYNCHRONOUS cancel at this
 	 * cooperative delivery boundary (the #8B5 loop-header poll, or any syscall
 	 * drain). This is the RUNNING-thread half of the #5RE deferred-cancellation
@@ -1721,7 +1721,7 @@ void __wasm_signal(int sig) {
 	}
 	/* firebox#QY4 — from here to the pop below, every piece of handler state
 	 * this dispatch sets is marked in its record as it is set. */
-	struct __fbx_handler_frame *__fbx_frame = __fbx_handler_frame_push(sig);
+	struct __fbx_handler_frame *__fbx_frame = __fbx_handler_frame_push(sig, host_entry);
 	if (!(ksa.flags & SA_NODEFER)) {
 		__wasm_in_handler[sig] = 1;
 		if (__fbx_frame) __fbx_frame->in_handler = 1;
@@ -2035,6 +2035,14 @@ void __wasm_signal(int sig) {
 	}
 }
 
+/* Only the host enters this export. Direct guest delivery uses the internal
+ * dispatcher so an EH jump can distinguish an abandoned host invocation from
+ * an ordinary guest frame. Snapshot jumps retain the host's rewind protocol. */
+__attribute__((export_name("__wasm_signal")))
+void __wasm_signal(int sig) {
+	__fbx_dispatch_signal(sig, 1);
+}
+
 /* firebox#VYD — deliver every queued RT signal that is currently deliverable on
  * THIS thread, synchronously in-guest. This is the raise()-boundary drain: Linux
  * delivers all deliverable pending signals at every kernel->user transition, so
@@ -2066,7 +2074,7 @@ void __wasm_deliver_pending_rt_inline(void) {
 		if (!__fbx_handler_installed(s)) continue;
 		if (__wasm_in_handler[s] > 0) continue;
 		if (__wasm_thread_sig_blocked(s)) continue;
-		__wasm_signal(s);
+		__fbx_dispatch_signal(s, 0);
 	}
 }
 
@@ -2125,7 +2133,7 @@ static int __wasm_deliver_pending_inline_vote(void) {
 			ran = 1;
 			if (!(ksa.flags & SA_RESTART)) all_restart = 0;
 		}
-		__wasm_signal(s);
+		__fbx_dispatch_signal(s, 0);
 	}
 	__wasm_deliver_pending_rt_inline();
 	return ran && all_restart;
@@ -2241,7 +2249,7 @@ int __wasm_signal_self(int sig, int code) {
 				union sigval sv = {0};
 				(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 			}
-			__wasm_signal(sig);
+			__fbx_dispatch_signal(sig, 0);
 			return 1;
 		}
 		/* firebox#QY4 (N1) — unblocked, a standard or realtime
@@ -2260,7 +2268,7 @@ int __wasm_signal_self(int sig, int code) {
 				union sigval sv = {0};
 				(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 			}
-			__wasm_signal(sig);
+			__fbx_dispatch_signal(sig, 0);
 			return 1;
 		}
 		/* Otherwise fall through to the host. The host's #912 guard will
@@ -2305,7 +2313,7 @@ int __wasm_signal_self(int sig, int code) {
 		memset(&sv, 0, sizeof sv);
 		(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 	}
-	__wasm_signal(sig);
+	__fbx_dispatch_signal(sig, 0);
 	__wasm_deliver_pending_rt_inline();
 	return 1;
 }
@@ -2787,3 +2795,23 @@ void __fbx_sigjmp_unwind_handlers(int keep) {
 	}
 	if (has_pending) __wasm_drain_pending_sigs();
 }
+
+#ifdef __wasm_exception_handling__
+/* EH cannot catch across a host-created guest invocation. Refuse before the
+ * throw instead of letting the host consume it as a completed handler/fork
+ * continuation. In-guest pending/nested delivery can unwind normally. Keep
+ * the EH release cells out until the host boundary itself is supported. */
+void __fbx_sigjmp_unwind_eh_handlers(int keep) {
+	int n = __fbx_handler_frame_count;
+	int unsupported = n > __FBX_HANDLER_FRAMES;
+	for (int i = keep < 0 ? 0 : keep; i < n && i < __FBX_HANDLER_FRAMES; i++)
+		if (__fbx_handler_frames[i].host_entry) unsupported = 1;
+	if (unsupported) {
+		static const char message[] =
+			"longjmp: EH cannot abandon a host-invoked signal handler\n";
+		(void)!write(2, message, sizeof message - 1);
+		abort();
+	}
+	__fbx_sigjmp_unwind_handlers(keep);
+}
+#endif

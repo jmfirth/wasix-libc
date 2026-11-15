@@ -6,7 +6,7 @@
 #include <signal.h>
 
 int __fbx_sigjmp_handler_depth(void);
-void __fbx_sigjmp_unwind_handlers(int);
+void __fbx_sigjmp_unwind_eh_handlers(int);
 /*
  * function prototypes
  */
@@ -84,7 +84,7 @@ __wasm_longjmp(void *env, int val)
         if (val == 0) {
                 val = 1;
         }
-        __fbx_sigjmp_unwind_handlers(jb->handler_depth);
+        __fbx_sigjmp_unwind_eh_handlers(jb->handler_depth);
         arg->env = env;
         arg->val = val;
         __builtin_wasm_throw(1, arg); /* 1 == C_LONGJMP */
