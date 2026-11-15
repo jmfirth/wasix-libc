@@ -2139,16 +2139,26 @@ int __wasm_raise_self(int sig) {
 		 * __block_all_sigs/__block_app_sigs window: hold pending in-guest so
 		 * sigpending() reports it. */
 		if (__wasm_thread_sig_blocked(sig)) {
+			/* The in-handler fast path bypasses raise.c's blocked-RT
+			 * enqueue too. Keep its depth before recording the pending bit. */
+			if (__fbx_sig_is_rt(sig)) {
+				union sigval sv = {0};
+				(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+			}
 			__wasm_pend_signal(sig);
 			return 1;
 		}
 		/* Unblocked AND this signal's SA_NODEFER handler is active: dispatch
 		 * synchronously (immediate re-entry). */
 		if (__wasm_nodefer_active[sig] > 0) {
+			if (__fbx_sig_is_rt(sig)) {
+				union sigval sv = {0};
+				(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+			}
 			__wasm_signal(sig);
 			return 1;
 		}
-		/* firebox#QY4 (nested-raise prototype) — unblocked, a standard
+		/* firebox#QY4 (N1) — unblocked, a standard or realtime
 		 * signal with a user handler, and that handler not already running:
 		 * Linux delivers it on the raise() return path, nested inside this
 		 * handler, before raise() returns. Deferring it to after the outer
@@ -2156,8 +2166,14 @@ int __wasm_raise_self(int sig) {
 		 * targeted a context whose frame had returned (MEASURED: SIGUSR1's
 		 * handler raise(SIGUSR2)s, SIGUSR2's siglongjmps: the program printed
 		 * its result twice, with garbage, rc 0). */
-		if (!__fbx_sig_is_rt(sig) && __fbx_handler_installed(sig) &&
+		if (__fbx_handler_installed(sig) &&
 		    __wasm_in_handler[sig] == 0) {
+			/* RT delivery consumes the ring even for a one-argument
+			 * handler (#VYD): enqueue this instance before dispatch. */
+			if (__fbx_sig_is_rt(sig)) {
+				union sigval sv = {0};
+				(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+			}
 			__wasm_signal(sig);
 			return 1;
 		}

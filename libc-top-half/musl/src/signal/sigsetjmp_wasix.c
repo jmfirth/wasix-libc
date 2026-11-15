@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if !defined(__OPTIMIZE__)
+#error "sigsetjmp requires an optimized build: the saved mask must live in a wasm local"
+#endif
+
 /* WASIX sigsetjmp/siglongjmp with mask save/restore.
  *
  * Lives in its own TU (separate from setjmp/setjmplongjmp.c which defines
