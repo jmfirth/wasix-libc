@@ -1564,6 +1564,20 @@ static inline int __fbx_should_use_altstack(const struct k_sigaction *ksa) {
 		&& __fbx_altstack_depth == 0;
 }
 
+static inline void __fbx_prepare_pending_frame(int sig, int on_alt,
+	uintptr_t alt_top, sighandler_t handler)
+{
+	if (handler == SIG_IGN) return;
+	/* A prepared SA_ONSTACK frame already owns the alt stack. Pending
+	 * frames above it must be prepared there too. Call only AFTER claiming
+	 * this frame's RT record: a fork in a nested handler clears queued
+	 * signals in the child, but must retain this already-selected frame. */
+	if (on_alt)
+		__fbx_call_on_altstack_1(__fbx_stack_pending_handlers, sig, alt_top);
+	else
+		__fbx_stack_pending_handlers(sig);
+}
+
 __attribute__((export_name("__wasm_signal")))
 void __wasm_signal(int sig) {
 	/* firebox#93A — SIGCANCEL(33): act on a pending ASYNCHRONOUS cancel at this
@@ -1784,15 +1798,6 @@ void __wasm_signal(int sig) {
 			__fbx_frame->depth = __self_dispatch != 0;
 			__fbx_frame->nodefer = nodefer;
 		}
-		if (ksa.handler != SIG_IGN) {
-			/* A prepared SA_ONSTACK frame already owns the alt stack.
-			 * Pending frames above it must be prepared there too, before
-			 * this frame's user handler is entered. */
-			if (on_alt)
-				__fbx_call_on_altstack_1(__fbx_stack_pending_handlers, sig, alt_top);
-			else
-				__fbx_stack_pending_handlers(sig);
-		}
 		if (ksa.flags & SA_SIGINFO) {
 			void (*h3)(int, siginfo_t *, void *) =
 				(void (*)(int, siginfo_t *, void *))(void *)ksa.handler;
@@ -1815,6 +1820,7 @@ void __wasm_signal(int sig) {
 			if (__fbx_rtsigq_pop_si(sig, &si)) {
 				do {
 					handler_ran = 1;
+					__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
 					if (on_alt) {
 						__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
 					} else {
@@ -1823,6 +1829,7 @@ void __wasm_signal(int sig) {
 				} while (__fbx_rtsigq_pop_si(sig, &si));
 			} else if (__fbx_sig_is_rt(sig) && __fbx_signal_info_fill_si(sig, &si)) {
 				handler_ran = 1;
+				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
 				/* firebox#EMN — cross-process sigqueue si_value. The queued
 				 * value was sent by ANOTHER process, so it lives in the HOST,
 				 * not this process's `__fbx_rtsigq` ring (a forked child cannot
@@ -1860,6 +1867,7 @@ void __wasm_signal(int sig) {
 						si.si_code = __fbx_code;
 					}
 				}
+				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
 				if (on_alt) {
 					__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
 				} else {
@@ -1927,11 +1935,13 @@ void __wasm_signal(int sig) {
 			siginfo_t si;
 			while (__fbx_rtsigq_pop_si(sig, &si)) {
 				handler_ran = 1;
+				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
 				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
 				else ksa.handler(sig);
 			}
 			while (__fbx_signal_info_fill_si(sig, &si)) {
 				handler_ran = 1;
+				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
 				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
 				else ksa.handler(sig);
 			}
@@ -1940,6 +1950,7 @@ void __wasm_signal(int sig) {
 			/* Standard signal (1..31): at-most-one-pending coalescing — deliver
 			 * ONCE (the pending bitmask has no depth; unchanged pre-#VYD path). */
 			handler_ran = 1;
+			__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
 			if (on_alt) {
 				__fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
 			} else {
