@@ -1393,8 +1393,7 @@ void __wasm_drain_pending_sigs(void) {
 	int tid = self->tid;
 	for (int word = 0; word < __WASM_PENDING_WORDS; word++) {
 		/* firebox#QY4 (L2) — the bits to raise are the ones pending NOW, each
-		 * raised once (a still-blocked one re-pends behind us and must not be
-		 * raised again by this same pass), but each is CLAIMED only as it is
+		 * raised once if deliverable, but each is CLAIMED only as it is
 		 * raised. The raise dispatches its handler before it returns, and a
 		 * handler may longjmp out of this loop: the bits it has not reached
 		 * yet must still be pending then, for the drain that the longjmp's
@@ -1406,13 +1405,20 @@ void __wasm_drain_pending_sigs(void) {
 		while (bits) {
 			int bit = a_ctz_32((uint32_t)bits);
 			bits &= ~(1 << bit);
+			int sig = word * 32 + bit + 1;
+			/* A mask restore only releases signals that became deliverable.
+			 * Clearing a still-blocked bit and re-enqueuing it through the host
+			 * creates a gap where sigpending falsely reports it absent. HXF's
+			 * lock-mask restores must leave these signals in the claim surface. */
+			if (sig >= _NSIG || __wasm_thread_sig_blocked(sig)) continue;
+			if (self->sigwait_set[word] & (1U << bit)) continue;
+			if (__wasm_in_handler[sig]) continue;
 			if (!__fbx_claim_pending_bit(
 			        (volatile int *)&self->pending_sigs[word], 1 << bit))
 				continue;
 			/* Mirror the clear into the process-wide bitmask so
 			 * sigpending doesn't continue to report it as pending. */
 			a_and(&__wasm_pending_sigs[word], ~(1 << bit));
-			int sig = word * 32 + bit + 1;
 			if (sig >= 1 && sig < _NSIG) {
 				/* Re-raise on the current thread so it flows back
 				 * through the dispatch path and rechecks blocking. */
@@ -1420,6 +1426,34 @@ void __wasm_drain_pending_sigs(void) {
 				                           (__wasi_signal_t)sig);
 			}
 		}
+	}
+}
+
+void __wasm_signal(int sig);
+
+/* firebox#QY4 — Linux selects pending standard signals by number before RT,
+ * but prepares each signal frame (and applies its mask) before entering user
+ * code. Another now-deliverable signal prepares a frame above it. Thus empty
+ * sa_mask gives reverse handler ENTRY order; blocking the whole set gives
+ * ascending entry order. A jump out of an upper frame abandons lower handlers
+ * that have not run yet (batch2). Reproduce that with nested guest dispatches,
+ * claiming only the bit about to be dispatched so an escaping jump loses no
+ * unselected signal. RT depth remains in its ring, consumed by the dispatcher.
+ * Exclude this signal: its current ring record has not been consumed yet. */
+static void __fbx_stack_pending_handlers(int current)
+{
+	struct pthread *self = __pthread_self();
+	if (!self) return;
+	for (int sig = 1; sig < _NSIG; sig++) {
+		if (sig == current || sig-32U < 3) continue;
+		int word = (sig-1)/32;
+		int bit = 1U << ((sig-1)%32);
+		if (!(self->pending_sigs[word] & bit)) continue;
+		if (self->sigwait_set[word] & bit) continue;
+		if (__wasm_in_handler[sig] || __wasm_thread_sig_blocked(sig)) continue;
+		if (!__fbx_claim_pending_bit(&self->pending_sigs[word], bit)) continue;
+		a_and(&__wasm_pending_sigs[word], ~bit);
+		__wasm_signal(sig);
 	}
 }
 
@@ -1748,6 +1782,8 @@ void __wasm_signal(int sig) {
 			__fbx_frame->depth = __self_dispatch != 0;
 			__fbx_frame->nodefer = nodefer;
 		}
+		if (ksa.handler != SIG_IGN)
+			__fbx_stack_pending_handlers(sig);
 		if (ksa.flags & SA_SIGINFO) {
 			void (*h3)(int, siginfo_t *, void *) =
 				(void (*)(int, siginfo_t *, void *))(void *)ksa.handler;
@@ -2153,7 +2189,7 @@ int __wasm_inline_delivery_end_restart(void) {
 int __wasm_raise_self(int sig) {
 	if (sig < 1 || sig >= _NSIG) return 0;
 	if (__wasm_in_any_handler() > 0) {
-		/* IN-HANDLER cases (existing, unchanged). */
+		/* IN-HANDLER cases: each accepted RT raise owns one ring record. */
 		/* Blocked by this thread's mask — which carries the active handler's
 		 * applied sa_mask, any pthread_sigmask block, and (firebox#35F) any
 		 * __block_all_sigs/__block_app_sigs window: hold pending in-guest so
