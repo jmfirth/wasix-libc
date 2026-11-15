@@ -7,6 +7,11 @@
 #define TIOCGWINSZ 0x101
 #define TIOCSWINSZ 0x102
 
+/* Linux terminal-control requests forwarded by the WASIX fd_ioctl seam. */
+#define TCSBRK 0x5409
+#define TCXONC 0x540a
+#define TCFLSH 0x540b
+
 #ifdef __cplusplus
 extern "C" {
 #endif
