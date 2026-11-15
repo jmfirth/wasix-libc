@@ -2726,6 +2726,11 @@ void __fbx_sigjmp_unwind_handlers(int keep) {
 		if (f->depth && self) self->in_handler_depth--;
 		if (f->alt) __fbx_altstack_depth--;
 		if (f->in_handler) __wasm_in_handler[f->sig] = 0;
+		/* A jump may abandon an RT ring drain after consuming only its
+		 * first record. The remaining instances are still pending on Linux;
+		 * re-arm their bit so restoring the saved mask can deliver them. */
+		if (__fbx_rtsigq_count(f->sig) > 0)
+			__fbx_rtsig_repend(f->sig);
 	}
 	__fbx_handler_frame_count = keep;
 	int has_pending = 0;
