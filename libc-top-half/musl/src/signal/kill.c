@@ -77,9 +77,9 @@ int kill(pid_t pid, int sig)
 		 * both (pthread_kill.c:66-67, timer_create.c:381-382,
 		 * sigaction.c:648-649 and :1038-1042); kill.c was the sole outlier,
 		 * and the mirror is what ARMS the clear. __wasm_drain_pending_sigs
-		 * computes `bits = a_swap(&self->pending_sigs[word], 0)` and then
-		 * `a_and(&__wasm_pending_sigs[word], ~bits)`, so with the mirror
-		 * never set `bits == 0` and the AND-NOT is a no-op — and the
+		 * claims each bit SET IN `self->pending_sigs[word]` and only then
+		 * clears it from `__wasm_pending_sigs[word]`, so with the mirror
+		 * never set no bit is claimed and nothing is cleared — and the
 		 * post-handler drain gate in __wasm_signal never even calls it,
 		 * because that gate tests the mirror too. Result: after the ring
 		 * record this bit represents had been consumed and the handler had

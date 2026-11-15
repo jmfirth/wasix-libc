@@ -562,6 +562,55 @@ static __FBX_THREAD_LOCAL int __wasm_in_handler[_NSIG];
  * SA_NODEFER recursion depth. */
 static volatile int __wasm_nodefer_active[_NSIG];
 
+/* firebox#QY4 — what each handler dispatch on this thread has changed and not
+ * yet put back, so a longjmp/siglongjmp out of the handler can put it back.
+ *
+ * Linux keeps no "handler running" state outside the stack: a longjmp out of
+ * a handler abandons its frames and the kernel's only record of the delivery,
+ * the signal mask, stays as the handler left it (setjmp(3)) unless siglongjmp
+ * restores the saved one. This dispatcher keeps four more pieces, all set on
+ * the way in and cleared on the way out of __wasm_signal: the
+ * __wasm_in_handler recursion guard, the SA_NODEFER count, the thread's
+ * in_handler_depth and the alternate-stack depth. A jump past the way out
+ * leaves them set, and a set __wasm_in_handler[sig] PENDS every later
+ * delivery of `sig` for the rest of the program: the handler runs once and
+ * never again (measured: bash's SIGINT trap, a second SIGALRM).
+ *
+ * So each dispatch records, on a per-thread stack, which of the four it set;
+ * setjmp notes the stack's depth when it captures (__wasilibc_setjmp keeps it
+ * in a local, which the rewind restores with the context), and on its longjmp
+ * return undoes every record above that depth (__fbx_sigjmp_unwind_handlers).
+ * The depth is exact where a stack-pointer comparison is not: it is the same
+ * on the alternate stack, and a jump into a context captured inside a handler
+ * keeps that handler's own record.
+ *
+ * Deeper than __FBX_HANDLER_FRAMES nested dispatches (only SA_NODEFER
+ * recursion reaches it) are counted but not recorded, so a jump out of those
+ * cannot undo them. */
+#define __FBX_HANDLER_FRAMES 64
+struct __fbx_handler_frame {
+	int sig;
+	unsigned char in_handler, nodefer, depth, alt;
+};
+static __FBX_THREAD_LOCAL struct __fbx_handler_frame __fbx_handler_frames[__FBX_HANDLER_FRAMES];
+static __FBX_THREAD_LOCAL volatile int __fbx_handler_frame_count;
+
+static struct __fbx_handler_frame *__fbx_handler_frame_push(int sig) {
+	int i = __fbx_handler_frame_count++;
+	if (i >= __FBX_HANDLER_FRAMES) return 0;
+	__fbx_handler_frames[i] = (struct __fbx_handler_frame){ .sig = sig };
+	return &__fbx_handler_frames[i];
+}
+
+static void __fbx_handler_frame_pop(void) {
+	if (__fbx_handler_frame_count > 0) __fbx_handler_frame_count--;
+}
+
+/* firebox#QY4 — the record depth setjmp keeps with each context. */
+int __fbx_sigjmp_handler_depth(void) {
+	return __fbx_handler_frame_count;
+}
+
 /* firebox#C2Q / #HPT — POSIX realtime-signal queuing (depth + FIFO si_value).
  *
  * POSIX requires that a signal in the SIGRTMIN..SIGRTMAX range queued with
@@ -1327,18 +1376,42 @@ static inline int __wasm_in_any_handler(void) {
  * SIG_UNBLOCK. The re-raise loops back through the runtime →
  * __wasm_signal, which will then find the signal unblocked and dispatch
  * normally. */
+/* firebox#QY4 (L2) — claim pending bit `bit` of `word` if it is still set.
+ * The compare-and-swap is what lets a drain that a handler's own drain ran
+ * inside skip a signal that inner drain already delivered. */
+static int __fbx_claim_pending_bit(volatile int *word, int bit) {
+	for (;;) {
+		int old = *word;
+		if (!(old & bit)) return 0;
+		if (a_cas(word, old, old & ~bit) == old) return 1;
+	}
+}
+
 void __wasm_drain_pending_sigs(void) {
 	struct pthread *self = __pthread_self();
 	if (!self) return;
 	int tid = self->tid;
 	for (int word = 0; word < __WASM_PENDING_WORDS; word++) {
-		int bits = a_swap((volatile int *)&self->pending_sigs[word], 0);
-		/* Mirror the clear into the process-wide bitmask so
-		 * sigpending doesn't continue to report these as pending. */
-		a_and(&__wasm_pending_sigs[word], ~bits);
+		/* firebox#QY4 (L2) — the bits to raise are the ones pending NOW, each
+		 * raised once (a still-blocked one re-pends behind us and must not be
+		 * raised again by this same pass), but each is CLAIMED only as it is
+		 * raised. The raise dispatches its handler before it returns, and a
+		 * handler may longjmp out of this loop: the bits it has not reached
+		 * yet must still be pending then, for the drain that the longjmp's
+		 * setjmp runs (__fbx_sigjmp_unwind_handlers). This loop used to swap
+		 * the whole word to 0 first, and a jump out of the first handler lost
+		 * every signal after it (MEASURED: SIGUSR1 + SIGUSR2 unblocked
+		 * together, SIGUSR1's handler siglongjmps: SIGUSR2 never ran). */
+		int bits = self->pending_sigs[word];
 		while (bits) {
 			int bit = a_ctz_32((uint32_t)bits);
 			bits &= ~(1 << bit);
+			if (!__fbx_claim_pending_bit(
+			        (volatile int *)&self->pending_sigs[word], 1 << bit))
+				continue;
+			/* Mirror the clear into the process-wide bitmask so
+			 * sigpending doesn't continue to report it as pending. */
+			a_and(&__wasm_pending_sigs[word], ~(1 << bit));
 			int sig = word * 32 + bit + 1;
 			if (sig >= 1 && sig < _NSIG) {
 				/* Re-raise on the current thread so it flows back
@@ -1568,7 +1641,13 @@ void __wasm_signal(int sig) {
 			__wasm_pend_signal(sig);
 			return;
 		}
+	}
+	/* firebox#QY4 — from here to the pop below, every piece of handler state
+	 * this dispatch sets is marked in its record as it is set. */
+	struct __fbx_handler_frame *__fbx_frame = __fbx_handler_frame_push(sig);
+	if (!(ksa.flags & SA_NODEFER)) {
 		__wasm_in_handler[sig] = 1;
+		if (__fbx_frame) __fbx_frame->in_handler = 1;
 	}
 
 	/* Dispatch decision tree (#468 fix — fnptr-as-sentinel collision):
@@ -1636,6 +1715,7 @@ void __wasm_signal(int sig) {
 		int on_alt = __fbx_should_use_altstack(&ksa);
 		uintptr_t alt_top = on_alt ? __fbx_altstack_top() : 0;
 		if (on_alt) __fbx_altstack_depth++;
+		if (on_alt && __fbx_frame) __fbx_frame->alt = 1;
 		/* firebox signal-mask machinery — apply the handler's sa_mask
 		 * (plus the handled signal unless SA_NODEFER) to this thread's
 		 * blocked_sigmask for the handler's duration, restoring on
@@ -1656,6 +1736,10 @@ void __wasm_signal(int sig) {
 		struct pthread *__self_dispatch = __pthread_self();
 		if (__self_dispatch) __self_dispatch->in_handler_depth++;
 		if (nodefer) __wasm_nodefer_active[sig]++;
+		if (__fbx_frame) {
+			__fbx_frame->depth = __self_dispatch != 0;
+			__fbx_frame->nodefer = nodefer;
+		}
 		if (ksa.flags & SA_SIGINFO) {
 			void (*h3)(int, siginfo_t *, void *) =
 				(void (*)(int, siginfo_t *, void *))(void *)ksa.handler;
@@ -1839,6 +1923,7 @@ void __wasm_signal(int sig) {
 	if (!(ksa.flags & SA_NODEFER)) {
 		__wasm_in_handler[sig] = 0;
 	}
+	__fbx_handler_frame_pop();
 
 	/* A handler actually RAN on this thread. Bump both wake counters:
 	 *
@@ -2522,3 +2607,33 @@ void __wasi_init_signals() {
 	(void)__fbx_signal_poll();
 }
 #endif
+
+/* firebox#QY4 — setjmp's longjmp return: undo, innermost first, what every
+ * handler dispatch recorded since the context was captured at depth `keep`
+ * (see __fbx_handler_frames). Linux has nothing to undo but the mask, and
+ * leaves the mask alone; so does this. Then, as a handler's return does,
+ * deliver whatever the abandoned handlers held pending: a signal that
+ * arrived while one ran was pended behind its __wasm_in_handler guard, which
+ * nothing else would ever look at again. */
+void __fbx_sigjmp_unwind_handlers(int keep) {
+	int n = __fbx_handler_frame_count;
+	if (keep < 0) keep = 0;
+	if (n <= keep) return;
+	struct pthread *self = __pthread_self();
+	for (int i = n - 1; i >= keep; i--) {
+		if (i >= __FBX_HANDLER_FRAMES) continue;
+		struct __fbx_handler_frame *f = &__fbx_handler_frames[i];
+		if (f->nodefer) __wasm_nodefer_active[f->sig]--;
+		if (f->depth && self) self->in_handler_depth--;
+		if (f->alt) __fbx_altstack_depth--;
+		if (f->in_handler) __wasm_in_handler[f->sig] = 0;
+	}
+	__fbx_handler_frame_count = keep;
+	int has_pending = 0;
+	if (self) {
+		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
+			if (self->pending_sigs[w]) { has_pending = 1; break; }
+		}
+	}
+	if (has_pending) __wasm_drain_pending_sigs();
+}

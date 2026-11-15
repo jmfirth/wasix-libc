@@ -4,6 +4,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* WASIX sigsetjmp/siglongjmp with mask save/restore.
  *
@@ -19,10 +20,27 @@
  * inert here. It is kept because the hazard returns the moment anyone
  * reinstates the flag, and because the split costs nothing.
  *
- * Mask storage: thread-local slot keyed by jmp_buf pointer. Single-slot,
- * so nested sigsetjmp pairs within a thread will clobber the outer saved
- * mask — documented limitation, covers the bash/perl exception-unwind
- * pattern that motivated this feature.
+ * Mask storage (firebox#QY4 L1): WITH THE CONTEXT, never beside it. This used
+ * to be one thread-local slot keyed by the last jmp_buf recorded and cleared
+ * by its first restore, so a second siglongjmp to the same buffer restored
+ * nothing (the shell's top-level `sigsetjmp` + `siglongjmp` on every Ctrl-C:
+ * the second SIGINT stayed blocked and was never delivered) and a sigsetjmp
+ * on any other buffer evicted the first buffer's mask. musl and glibc keep
+ * the mask in the jmp_buf and restore it on EVERY return of sigsetjmp after a
+ * jump; so does this, in the one place each shelf has for it:
+ *
+ *  - EH shelf: jmp_buf is the musl-shaped struct, and its __fl / __ss fields
+ *    are exactly musl's flag and mask, untouched by both capture mechanisms
+ *    (the SJLJ pass's 16-byte jmp_buf_impl and the 24-byte stack snapshot
+ *    both end before __fl).
+ *  - stack-snapshot shelf: jmp_buf IS the 24-byte __wasi_stack_snapshot_t and
+ *    the host writes all of it, so there is no room, and growing it would
+ *    break every consumer already compiled against 24 bytes (a reminted
+ *    libc.so writing past them corrupts whatever the consumer put next). But
+ *    on this shelf a jump REWINDS sigsetjmp's own wasm frame, locals
+ *    included, to what they were at the capture: a mask held in a local is
+ *    the context's own copy, restored as often as the context is jumped to.
+ *    That is what musl's __sigsetjmp_tail does, with the frame for storage.
  *
  * firebox#SGG: on the EXCEPTION-HANDLING shelf the two frame-sensitive halves
  * of this pair -- the capture and the jump -- cannot live in this file at all.
@@ -48,16 +66,13 @@
  */
 
 #ifdef __wasm_exception_handling__
-/* Exported: <setjmp.h>'s consumer-frame macros are the callers. */
-#define __FBX_SJ_HALF
-#else
-/* No macros on this shelf; the only callers are the two functions below. */
-#define __FBX_SJ_HALF static
-#endif
 
-static __FBX_THREAD_LOCAL sigset_t __firebox_saved_mask;
-static __FBX_THREAD_LOCAL void *__firebox_saved_env;
-static __FBX_THREAD_LOCAL int __firebox_saved_valid;
+/* The musl-shaped jmp_buf this shelf's <setjmp.h> declares; `__fl` says
+ * whether `__ss` holds a mask to restore, as in musl. */
+_Static_assert(sizeof(((struct __jmp_buf_tag *)0)->__ss) >= sizeof(sigset_t),
+               "jmp_buf's __ss must hold a sigset_t");
+_Static_assert(offsetof(struct __jmp_buf_tag, __fl) >= 24,
+               "jmp_buf's __fl must lie past both capture mechanisms' bytes");
 
 /* Out-of-line recorder. The noinline attribute is load-bearing: if the
  * body were inlined back into sigsetjmp, the resulting non-trivial
@@ -69,32 +84,31 @@ static __FBX_THREAD_LOCAL int __firebox_saved_valid;
  * compiled with `-mllvm --wasm-enable-sjlj`, this is the call that runs
  * immediately before the lowered `__wasm_setjmp`; keeping it a call rather
  * than inlined control flow is what keeps that call site simple enough for
- * the pass to rewrite. */
+ * the pass to rewrite.
+ *
+ * It runs before the capture and not on a jump's return, so the buffer keeps
+ * the mask of the sigsetjmp that recorded it until a sigsetjmp on the SAME
+ * buffer records again. */
 __attribute__((noinline))
-__FBX_SJ_HALF void __firebox_sigsetjmp_record(void *buf, int savesigs) {
-    if (savesigs) {
-        sigemptyset(&__firebox_saved_mask);
-        pthread_sigmask(SIG_SETMASK, NULL, &__firebox_saved_mask);
-        __firebox_saved_env = buf;
-        __firebox_saved_valid = 1;
-    } else if (__firebox_saved_env == buf) {
-        /* savesigs=0 -> siglongjmp must NOT restore a mask for this env.
-         * Invalidate the saved slot if it was keyed to this env. */
-        __firebox_saved_valid = 0;
-    }
+void __firebox_sigsetjmp_record(void *buf, int savesigs) {
+    struct __jmp_buf_tag *jb = buf;
+    jb->__fl = 0;
+    if (savesigs &&
+        pthread_sigmask(SIG_SETMASK, NULL, (sigset_t *)(void *)jb->__ss) == 0)
+        jb->__fl = 1;
 }
 
 /* The mask-restore half, split out of siglongjmp's body by firebox#SGG so the
  * consumer-frame macro can run it before the jump. Restoring the mask BEFORE
  * transferring control is the order the inlined version had and the order
  * POSIX requires: by the time the sigsetjmp call site returns non-zero, the
- * mask must already be the one that was saved. */
+ * mask must already be the one that was saved. It leaves the buffer as it
+ * found it: every later siglongjmp to it restores the same mask. */
 __attribute__((noinline))
-__FBX_SJ_HALF void __firebox_siglongjmp_restore(void *buf) {
-    if (__firebox_saved_valid && __firebox_saved_env == buf) {
-        pthread_sigmask(SIG_SETMASK, &__firebox_saved_mask, NULL);
-        __firebox_saved_valid = 0;
-    }
+void __firebox_siglongjmp_restore(void *buf) {
+    struct __jmp_buf_tag *jb = buf;
+    if (jb->__fl)
+        pthread_sigmask(SIG_SETMASK, (const sigset_t *)(const void *)jb->__ss, NULL);
 }
 
 /* <setjmp.h> makes these two macros on the EH shelf; undefine them so the
@@ -113,5 +127,59 @@ _Noreturn void siglongjmp(jmp_buf buf, int val) {
     __firebox_siglongjmp_restore((void *)buf);
     longjmp(buf, val);
 }
+
+#else /* the stack-snapshot shelf */
+
+/* The signals a mask can hold here (1.._NSIG-1) fit one 64-bit word; the
+ * mask travels in a scalar, never in memory, because only the frame's
+ * LOCALS are part of what the jump rewinds. The shadow-stack bytes of this
+ * frame are not: they are whatever ran there since. */
+_Static_assert(_NSIG - 1 <= 64, "a signal mask must fit one 64-bit local");
+
+static uint64_t __fbx_mask_word(const sigset_t *set) {
+    const unsigned long *w = (const unsigned long *)(const void *)set;
+    if (sizeof(unsigned long) >= sizeof(uint64_t))
+        return (uint64_t)w[0];
+    return (uint64_t)w[0] | ((uint64_t)w[1] << 32);
+}
+
+static void __fbx_mask_set(sigset_t *set, uint64_t mask) {
+    unsigned long *w = (unsigned long *)(void *)set;
+    sigemptyset(set);
+    if (sizeof(unsigned long) >= sizeof(uint64_t)) {
+        w[0] = (unsigned long)mask;
+    } else {
+        w[0] = (unsigned long)mask;
+        w[1] = (unsigned long)(mask >> 32);
+    }
+}
+
+int sigsetjmp(jmp_buf buf, int savesigs) {
+    uint64_t saved = 0;
+    if (savesigs) {
+        sigset_t now;
+        sigemptyset(&now);
+        if (pthread_sigmask(SIG_SETMASK, NULL, &now) != 0)
+            savesigs = 0;
+        else
+            saved = __fbx_mask_word(&now);
+    }
+    int ret = setjmp(buf);
+    if (ret != 0 && savesigs) {
+        /* A jump's return: `saved` and `savesigs` are the values this
+         * capture had, whatever buffer or jump came in between. */
+        sigset_t set;
+        __fbx_mask_set(&set, saved);
+        pthread_sigmask(SIG_SETMASK, &set, NULL);
+    }
+    return ret;
+}
+
+_Noreturn void siglongjmp(jmp_buf buf, int val);
+_Noreturn void siglongjmp(jmp_buf buf, int val) {
+    longjmp(buf, val);
+}
+
+#endif /* __wasm_exception_handling__ */
 
 #endif

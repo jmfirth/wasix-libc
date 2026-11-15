@@ -176,7 +176,22 @@ static void __fbx_stack_diag_bare(const char *what, size_t what_len) {
   __fbx_stack_diag_tail();
 }
 
+/* firebox#QY4 — see __fbx_handler_frames in src/signal/sigaction.c. */
+int __fbx_sigjmp_handler_depth(void);
+void __fbx_sigjmp_unwind_handlers(int keep);
+
+/* firebox#QY4 — tells the host that the longjmp return below undoes the
+ * signal-handler state of every handler a jump abandons. The host takes a
+ * longjmp out of a handler it dispatched only when this is defined: without
+ * it the signal would never be delivered again, and it ends the program
+ * instead (lib/wasix stack_restore.rs, FBX_SIGJMP_UNWINDS_HANDLERS). */
+__attribute__((export_name("__fbx_sigjmp_unwinds_handlers")))
+void __fbx_sigjmp_unwinds_handlers(void) {}
+
 int __wasilibc_setjmp(__wasi_stack_snapshot_t * buf) {
+  /* A local, so the asyncify rewind of a longjmp gives back the value it had
+   * when THIS context was captured. */
+  int handler_depth = __fbx_sigjmp_handler_depth();
   uint64_t ret = 0;
   __wasi_errno_t err = __wasi_stack_checkpoint(buf, &ret);
   if (err != 0) {
@@ -184,6 +199,8 @@ int __wasilibc_setjmp(__wasi_stack_snapshot_t * buf) {
                            sizeof "setjmp: stack_checkpoint" - 1, err);
     abort();
   }
+  if (ret != 0)
+    __fbx_sigjmp_unwind_handlers(handler_depth);
   return (int)ret;
 }
 
