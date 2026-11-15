@@ -2216,7 +2216,7 @@ int __wasm_inline_delivery_end_restart(void) {
  * reproduce the firebox#912 deadlock window (the futex_register_held
  * syscall issued from INSIDE the lock's own contended acquire — a window
  * that does not overlap the handler body). */
-int __wasm_raise_self(int sig) {
+int __wasm_signal_self(int sig, int code) {
 	if (sig < 1 || sig >= _NSIG) return 0;
 	if (__wasm_in_any_handler() > 0) {
 		/* IN-HANDLER cases: each accepted RT raise owns one ring record. */
@@ -2229,7 +2229,7 @@ int __wasm_raise_self(int sig) {
 			 * enqueue too. Keep its depth before recording the pending bit. */
 			if (__fbx_sig_is_rt(sig)) {
 				union sigval sv = {0};
-				(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+				(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 			}
 			__wasm_pend_signal(sig);
 			return 1;
@@ -2239,7 +2239,7 @@ int __wasm_raise_self(int sig) {
 		if (__wasm_nodefer_active[sig] > 0) {
 			if (__fbx_sig_is_rt(sig)) {
 				union sigval sv = {0};
-				(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+				(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 			}
 			__wasm_signal(sig);
 			return 1;
@@ -2258,7 +2258,7 @@ int __wasm_raise_self(int sig) {
 			 * handler (#VYD): enqueue this instance before dispatch. */
 			if (__fbx_sig_is_rt(sig)) {
 				union sigval sv = {0};
-				(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+				(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 			}
 			__wasm_signal(sig);
 			return 1;
@@ -2303,11 +2303,15 @@ int __wasm_raise_self(int sig) {
 	{
 		union sigval sv;
 		memset(&sv, 0, sizeof sv);
-		(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+		(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 	}
 	__wasm_signal(sig);
 	__wasm_deliver_pending_rt_inline();
 	return 1;
+}
+
+int __wasm_raise_self(int sig) {
+	return __wasm_signal_self(sig, SI_USER);
 }
 
 /* Compatibility-only export. NOTHING IN THIS LIBC REQUESTS IT ANY MORE.

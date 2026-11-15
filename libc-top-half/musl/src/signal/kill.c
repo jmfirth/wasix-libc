@@ -27,6 +27,7 @@ extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
  * that nothing on the consumption path can ever clear. Use this helper rather
  * than an open-coded a_or so the pair cannot be separated again. */
 extern void __fbx_rtsig_repend(int sig);
+int __wasm_signal_self(int sig, int code);
 #endif
 
 int kill(pid_t pid, int sig)
@@ -61,6 +62,13 @@ int kill(pid_t pid, int sig)
 		errno = EINVAL;
 		return -1;
 	}
+	/* Match raise/pthread_kill for an in-handler self-target. Host delivery
+	 * defers inside its signal callback, after the interrupted handler's
+	 * saved jump context may already have returned. */
+	struct pthread *self = __pthread_self();
+	if (self && self->in_handler_depth > 0 && pid == (pid_t)getpid() &&
+	    __wasm_signal_self(sig, SI_USER))
+		return 0;
 	/* firebox#VYD — a SELF-directed RT kill queues depth in the guest ring (the
 	 * 1-arg / SA_SIGINFO drain reads it); a cross-process RT kill queues a bare
 	 * record in the HOST stash instead (proc_signal → #VYD-H1), reachable there
