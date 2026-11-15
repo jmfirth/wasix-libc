@@ -171,6 +171,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         unistd/getlogin.c \
         unistd/getlogin_r.c \
         unistd/alarm.c \
+        unistd/pause.c \
         unistd/ualarm.c \
         unistd/ttyname.c \
         unistd/ttyname_r.c \

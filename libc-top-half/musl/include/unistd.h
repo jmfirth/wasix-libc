@@ -135,9 +135,7 @@ char *getcwd(char *, size_t);
 
 unsigned alarm(unsigned);
 unsigned sleep(unsigned);
-#ifdef __wasilibc_unmodified_upstream /* WASI has no pause */
 int pause(void);
-#endif
 
 /* firebox#FD6: fork/_Fork/_fork_internal are declared in EH builds too.
  * Upstream 0008d18 hid these behind !__wasm_exception_handling__ ("fork not
