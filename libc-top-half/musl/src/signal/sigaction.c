@@ -2148,10 +2148,22 @@ int __wasm_raise_self(int sig) {
 			__wasm_signal(sig);
 			return 1;
 		}
-		/* Unblocked, no active SA_NODEFER for this signal: fall through to
-		 * the host. The host's #912 guard will defer it to the next syscall
-		 * boundary after the outer dispatch returns — the faithful "deliver
-		 * after the handler returns" behavior for the non-NODEFER case. */
+		/* firebox#QY4 (nested-raise prototype) — unblocked, a standard
+		 * signal with a user handler, and that handler not already running:
+		 * Linux delivers it on the raise() return path, nested inside this
+		 * handler, before raise() returns. Deferring it to after the outer
+		 * handler returned ran its handler late, and a siglongjmp in it then
+		 * targeted a context whose frame had returned (MEASURED: SIGUSR1's
+		 * handler raise(SIGUSR2)s, SIGUSR2's siglongjmps: the program printed
+		 * its result twice, with garbage, rc 0). */
+		if (!__fbx_sig_is_rt(sig) && __fbx_handler_installed(sig) &&
+		    __wasm_in_handler[sig] == 0) {
+			__wasm_signal(sig);
+			return 1;
+		}
+		/* Otherwise fall through to the host. The host's #912 guard will
+		 * defer it to the next syscall boundary after the outer dispatch
+		 * returns. */
 		return 0;
 	}
 
