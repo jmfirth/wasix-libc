@@ -21,6 +21,7 @@ extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
 extern volatile int __wasm_pending_sigs[];
 int __wasm_signal_self(int sig, int code);
+int __wasm_thread_sig_blocked(int sig);
 #endif
 
 #ifdef __wasilibc_unmodified_upstream
@@ -53,10 +54,11 @@ int pthread_kill(pthread_t t, int sig)
 	 * pthread_kill/7-1 ("did not fail on EINVAL"). The upstream branch above
 	 * already performs this check; this restores it on the firebox branch. */
 	if (sig+0U >= (unsigned)_NSIG) return EINVAL;
-	/* A self-target with an active user handler must deliver before this
+	/* An unblocked self-target with an active user handler must deliver before this
 	 * call returns. Do this before masking/enqueuing, so the common path
 	 * sees the caller's real mask and owns exactly one RT record. */
 	if (t == __pthread_self() && t->in_handler_depth > 0 &&
+	    !__wasm_thread_sig_blocked(sig) &&
 	    __wasm_signal_self(sig, SI_TKILL))
 		return 0;
 	sigset_t set;

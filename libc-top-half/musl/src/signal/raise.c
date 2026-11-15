@@ -74,10 +74,10 @@ int raise(int sig)
 	 * __wasm_signal enqueues it into the pending bitmask rather than
 	 * dispatching). The pending bitmask is one bit per signal and so loses
 	 * the count, but POSIX requires a blocked RT signal raised N times to
-	 * queue N instances. Enqueue a minimal SI_USER record into the RT-signal
+	 * queue N instances. Enqueue a minimal SI_TKILL record into the RT-signal
 	 * FIFO ring — the depth source of truth the sigwait/sigtimedwait accept
 	 * consumers already drain one-per-call and re-pend from while non-empty
-	 * (sigwait/2-1). Mirrors sigqueue()'s SELF branch but with SI_USER (a
+	 * (sigwait/2-1). Mirrors sigqueue()'s SELF branch but with SI_TKILL (a
 	 * raise carries no queued value). GATED on "will pend": an UNBLOCKED
 	 * raise dispatches immediately (a single delivery, no queued depth), and
 	 * pushing there would leak a ring entry the non-SA_SIGINFO dispatch path
@@ -87,7 +87,7 @@ int raise(int sig)
 	if (__wasm_thread_sig_blocked(sig)) {
 		union sigval sv;
 		memset(&sv, 0, sizeof sv);
-		(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
+		(void)__fbx_rtsigq_push(sig, sv, SI_TKILL, getpid(), getuid());
 	}
 	/* firebox#90Y — honor the C raise() contract: 0 on success, -1 with
 	 * errno set on failure (the raw __wasi_errno_t was previously returned

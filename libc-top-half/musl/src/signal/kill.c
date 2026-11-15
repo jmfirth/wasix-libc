@@ -28,6 +28,7 @@ extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
  * than an open-coded a_or so the pair cannot be separated again. */
 extern void __fbx_rtsig_repend(int sig);
 int __wasm_signal_self(int sig, int code);
+int __wasm_thread_sig_blocked(int sig);
 #endif
 
 int kill(pid_t pid, int sig)
@@ -64,9 +65,12 @@ int kill(pid_t pid, int sig)
 	}
 	/* Match raise/pthread_kill for an in-handler self-target. Host delivery
 	 * defers inside its signal callback, after the interrupted handler's
-	 * saved jump context may already have returned. */
+	 * saved jump context may already have returned. Only an unblocked caller
+	 * may take this process-directed delivery: a blocked caller must leave
+	 * selection to the host so another unblocked thread or sigwaiter can win. */
 	struct pthread *self = __pthread_self();
 	if (self && self->in_handler_depth > 0 && pid == (pid_t)getpid() &&
+	    !__wasm_thread_sig_blocked(sig) &&
 	    __wasm_signal_self(sig, SI_USER))
 		return 0;
 	/* firebox#VYD — a SELF-directed RT kill queues depth in the guest ring (the

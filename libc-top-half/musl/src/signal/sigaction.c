@@ -590,18 +590,16 @@ static volatile int __wasm_nodefer_active[_NSIG];
 #define __FBX_HANDLER_FRAMES 64
 struct __fbx_handler_frame {
 	int sig;
-	int drain_depth;
 	unsigned char in_handler, nodefer, depth, alt, host_entry;
 };
 static __FBX_THREAD_LOCAL struct __fbx_handler_frame __fbx_handler_frames[__FBX_HANDLER_FRAMES];
 static __FBX_THREAD_LOCAL volatile int __fbx_handler_frame_count;
-static __FBX_THREAD_LOCAL int __fbx_pending_drain_depth;
 
 static struct __fbx_handler_frame *__fbx_handler_frame_push(int sig, int host_entry) {
 	int i = __fbx_handler_frame_count++;
 	if (i >= __FBX_HANDLER_FRAMES) return 0;
 	__fbx_handler_frames[i] = (struct __fbx_handler_frame){
-		.sig = sig, .drain_depth = __fbx_pending_drain_depth,
+		.sig = sig,
 		.host_entry = host_entry
 	};
 	return &__fbx_handler_frames[i];
@@ -1389,7 +1387,7 @@ static int __fbx_claim_pending_bit(volatile int *word, int bit) {
 	}
 }
 
-static void __fbx_dispatch_signal(int sig, int host_entry);
+static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain);
 
 static int __wasm_drain_pending_pass(struct pthread *self) {
 	int tid = self->tid;
@@ -1428,7 +1426,7 @@ static int __wasm_drain_pending_pass(struct pthread *self) {
 				 * A self-target host nudge is deferred; handing the whole
 				 * batch to it would lose the opportunity to prepare nested
 				 * frames. Default actions remain owned by the host. */
-				if (__fbx_handler_installed(sig)) __fbx_dispatch_signal(sig, 0);
+				if (__fbx_handler_installed(sig)) __fbx_dispatch_signal(sig, 0, 1);
 				else (void)__wasi_thread_signal(tid, (__wasi_signal_t)sig);
 			}
 		}
@@ -1439,13 +1437,12 @@ static int __wasm_drain_pending_pass(struct pthread *self) {
 void __wasm_drain_pending_sigs(void) {
 	struct pthread *self = __pthread_self();
 	if (!self || __fbx_inline_delivery_depth > 0) return;
-	/* A dispatched handler's tail must not recurse into this drain. Rescan
-	 * here after it returns so even an arbitrarily long self-re-raise chain
+	/* A handler dispatched directly by this drain must not recurse into it.
+	 * Nested dispatches inside that handler still drain at their own return.
+	 * Rescan here after it returns so even an arbitrarily long self-re-raise chain
 	 * uses constant dispatch depth. Explicit unblocks inside a handler may
 	 * still start a nested drain and deliver synchronously. */
-	__fbx_pending_drain_depth++;
 	while (__wasm_drain_pending_pass(self)) {}
-	__fbx_pending_drain_depth--;
 }
 
 /* firebox#QY4 — Linux selects pending standard signals by number before RT,
@@ -1473,7 +1470,7 @@ static void __fbx_stack_pending_handlers(int current)
 		if (!__fbx_handler_installed(sig)) continue;
 		if (!__fbx_claim_pending_bit(&self->pending_sigs[word], bit)) continue;
 		a_and(&__wasm_pending_sigs[word], ~bit);
-		__fbx_dispatch_signal(sig, 0);
+		__fbx_dispatch_signal(sig, 0, 0);
 	}
 }
 
@@ -1599,7 +1596,7 @@ static inline void __fbx_prepare_pending_frame(int sig, int on_alt,
 		__fbx_stack_pending_handlers(sig);
 }
 
-static void __fbx_dispatch_signal(int sig, int host_entry) {
+static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 	/* firebox#93A — SIGCANCEL(33): act on a pending ASYNCHRONOUS cancel at this
 	 * cooperative delivery boundary (the #8B5 loop-header poll, or any syscall
 	 * drain). This is the RUNNING-thread half of the #5RE deferred-cancellation
@@ -1716,6 +1713,9 @@ static void __fbx_dispatch_signal(int sig, int host_entry) {
 	if (!(ksa.flags & SA_NODEFER)) {
 		if (__wasm_in_handler[sig] > 0) {
 			__wasm_pend_signal(sig);
+			/* The lock window may have pended other, now-unblocked signals.
+			 * This signal's active guard keeps it out of the drain. */
+			__wasm_drain_pending_sigs();
 			return;
 		}
 	}
@@ -1776,8 +1776,8 @@ static void __fbx_dispatch_signal(int sig, int host_entry) {
 		 * receives only the signal number, so si_code/si_pid/si_uid/
 		 * si_value have no faithful source here and are zeroed (musl's
 		 * own minimal-siginfo behavior for signals lacking queued
-		 * info). si_code == 0 == SI_USER, the correct code for a
-		 * kill()/raise()/tkill()-delivered signal with no si_value.
+		 * info). SI_USER remains the legacy fallback when the host supplies
+		 * no sender metadata; RT self-signals carry their actual code in the ring.
 		 * The ucontext argument is passed as NULL: every Open POSIX
 		 * sigaction test marks it unused and never dereferences it,
 		 * and wasm has no machine context to materialize.
@@ -2025,7 +2025,7 @@ static void __fbx_dispatch_signal(int sig, int host_entry) {
 	 * deliverable self-re-raise would just pend against the old guard forever.
 	 * Still-blocked signals retain their bits in the drain. */
 	struct pthread *self = __pthread_self();
-	if (self && !__fbx_pending_drain_depth) {
+	if (self && !from_drain) {
 		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
 			if (self->pending_sigs[w]) {
 				__wasm_drain_pending_sigs();
@@ -2040,7 +2040,7 @@ static void __fbx_dispatch_signal(int sig, int host_entry) {
  * an ordinary guest frame. Snapshot jumps retain the host's rewind protocol. */
 __attribute__((export_name("__wasm_signal")))
 void __wasm_signal(int sig) {
-	__fbx_dispatch_signal(sig, 1);
+	__fbx_dispatch_signal(sig, 1, 0);
 }
 
 /* firebox#VYD — deliver every queued RT signal that is currently deliverable on
@@ -2074,7 +2074,7 @@ void __wasm_deliver_pending_rt_inline(void) {
 		if (!__fbx_handler_installed(s)) continue;
 		if (__wasm_in_handler[s] > 0) continue;
 		if (__wasm_thread_sig_blocked(s)) continue;
-		__fbx_dispatch_signal(s, 0);
+		__fbx_dispatch_signal(s, 0, 0);
 	}
 }
 
@@ -2133,7 +2133,7 @@ static int __wasm_deliver_pending_inline_vote(void) {
 			ran = 1;
 			if (!(ksa.flags & SA_RESTART)) all_restart = 0;
 		}
-		__fbx_dispatch_signal(s, 0);
+		__fbx_dispatch_signal(s, 0, 0);
 	}
 	__wasm_deliver_pending_rt_inline();
 	return ran && all_restart;
@@ -2249,7 +2249,7 @@ int __wasm_signal_self(int sig, int code) {
 				union sigval sv = {0};
 				(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 			}
-			__fbx_dispatch_signal(sig, 0);
+			__fbx_dispatch_signal(sig, 0, 0);
 			return 1;
 		}
 		/* firebox#QY4 (N1) — unblocked, a standard or realtime
@@ -2268,7 +2268,7 @@ int __wasm_signal_self(int sig, int code) {
 				union sigval sv = {0};
 				(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 			}
-			__fbx_dispatch_signal(sig, 0);
+			__fbx_dispatch_signal(sig, 0, 0);
 			return 1;
 		}
 		/* Otherwise fall through to the host. The host's #912 guard will
@@ -2313,13 +2313,13 @@ int __wasm_signal_self(int sig, int code) {
 		memset(&sv, 0, sizeof sv);
 		(void)__fbx_rtsigq_push(sig, sv, code, getpid(), getuid());
 	}
-	__fbx_dispatch_signal(sig, 0);
+	__fbx_dispatch_signal(sig, 0, 0);
 	__wasm_deliver_pending_rt_inline();
 	return 1;
 }
 
 int __wasm_raise_self(int sig) {
-	return __wasm_signal_self(sig, SI_USER);
+	return __wasm_signal_self(sig, SI_TKILL);
 }
 
 /* Compatibility-only export. NOTHING IN THIS LIBC REQUESTS IT ANY MORE.
@@ -2782,11 +2782,6 @@ void __fbx_sigjmp_unwind_handlers(int keep) {
 			__fbx_rtsig_repend(f->sig);
 	}
 	__fbx_handler_frame_count = keep;
-	/* The jump also abandons any drains above the retained handler. Its
-	 * entry depth identifies the still-live drain; a main-stack context has
-	 * none. Leaving the abandoned guard set would suppress later tail drains. */
-	__fbx_pending_drain_depth = keep > 0 && keep <= __FBX_HANDLER_FRAMES
-		? __fbx_handler_frames[keep - 1].drain_depth : 0;
 	int has_pending = 0;
 	if (self) {
 		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
