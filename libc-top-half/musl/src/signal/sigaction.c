@@ -590,15 +590,19 @@ static volatile int __wasm_nodefer_active[_NSIG];
 #define __FBX_HANDLER_FRAMES 64
 struct __fbx_handler_frame {
 	int sig;
+	int drain_depth;
 	unsigned char in_handler, nodefer, depth, alt;
 };
 static __FBX_THREAD_LOCAL struct __fbx_handler_frame __fbx_handler_frames[__FBX_HANDLER_FRAMES];
 static __FBX_THREAD_LOCAL volatile int __fbx_handler_frame_count;
+static __FBX_THREAD_LOCAL int __fbx_pending_drain_depth;
 
 static struct __fbx_handler_frame *__fbx_handler_frame_push(int sig) {
 	int i = __fbx_handler_frame_count++;
 	if (i >= __FBX_HANDLER_FRAMES) return 0;
-	__fbx_handler_frames[i] = (struct __fbx_handler_frame){ .sig = sig };
+	__fbx_handler_frames[i] = (struct __fbx_handler_frame){
+		.sig = sig, .drain_depth = __fbx_pending_drain_depth
+	};
 	return &__fbx_handler_frames[i];
 }
 
@@ -1386,10 +1390,9 @@ static int __fbx_claim_pending_bit(volatile int *word, int bit) {
 
 void __wasm_signal(int sig);
 
-void __wasm_drain_pending_sigs(void) {
-	struct pthread *self = __pthread_self();
-	if (!self) return;
+static int __wasm_drain_pending_pass(struct pthread *self) {
 	int tid = self->tid;
+	int delivered = 0;
 	for (int word = 0; word < __WASM_PENDING_WORDS; word++) {
 		/* firebox#QY4 (L2) — the bits to raise are the ones pending NOW, each
 		 * raised once if deliverable, but each is CLAIMED only as it is
@@ -1419,6 +1422,7 @@ void __wasm_drain_pending_sigs(void) {
 			 * sigpending doesn't continue to report it as pending. */
 			a_and(&__wasm_pending_sigs[word], ~(1 << bit));
 			if (sig >= 1 && sig < _NSIG) {
+				delivered = 1;
 				/* User handlers run before the unblocking call returns.
 				 * A self-target host nudge is deferred; handing the whole
 				 * batch to it would lose the opportunity to prepare nested
@@ -1428,6 +1432,19 @@ void __wasm_drain_pending_sigs(void) {
 			}
 		}
 	}
+	return delivered;
+}
+
+void __wasm_drain_pending_sigs(void) {
+	struct pthread *self = __pthread_self();
+	if (!self || __fbx_inline_delivery_depth > 0) return;
+	/* A dispatched handler's tail must not recurse into this drain. Rescan
+	 * here after it returns so even an arbitrarily long self-re-raise chain
+	 * uses constant dispatch depth. Explicit unblocks inside a handler may
+	 * still start a nested drain and deliver synchronously. */
+	__fbx_pending_drain_depth++;
+	while (__wasm_drain_pending_pass(self)) {}
+	__fbx_pending_drain_depth--;
 }
 
 /* firebox#QY4 — Linux selects pending standard signals by number before RT,
@@ -2008,7 +2025,7 @@ void __wasm_signal(int sig) {
 	 * deliverable self-re-raise would just pend against the old guard forever.
 	 * Still-blocked signals retain their bits in the drain. */
 	struct pthread *self = __pthread_self();
-	if (self) {
+	if (self && !__fbx_pending_drain_depth) {
 		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
 			if (self->pending_sigs[w]) {
 				__wasm_drain_pending_sigs();
@@ -2753,6 +2770,11 @@ void __fbx_sigjmp_unwind_handlers(int keep) {
 			__fbx_rtsig_repend(f->sig);
 	}
 	__fbx_handler_frame_count = keep;
+	/* The jump also abandons any drains above the retained handler. Its
+	 * entry depth identifies the still-live drain; a main-stack context has
+	 * none. Leaving the abandoned guard set would suppress later tail drains. */
+	__fbx_pending_drain_depth = keep > 0 && keep <= __FBX_HANDLER_FRAMES
+		? __fbx_handler_frames[keep - 1].drain_depth : 0;
 	int has_pending = 0;
 	if (self) {
 		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
