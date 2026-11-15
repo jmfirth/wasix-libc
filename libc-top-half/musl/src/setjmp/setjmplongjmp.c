@@ -38,7 +38,6 @@ void
 __wasm_setjmp(void *env, unsigned int label, void *func_invocation_id)
 {
         struct __wasm_jmp_buf *jb = env;
-        struct __jmp_buf_tag *buf = env;
         if (label == 0) { /* ABI contract */
                 __builtin_trap();
         }
@@ -48,10 +47,7 @@ __wasm_setjmp(void *env, unsigned int label, void *func_invocation_id)
         jb->func_invocation_id = func_invocation_id;
         jb->label = label;
         jb->handler_depth = __fbx_sigjmp_handler_depth();
-        if (jb->mask_pending != __wasm_sigjmp_pending(env) ||
-            buf->__fl != __wasm_sigjmp_cookie(env))
-                buf->__fl = 0;
-        jb->mask_pending = 0;
+        __wasm_sigjmp_capture(env);
 }
 
 unsigned int
@@ -150,6 +146,11 @@ _Noreturn void longjmp (jmp_buf buf, int val) {
 }
 
 int setjmp (jmp_buf buf) {
+#ifdef __wasm_exception_handling__
+    /* An EH consumer without SJLJ lowering can use the snapshot fallback.
+     * Plain captures must consume/clear the mask flag on that route too. */
+    __wasm_sigjmp_capture(buf);
+#endif
     return __wasilibc_setjmp((__wasi_stack_snapshot_t *)buf);
 }
 

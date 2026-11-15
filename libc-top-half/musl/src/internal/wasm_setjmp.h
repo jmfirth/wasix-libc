@@ -32,4 +32,14 @@ static inline uintptr_t __wasm_sigjmp_pending(void *buf)
 	return ((uintptr_t)buf ^ (uintptr_t)0xc6e85a39U) | 1UL;
 }
 
+static inline void __wasm_sigjmp_capture(void *env)
+{
+	struct __wasm_jmp_buf *jb = env;
+	struct __jmp_buf_tag *buf = env;
+	if (jb->mask_pending != __wasm_sigjmp_pending(env) ||
+	    buf->__fl != __wasm_sigjmp_cookie(env))
+		buf->__fl = 0;
+	jb->mask_pending = 0;
+}
+
 #endif
