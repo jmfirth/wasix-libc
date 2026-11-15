@@ -1387,6 +1387,8 @@ static int __fbx_claim_pending_bit(volatile int *word, int bit) {
 	}
 }
 
+void __wasm_signal(int sig);
+
 void __wasm_drain_pending_sigs(void) {
 	struct pthread *self = __pthread_self();
 	if (!self) return;
@@ -1420,16 +1422,16 @@ void __wasm_drain_pending_sigs(void) {
 			 * sigpending doesn't continue to report it as pending. */
 			a_and(&__wasm_pending_sigs[word], ~(1 << bit));
 			if (sig >= 1 && sig < _NSIG) {
-				/* Re-raise on the current thread so it flows back
-				 * through the dispatch path and rechecks blocking. */
-				(void)__wasi_thread_signal(tid,
-				                           (__wasi_signal_t)sig);
+				/* User handlers run before the unblocking call returns.
+				 * A self-target host nudge is deferred; handing the whole
+				 * batch to it would lose the opportunity to prepare nested
+				 * frames. Default actions remain owned by the host. */
+				if (__fbx_handler_installed(sig)) __wasm_signal(sig);
+				else (void)__wasi_thread_signal(tid, (__wasi_signal_t)sig);
 			}
 		}
 	}
 }
-
-void __wasm_signal(int sig);
 
 /* firebox#QY4 — Linux selects pending standard signals by number before RT,
  * but prepares each signal frame (and applies its mask) before entering user
@@ -1673,7 +1675,10 @@ void __wasm_signal(int sig) {
 		__fbx_replace_action_locked(sig, &ksa_default, 0);
 	}
 	UNLOCK(__eintr_handler_lock);
-	__restore_sigs(lock_mask);
+	/* This dispatch already owns the callback. Restore only the mask here:
+	 * pending frames must be prepared AFTER applying this action's sa_mask,
+	 * below, rather than consumed by __restore_sigs before that point. */
+	__wasm_restore_handler_mask(lock_mask);
 
 	/* SA_NODEFER recursion guard. Without SA_NODEFER, don't re-enter
 	 * the same signal's handler; enqueue instead. */
@@ -2090,7 +2095,7 @@ static int __wasm_deliver_pending_inline_vote(void) {
 		LOCK(__eintr_handler_lock);
 		struct k_sigaction ksa = __eintr_handler_callbacks[s];
 		UNLOCK(__eintr_handler_lock);
-		__restore_sigs(lock_mask);
+		__wasm_restore_handler_mask(lock_mask);
 		if (ksa.handler != SIG_DFL && ksa.handler != SIG_IGN && ksa.handler != 0) {
 			ran = 1;
 			if (!(ksa.flags & SA_RESTART)) all_restart = 0;
