@@ -1680,6 +1680,7 @@ void __wasm_signal(int sig) {
 	 * happens to place at table slot 1 — silently dropping every signal
 	 * for the smallest possible C canary. See #468 RCA + class lesson
 	 * class_lesson_wasm_fnptr_is_table_index_not_address. */
+	int handler_ran = 0;
 	if (ksa.handler != 0) {
 		/* SA_SIGINFO 3-arg calling convention (#WJJ).
 		 *
@@ -1768,6 +1769,7 @@ void __wasm_signal(int sig) {
 			 * since every drained instance is the same signal number. */
 			if (__fbx_rtsigq_pop_si(sig, &si)) {
 				do {
+					handler_ran = 1;
 					if (on_alt) {
 						__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
 					} else {
@@ -1775,6 +1777,7 @@ void __wasm_signal(int sig) {
 					}
 				} while (__fbx_rtsigq_pop_si(sig, &si));
 			} else if (__fbx_sig_is_rt(sig) && __fbx_signal_info_fill_si(sig, &si)) {
+				handler_ran = 1;
 				/* firebox#EMN — cross-process sigqueue si_value. The queued
 				 * value was sent by ANOTHER process, so it lives in the HOST,
 				 * not this process's `__fbx_rtsigq` ring (a forked child cannot
@@ -1792,6 +1795,7 @@ void __wasm_signal(int sig) {
 					h3(sig, &si, NULL);
 				}
 			} else if (!__fbx_sig_is_rt(sig)) {
+				handler_ran = 1;
 				memset(&si, 0, sizeof si);
 				si.si_signo = sig;
 				si.si_code = SI_USER;
@@ -1877,10 +1881,12 @@ void __wasm_signal(int sig) {
 			 * the mask per back-to-back delivery of the same signo. */
 			siginfo_t si;
 			while (__fbx_rtsigq_pop_si(sig, &si)) {
+				handler_ran = 1;
 				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
 				else ksa.handler(sig);
 			}
 			while (__fbx_signal_info_fill_si(sig, &si)) {
+				handler_ran = 1;
 				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
 				else ksa.handler(sig);
 			}
@@ -1888,6 +1894,7 @@ void __wasm_signal(int sig) {
 		} else {
 			/* Standard signal (1..31): at-most-one-pending coalescing — deliver
 			 * ONCE (the pending bitmask has no depth; unchanged pre-#VYD path). */
+			handler_ran = 1;
 			if (on_alt) {
 				__fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
 			} else {
@@ -1950,7 +1957,10 @@ void __wasm_signal(int sig) {
 	 * handler itself) avoids forcing handlers to be sigsuspend-aware. */
 	{
 		struct pthread *self = __pthread_self();
-		if (self) {
+		/* firebox#QMA: a default-ignored signal, SIG_IGN's callable no-op,
+		 * or an empty RT doorbell ran no user handler. None can end pause
+		 * or sigsuspend, or manufacture EINTR in the timed-wait funnel. */
+		if (self && handler_ran && ksa.handler != SIG_IGN) {
 			a_inc(&self->sigsuspend_tick);
 			__wake(&self->sigsuspend_tick, 1, 1);
 			a_inc(&self->sigdispatch_tick);
