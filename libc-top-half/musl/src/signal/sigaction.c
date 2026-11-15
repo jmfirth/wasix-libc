@@ -1370,12 +1370,9 @@ static inline int __wasm_in_any_handler(void) {
 	return self ? self->in_handler_depth : 0;
 }
 
-/* Drain the calling thread's pending bitmask and re-raise each bit via
- * __wasi_thread_signal on the calling thread. Called from __restore_sigs
- * after clearing the blocked flag, and from pthread_sigmask after a
- * SIG_UNBLOCK. The re-raise loops back through the runtime →
- * __wasm_signal, which will then find the signal unblocked and dispatch
- * normally. */
+/* Drain the calling thread's pending bitmask after a mask restore/unblock.
+ * User handlers run synchronously in guest code; default actions are handed
+ * to the host. Still-blocked signals remain in the pending claim surface. */
 /* firebox#QY4 (L2) — claim pending bit `bit` of `word` if it is still set.
  * The compare-and-swap is what lets a drain that a handler's own drain ran
  * inside skip a signal that inner drain already delivered. */
@@ -1787,8 +1784,15 @@ void __wasm_signal(int sig) {
 			__fbx_frame->depth = __self_dispatch != 0;
 			__fbx_frame->nodefer = nodefer;
 		}
-		if (ksa.handler != SIG_IGN)
-			__fbx_stack_pending_handlers(sig);
+		if (ksa.handler != SIG_IGN) {
+			/* A prepared SA_ONSTACK frame already owns the alt stack.
+			 * Pending frames above it must be prepared there too, before
+			 * this frame's user handler is entered. */
+			if (on_alt)
+				__fbx_call_on_altstack_1(__fbx_stack_pending_handlers, sig, alt_top);
+			else
+				__fbx_stack_pending_handlers(sig);
+		}
 		if (ksa.flags & SA_SIGINFO) {
 			void (*h3)(int, siginfo_t *, void *) =
 				(void (*)(int, siginfo_t *, void *))(void *)ksa.handler;
