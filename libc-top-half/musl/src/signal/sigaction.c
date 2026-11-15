@@ -1624,6 +1624,12 @@ void __wasm_signal(int sig) {
 		return;
 	}
 
+	/* firebox#HXF: a contended LOCK can enter the host and deliver another
+	 * signal on this thread. Mask before acquisition as well as publication;
+	 * __wasm_signal's blocked check above then pends without taking the lock.
+	 * Sibling threads retain their own masks and can finish their lock wait. */
+	unsigned long lock_mask[_NSIG/(8*sizeof(long))];
+	__block_all_sigs(lock_mask);
 	LOCK(__eintr_handler_lock);
 	struct k_sigaction ksa = __eintr_handler_callbacks[sig];
 	/* SA_RESETHAND: reset handler to SIG_DFL atomically with snapshot,
@@ -1633,6 +1639,7 @@ void __wasm_signal(int sig) {
 		__fbx_replace_action_locked(sig, &ksa_default, 0);
 	}
 	UNLOCK(__eintr_handler_lock);
+	__restore_sigs(lock_mask);
 
 	/* SA_NODEFER recursion guard. Without SA_NODEFER, don't re-enter
 	 * the same signal's handler; enqueue instead. */
@@ -2032,9 +2039,12 @@ static int __wasm_deliver_pending_inline_vote(void) {
 		if (__wasm_thread_sig_blocked(s)) continue;
 		a_and((volatile int *)&self->pending_sigs[word], ~bit);
 		a_and(&__wasm_pending_sigs[word], ~bit);
+		unsigned long lock_mask[_NSIG/(8*sizeof(long))];
+		__block_all_sigs(lock_mask);
 		LOCK(__eintr_handler_lock);
 		struct k_sigaction ksa = __eintr_handler_callbacks[s];
 		UNLOCK(__eintr_handler_lock);
+		__restore_sigs(lock_mask);
 		if (ksa.handler != SIG_DFL && ksa.handler != SIG_IGN && ksa.handler != 0) {
 			ran = 1;
 			if (!(ksa.flags & SA_RESTART)) all_restart = 0;
@@ -2310,6 +2320,13 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		__wasi_callback_signal("__wasm_signal");
 	}
 	int r = 0;
+	/* firebox#HXF: block only THIS thread while it may hold or wait for the
+	 * disposition lock. In particular a process-directed SIGTERM delivered
+	 * to the registrar must pend before __wasm_signal tries this same lock.
+	 * Restore after releasing it and copying the query result, so a handler
+	 * can safely call sigaction again. Never disable the process callback. */
+	unsigned long lock_mask[_NSIG/(8*sizeof(long))];
+	__block_all_sigs(lock_mask);
 	LOCK(__eintr_handler_lock);
 	ksa_old = __eintr_handler_callbacks[sig];
 	if (sa)
@@ -2321,6 +2338,9 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		old->sa_flags = ksa_old.flags;
 		memcpy(&old->sa_mask, &ksa_old.mask, _NSIG/8);
 	}
+#ifndef __wasilibc_unmodified_upstream
+	__restore_sigs(lock_mask);
+#endif
 	return __syscall_ret(r);
 }
 
