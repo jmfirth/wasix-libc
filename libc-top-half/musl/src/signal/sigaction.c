@@ -1450,6 +1450,9 @@ static void __fbx_stack_pending_handlers(int current)
 		if (!(self->pending_sigs[word] & bit)) continue;
 		if (self->sigwait_set[word] & bit) continue;
 		if (__wasm_in_handler[sig] || __wasm_thread_sig_blocked(sig)) continue;
+		/* Only user handlers can be staged in guest code. Default actions
+		 * (in particular job-control stops) belong to the host drain. */
+		if (!__fbx_handler_installed(sig)) continue;
 		if (!__fbx_claim_pending_bit(&self->pending_sigs[word], bit)) continue;
 		a_and(&__wasm_pending_sigs[word], ~bit);
 		__wasm_signal(sig);
@@ -2395,7 +2398,19 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		memcpy(&old->sa_mask, &ksa_old.mask, _NSIG/8);
 	}
 #ifndef __wasilibc_unmodified_upstream
-	__restore_sigs(lock_mask);
+	/* Callback re-arming is needed after fork, not after each disposition
+	 * query/publication. Keep sigaction's uncontended path entirely in guest
+	 * code; only an actual pending signal needs the post-unlock drain. */
+	__wasm_restore_handler_mask(lock_mask);
+	struct pthread *self = __pthread_self();
+	if (self) {
+		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
+			if (self->pending_sigs[w]) {
+				__wasm_drain_pending_sigs();
+				break;
+			}
+		}
+	}
 #endif
 	return __syscall_ret(r);
 }
