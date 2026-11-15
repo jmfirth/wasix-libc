@@ -131,13 +131,12 @@ __wasm_longjmp(void *env, int val)
 
 #include <wasi/libc.h>
 
-/* On the EH shelf <setjmp.h> still declares the 156-byte musl-shaped jmp_buf
- * rather than __wasi_stack_snapshot_t, because LLVM's SJLJ lowering in
- * consumer TUs writes its own 16-byte `struct jmp_buf_impl` into that same
- * storage. Only the size has to hold; wasm linear-memory accesses carry an
- * alignment HINT, never a trap, so the 4-vs-8 alignment gap is not a fault on
- * this target. Assert the size so a header change cannot silently truncate a
- * snapshot. */
+/* The EH header retains the musl-shaped buffer: 156 bytes on wasm32 and 160
+ * on wasm64. Its existing 24-byte __jb holds either the private EH capture
+ * state or a WASIX snapshot. The mask/flag stay beyond both; wasm_setjmp.h
+ * checks the actual EH capture layout at each width. Linear-memory alignment
+ * is a hint, so the wasm32 header's 4-vs-8 alignment difference is harmless.
+ * Assert storage size so a header change cannot truncate the snapshot. */
 _Static_assert(sizeof(jmp_buf) >= sizeof(__wasi_stack_snapshot_t),
                "jmp_buf must be able to hold a WASIX stack snapshot");
 
