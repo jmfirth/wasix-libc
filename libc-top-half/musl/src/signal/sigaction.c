@@ -1946,30 +1946,6 @@ void __wasm_signal(int sig) {
 		if (__self_dispatch) __self_dispatch->in_handler_depth--;
 		__wasm_restore_handler_mask(saved_mask);
 		if (on_alt) __fbx_altstack_depth--;
-		/* firebox signal-mask machinery — POSIX: on handler return the
-		 * thread's signal mask is restored, and any signals that became
-		 * pending while blocked by sa_mask (or by the handled signal's
-		 * own default block) are delivered now. Drain this thread's
-		 * pending bitmask: __wasm_drain_pending_sigs re-raises each bit,
-		 * and the resulting __wasm_signal re-checks the (restored) mask —
-		 * a still-blocked signal re-pends, an unblocked one dispatches.
-		 * Only walk the drain when something is actually pending on this
-		 * thread (the common no-pending case is a single cheap read), so
-		 * a handler that neither blocked nor re-raised anything pays no
-		 * host round-trip. Skipped entirely when a handler exit()s (the
-		 * sigpending/1-2,1-3 and sigaction/22-* cases never reach here),
-		 * so this only fires for handlers that block-then-raise-then-
-		 * return — the held-pending-delivered-on-return path. */
-		{
-			struct pthread *self = __pthread_self();
-			int has_pending = 0;
-			if (self) {
-				for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
-					if (self->pending_sigs[w]) { has_pending = 1; break; }
-				}
-			}
-			if (has_pending) __wasm_drain_pending_sigs();
-		}
 	} else if (default_handler != 0) {
 		default_handler(sig);
 	}
@@ -2006,6 +1982,20 @@ void __wasm_signal(int sig) {
 			__wake(&self->sigsuspend_tick, 1, 1);
 			a_inc(&self->sigdispatch_tick);
 			__wake(&self->sigdispatch_tick, 1, 1);
+		}
+	}
+	/* A normal handler return releases its frame and recursion guard BEFORE
+	 * delivering signals unblocked by that return. In-guest delivery cannot
+	 * rely on a host nudge waiting until this function returns: an otherwise
+	 * deliverable self-re-raise would just pend against the old guard forever.
+	 * Still-blocked signals retain their bits in the drain. */
+	struct pthread *self = __pthread_self();
+	if (self) {
+		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
+			if (self->pending_sigs[w]) {
+				__wasm_drain_pending_sigs();
+				break;
+			}
 		}
 	}
 }
