@@ -6,10 +6,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if !defined(__OPTIMIZE__)
-#error "sigsetjmp requires an optimized build: the saved mask must live in a wasm local"
-#endif
-
 /* WASIX sigsetjmp/siglongjmp with mask save/restore.
  *
  * Lives in its own TU (separate from setjmp/setjmplongjmp.c which defines
@@ -34,9 +30,8 @@
  * jump; so does this, in the one place each shelf has for it:
  *
  *  - EH shelf: jmp_buf is the musl-shaped struct, and its __fl / __ss fields
- *    are exactly musl's flag and mask, untouched by both capture mechanisms
- *    (the SJLJ pass's 16-byte jmp_buf_impl and the 24-byte stack snapshot
- *    both end before __fl).
+ *    hold a buffer-specific flag and mask. The private EH capture state and
+ *    the 24-byte stack snapshot both end before __fl.
  *  - stack-snapshot shelf: jmp_buf IS the 24-byte __wasi_stack_snapshot_t and
  *    the host writes all of it, so there is no room, and growing it would
  *    break every consumer already compiled against 24 bytes (a reminted
@@ -70,13 +65,15 @@
  */
 
 #ifdef __wasm_exception_handling__
+#include "wasm_setjmp.h"
+#include <wasi/api.h>
 
 /* The musl-shaped jmp_buf this shelf's <setjmp.h> declares; `__fl` says
  * whether `__ss` holds a mask to restore, as in musl. */
 _Static_assert(sizeof(((struct __jmp_buf_tag *)0)->__ss) >= sizeof(sigset_t),
                "jmp_buf's __ss must hold a sigset_t");
-_Static_assert(offsetof(struct __jmp_buf_tag, __fl) >= 24,
-               "jmp_buf's __fl must lie past both capture mechanisms' bytes");
+_Static_assert(offsetof(struct __jmp_buf_tag, __fl) >= sizeof(__wasi_stack_snapshot_t),
+               "jmp_buf's __fl must lie past the stack snapshot");
 
 /* Out-of-line recorder. The noinline attribute is load-bearing: if the
  * body were inlined back into sigsetjmp, the resulting non-trivial
@@ -97,9 +94,12 @@ __attribute__((noinline))
 void __firebox_sigsetjmp_record(void *buf, int savesigs) {
     struct __jmp_buf_tag *jb = buf;
     jb->__fl = 0;
+    ((struct __wasm_jmp_buf *)buf)->mask_pending = 0;
     if (savesigs &&
-        pthread_sigmask(SIG_SETMASK, NULL, (sigset_t *)(void *)jb->__ss) == 0)
-        jb->__fl = 1;
+        pthread_sigmask(SIG_SETMASK, NULL, (sigset_t *)(void *)jb->__ss) == 0) {
+        jb->__fl = __wasm_sigjmp_cookie(buf);
+        ((struct __wasm_jmp_buf *)buf)->mask_pending = __wasm_sigjmp_pending(buf);
+    }
 }
 
 /* The mask-restore half, split out of siglongjmp's body by firebox#SGG so the
@@ -111,7 +111,7 @@ void __firebox_sigsetjmp_record(void *buf, int savesigs) {
 __attribute__((noinline))
 void __firebox_siglongjmp_restore(void *buf) {
     struct __jmp_buf_tag *jb = buf;
-    if (jb->__fl)
+    if (jb->__fl == __wasm_sigjmp_cookie(buf))
         pthread_sigmask(SIG_SETMASK, (const sigset_t *)(const void *)jb->__ss, NULL);
 }
 
@@ -133,6 +133,10 @@ _Noreturn void siglongjmp(jmp_buf buf, int val) {
 }
 
 #else /* the stack-snapshot shelf */
+
+#if !defined(__OPTIMIZE__)
+#error "sigsetjmp requires an optimized build: the saved mask must live in a wasm local"
+#endif
 
 /* The signals a mask can hold here (1.._NSIG-1) fit one 64-bit word; the
  * mask travels in a scalar, never in memory, because only the frame's

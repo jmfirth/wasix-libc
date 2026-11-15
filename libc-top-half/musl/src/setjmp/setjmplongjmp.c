@@ -2,6 +2,11 @@
 #include <setjmp.h>
 
 #  ifdef __wasm_exception_handling__
+#include "wasm_setjmp.h"
+#include <signal.h>
+
+int __fbx_sigjmp_handler_depth(void);
+void __fbx_sigjmp_unwind_handlers(int);
 /*
  * function prototypes
  */
@@ -20,21 +25,20 @@ struct arg {
 		int val;
 };
 
-/*
- * jmp_buf should have large enough size and alignment to contain
- * this structure.
- */
-struct jmp_buf_impl {
-        void *func_invocation_id;
-        unsigned int label;
-
-        struct arg arg;
-};
+/* The throw payload must remain live through the catch, without overlapping
+ * capture state or the persistent signal mask. The old inline payload ran
+ * through __fl on wasm64. __ss has ample unused tail after WASIX's sigset_t. */
+_Static_assert(sizeof(((struct __jmp_buf_tag *)0)->__ss) >=
+               sizeof(sigset_t) + sizeof(struct arg),
+               "EH throw payload must fit after the saved signal mask");
+_Static_assert((offsetof(struct __jmp_buf_tag, __ss) + sizeof(sigset_t)) %
+               _Alignof(struct arg) == 0, "EH throw payload must be aligned");
 
 void
 __wasm_setjmp(void *env, unsigned int label, void *func_invocation_id)
 {
-        struct jmp_buf_impl *jb = (struct jmp_buf_impl *)env;
+        struct __wasm_jmp_buf *jb = env;
+        struct __jmp_buf_tag *buf = env;
         if (label == 0) { /* ABI contract */
                 __builtin_trap();
         }
@@ -43,12 +47,17 @@ __wasm_setjmp(void *env, unsigned int label, void *func_invocation_id)
         }
         jb->func_invocation_id = func_invocation_id;
         jb->label = label;
+        jb->handler_depth = __fbx_sigjmp_handler_depth();
+        if (jb->mask_pending != __wasm_sigjmp_pending(env) ||
+            buf->__fl != __wasm_sigjmp_cookie(env))
+                buf->__fl = 0;
+        jb->mask_pending = 0;
 }
 
 unsigned int
 __wasm_setjmp_test(void *env, void *func_invocation_id)
 {
-        struct jmp_buf_impl *jb = (struct jmp_buf_impl *)env;
+        struct __wasm_jmp_buf *jb = env;
         if (jb->label == 0) { /* ABI contract */
                 __builtin_trap();
         }
@@ -64,8 +73,9 @@ __wasm_setjmp_test(void *env, void *func_invocation_id)
 void
 __wasm_longjmp(void *env, int val)
 {
-        struct jmp_buf_impl *jb = (struct jmp_buf_impl *)env;
-        struct arg *arg = (struct arg *)&jb->arg;
+        struct __wasm_jmp_buf *jb = env;
+        struct __jmp_buf_tag *buf = env;
+        struct arg *arg = (void *)((unsigned char *)buf->__ss + sizeof(sigset_t));
         /*
          * C standard says:
          * The longjmp function cannot cause the setjmp macro to return
@@ -74,6 +84,7 @@ __wasm_longjmp(void *env, int val)
         if (val == 0) {
                 val = 1;
         }
+        __fbx_sigjmp_unwind_handlers(jb->handler_depth);
         arg->env = env;
         arg->val = val;
         __builtin_wasm_throw(1, arg); /* 1 == C_LONGJMP */
@@ -154,7 +165,7 @@ int setjmp (jmp_buf buf) {
 weak_alias(setjmp, _setjmp);
 weak_alias(longjmp, _longjmp);
 
-/* WASIX sigsetjmp is defined in src/signal/sigsetjmp_wasix.c so it
- * can share the TLS saved-mask slot with siglongjmp. See issue #37. */
+/* WASIX sigsetjmp is defined in src/signal/sigsetjmp_wasix.c; each context
+ * retains its own mask on both shelves. */
 
 #endif

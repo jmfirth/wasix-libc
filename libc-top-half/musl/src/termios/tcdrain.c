@@ -1,6 +1,5 @@
 #include <termios.h>
 #ifndef __wasilibc_unmodified_upstream
-#include <sys/ioctl.h>
 #include <stdint.h>
 #endif
 #include <sys/ioctl.h>

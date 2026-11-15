@@ -114,7 +114,7 @@ typedef jmp_buf sigjmp_buf;
  * program that uses them (musl libc-test functional/setjmp) failed to BUILD
  * (-Werror=implicit-function-declaration) even though the sysroot libc
  * already ships the implementations — src/signal/sigsetjmp_wasix.c does real
- * signal-mask save/restore via pthread_sigmask + a TLS slot. Mirror the other
+ * signal-mask save/restore with a saved wasm local per context. Mirror the other
  * two branches' declarations so consumers see the identical setjmp API
  * regardless of which branch the header selects. */
 #if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 1)
