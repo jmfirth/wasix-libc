@@ -126,7 +126,11 @@ static int name_from_dns_search(struct address buf[static MAXADDRS], char canon[
   __wasi_errno_t error = __wasi_resolve(name, 0, addrs, MAXADDRS, &naddrs);
   if (error != 0) {
     errno = __wasilibc_errno_from_wasi(error);
-    rv = EAI_NONAME;
+    /* An unreachable resolver is a temporary lookup failure, not evidence
+     * that the name does not exist. Linux with only lo up returns EAI_AGAIN
+     * (musl leaves ENETUNREACH in errno; glibc leaves EAGAIN). */
+    rv = (errno == ENETUNREACH || errno == EHOSTUNREACH ||
+          errno == EAGAIN || errno == ETIMEDOUT) ? EAI_AGAIN : EAI_NONAME;
     goto cleanup;
   }
 
