@@ -30,30 +30,6 @@
 #define MIN(a,b) ((a)<(b) ? (a) : (b))
 #endif
 
-static inline int is_wasi_port_ok() {
-  // check if wasi port in sockaddr is not byte swapped already.
-  // To find out: create a socket, bind to a port, read back and check the port
-  // in case of error, return 1 as default
-  int sock = socket(AF_INET, SOCK_STREAM, 0);
-  if(sock<0)
-    return 1;
-  struct sockaddr_in addr = {0};
-  addr.sin_family = AF_INET;
-  addr.sin_port = 9000;
-  if(bind(sock, (struct sockaddr *)&addr, sizeof(addr))<0) {
-    close(sock);
-    return 1;
-  }
-  // readback the address
-  __wasi_addr_port_t local_addr;
-  if(__wasi_sock_addr_local(sock, &local_addr)!=0) {
-    close(sock);
-    return 1;
-  }
-  close(sock);
-  return (local_addr.u.inet4.port==10275); //10275 is 9000 with swapped bytes
-}
-
 // firebox#EK0 — THESE TWO HELPERS RETURN A *GUEST* ERRNO. NEVER TRANSLATE IT.
 //
 // They used to return a bare 0/-1 sentinel, and every caller that kept the
@@ -123,18 +99,18 @@ static inline int wasi_to_sockaddr(const struct __wasi_addr_port_t *restrict pee
   if (addr == NULL || addrlen == NULL) {
     return EFAULT;
   }
-  // This test needs to be here because some older versions of wasmer report the port as big-endian
-  static int tested = 0;
-  static int need_revert = 1;
-  if(!tested) {
-    tested = 1;
-    need_revert = is_wasi_port_ok();
-  }
+  // firebox#A3A: the pinned runtime's write_ip_port writes port octets in
+  // network order, exactly as sin_port requires. Copy them unchanged. The
+  // old compatibility guess bound a fixed TCP port (10275) from each
+  // translation unit's first getter. A parent/child collision or an occupied
+  // port selected the wrong byte order and returned a success-shaped wrong
+  // address; it also made a getter depend on spare file descriptors and
+  // raced on unsynchronized static flags. Address conversion performs no I/O.
   memset(addr, 0, *addrlen);
   if (peer_addr->tag == __WASI_ADDRESS_FAMILY_INET4) {
     struct sockaddr_in addr4;
     addr4.sin_family = AF_INET;
-    addr4.sin_port = need_revert?htons(peer_addr->u.inet4.port):peer_addr->u.inet4.port;
+    addr4.sin_port = peer_addr->u.inet4.port;
     addr4.sin_addr.s_addr = *((in_addr_t*)&peer_addr->u.inet4.addr);
     memcpy(addr, &addr4, MIN(sizeof(struct sockaddr_in), *addrlen));
     *addrlen = sizeof(struct sockaddr_in);
@@ -143,7 +119,7 @@ static inline int wasi_to_sockaddr(const struct __wasi_addr_port_t *restrict pee
     addr6.sin6_family = AF_INET6;
     addr6.sin6_flowinfo = peer_addr->u.inet6.addr.flow_info1 << 16 | peer_addr->u.inet6.addr.flow_info0;
     addr6.sin6_scope_id = peer_addr->u.inet6.addr.scope_id1 << 16 | peer_addr->u.inet6.addr.scope_id0;;
-    addr6.sin6_port = need_revert?htons(peer_addr->u.inet6.port):peer_addr->u.inet6.port;
+    addr6.sin6_port = peer_addr->u.inet6.port;
     memcpy(&addr6.sin6_addr.s6_addr, &peer_addr->u.inet6.addr, sizeof(struct in6_addr));
     memcpy(addr, &addr6, MIN(sizeof(struct sockaddr_in6), *addrlen));
     *addrlen = sizeof(struct sockaddr_in6);
