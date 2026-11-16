@@ -73,8 +73,9 @@ int pthread_kill(pthread_t t, int sig)
 		(void)__fbx_rtsigq_push(sig, sv, SI_TKILL, getpid(), getuid());
 		int word = (sig - 1) / 32;
 		int bit  = 1 << ((sig - 1) % 32);
+		/* firebox#C3E — the TARGET's own set only: pthread_kill is
+		 * thread-directed, never pending for the process. */
 		a_or((volatile int *)&t->pending_sigs[word], bit);
-		a_or(&__wasm_pending_sigs[word], bit);
 	}
 	int r = __wasi_thread_signal(t->tid, (__wasi_signal_t)sig);
 	__restore_sigs(&set);

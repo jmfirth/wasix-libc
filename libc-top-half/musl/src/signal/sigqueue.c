@@ -16,6 +16,9 @@
  * standard signal. */
 extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
+/* firebox#C3E — the process-wide (process-directed) pending set. */
+extern volatile int __wasm_pending_sigs[];
+int __wasm_thread_sig_blocked(int sig);
 
 /* firebox#EMN — cross-process sigqueue si_value. A sigqueue to ANOTHER process
  * cannot stash the value in the self-ring above (the forked receiver has a
@@ -125,6 +128,13 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 			                      getpid(), getuid()) != 0) {
 				errno = EAGAIN;
 				return -1;
+			}
+			/* firebox#C3E — sigqueue(2) is PROCESS-directed. A blocked
+			 * instance pends on this thread below (the thread-signal route
+			 * honours the mask) but is pending for the process, so publish it
+			 * in the process-wide set every thread's sigpending reads. */
+			if (__wasm_thread_sig_blocked(sig)) {
+				a_or(&__wasm_pending_sigs[(sig - 1) / 32], 1 << ((sig - 1) % 32));
 			}
 			/* Self-delivery: respect the per-thread block mask via the
 			 * thread-signal → __wasm_signal path (mirrors raise()). */
