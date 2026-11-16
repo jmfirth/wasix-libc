@@ -398,7 +398,12 @@ static void fbx_fire_locked(struct fbx_timer *t, struct fbx_deliver *out,
 	if (t->notify == SIGEV_SIGNAL) {
 		int word = (t->signo - 1) / 32;
 		int bit  = 1 << ((t->signo - 1) % 32);
-		if (__wasm_pending_sigs[word] & bit) {
+		/* firebox#C3E — a standard signal's expiry pends on its owner thread
+		 * alone (__wasm_pend_signal no longer mirrors a thread's own pend into
+		 * the process-wide word), so look in both. */
+		int owner_bits = t->owner
+			? ((volatile int *)t->owner->pending_sigs)[word] : 0;
+		if ((owner_bits | __wasm_pending_sigs[word]) & bit) {
 			/* Prior expiry's signal still pending — coalesce + count. */
 			t->overrun++;
 			return;

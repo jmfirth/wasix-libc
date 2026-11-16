@@ -1244,10 +1244,20 @@ static inline void __wasm_pend_signal(int sig) {
 	int word = (sig - 1) / 32;
 	int bit = (sig - 1) % 32;
 	a_or((volatile int *)&self->pending_sigs[word], 1 << bit);
-	/* Also OR into the process-wide bitmask for sigpending(2)'s query
-	 * surface. Consumers of sigpending treat the process-wide bitmask
-	 * as the authoritative "what's queued" view. */
-	a_or(&__wasm_pending_sigs[word], 1 << bit);
+	/* firebox#C3E — and ONLY there. This pend belongs to THIS thread: it is a
+	 * thread-directed instance (raise, pthread_kill, a timer's directed
+	 * expiry, an in-handler or inline-window deferral), the kernel's
+	 * `task->pending`. It used to be ORed into the process-wide
+	 * __wasm_pending_sigs[] too, which sigpending(2) read, so every thread
+	 * reported every other thread's pends, a new thread started with its
+	 * creator's (Open POSIX pthread_create/8-1, "SIGUSR1 is member of new
+	 * thread pendingset"), and a sibling's sigwait could claim it from the
+	 * process arm (the #6D9 leak, closed then for the sigwait arm only). The
+	 * process-wide word now carries process-directed instances (the host's
+	 * router and kill/sigqueue/timer pends), the kernel's `shared_pending`,
+	 * and sigpending(2) reports both sets. MEASURED on Linux (alpine:3.24): a
+	 * raise() pend is invisible to a thread created after it; a kill(getpid())
+	 * pend is visible to it. */
 	/* firebox#43B / S5 — a signal just became PENDING on this thread.
 	 * Wake any sigtimedwait/sigwait/sigsuspend waiter parked on this
 	 * thread's wake counter so it can claim the newly-pending signal.

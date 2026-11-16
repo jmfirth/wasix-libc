@@ -29,6 +29,8 @@ extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
 extern void __fbx_rtsig_repend(int sig);
 int __wasm_signal_self(int sig, int code);
 int __wasm_thread_sig_blocked(int sig);
+/* firebox#C3E — the process-wide (process-directed) pending set. */
+extern volatile int __wasm_pending_sigs[];
 #endif
 
 int kill(pid_t pid, int sig)
@@ -105,6 +107,18 @@ int kill(pid_t pid, int sig)
 		 * and the RT ring are two stores that must agree; keeping the write
 		 * behind the one helper is what stops them being separated again. */
 		__fbx_rtsig_repend(sig);
+	} else if (sig > 0 && pid == (pid_t)getpid() && __wasm_thread_sig_blocked(sig)) {
+		/* firebox#C3E — a process-directed instance is pending for the process
+		 * the moment kill() returns (Linux: shared_pending). The thread-pend in
+		 * __wasm_pend_signal used to mirror into the process-wide word, which
+		 * hid that the host publishes this instance there only once every
+		 * thread's copy is routed: a thread created in that window read
+		 * sigpending() without it. Mark it now. This is not a lone process-wide
+		 * write (#4MP): this thread's own copy arrives blocked and pends its
+		 * per-thread bit, which arms the drain's clear, and if an unblocked
+		 * sibling takes the instance instead, the host router's claim clears
+		 * the process-wide bit. */
+		a_or(&__wasm_pending_sigs[(sig - 1) / 32], 1 << ((sig - 1) % 32));
 	}
 	__wasi_errno_t e = __wasi_proc_signal(pid, (__wasi_signal_t)sig);
 	if (e != __WASI_ERRNO_SUCCESS) {
