@@ -16,8 +16,7 @@
  * standard signal. */
 extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
-/* firebox#C3E — the process-wide (process-directed) pending set. */
-extern volatile int __wasm_pending_sigs[];
+/* firebox#C3E — does the calling thread block `sig`? (sigaction.c) */
 int __wasm_thread_sig_blocked(int sig);
 
 /* firebox#EMN — cross-process sigqueue si_value. A sigqueue to ANOTHER process
@@ -74,18 +73,19 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 	 * POSIX -1/errno convention.
 	 *
 	 * SELF vs CROSS-PROCESS delivery — the load-bearing distinction:
-	 *   - SELF (pid == getpid()): route through __wasi_thread_signal on the
-	 *     calling thread, EXACTLY as raise() does. WHY: the host routes a
-	 *     thread-directed signal through the guest's __wasm_signal, which
-	 *     consults the per-thread block mask — so a BLOCKED rtsig pends
-	 *     into __wasm_pending_sigs (visible to sigwaitinfo/sigtimedwait)
-	 *     instead of being delivered to a non-existent default disposition
-	 *     and TERMINATING the process. A process-directed __wasi_proc_signal
-	 *     to self does not take that in-guest blocked-mask path, so the
-	 *     queued-then-accepted pattern the suite uses (sigwaitinfo/2-1,
-	 *     sigqueue/5-1: sighold all rtsigs, sigqueue them to self, then
-	 *     sigwaitinfo the lowest) would kill the process. raise() already
-	 *     proves thread_signal-to-self respects the block (sigwait/1-1).
+	 *   - SELF (pid == getpid()), signal UNBLOCKED in the caller: route
+	 *     through __wasi_thread_signal on the calling thread, exactly as
+	 *     raise() does.
+	 *   - SELF, signal BLOCKED in the caller: __wasi_proc_signal(getpid()),
+	 *     exactly as kill(getpid()) does (firebox#C3E, see below). This once
+	 *     terminated the process (a process-directed copy skipped the
+	 *     in-guest mask check), which is why both cases used to take the
+	 *     thread-signal route; the host router (#P8H/#JRS) now pends a
+	 *     blocked copy instead. MEASURED with this split: the suite's
+	 *     queued-then-accepted pattern (sigwaitinfo/2-1, sigqueue/5-1:
+	 *     sighold all rtsigs, sigqueue them to self, then sigwaitinfo the
+	 *     lowest) and every Open POSIX sigqueue test pass at wasm32 and
+	 *     wasm64.
 	 *   - CROSS-PROCESS: __wasi_proc_signal(pid, sig) — the kill(2) path.
 	 *
 	 * si_value PAYLOAD (firebox#C2Q/#HPT):
@@ -129,24 +129,31 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 				errno = EAGAIN;
 				return -1;
 			}
-			/* firebox#C3E — sigqueue(2) is PROCESS-directed. A blocked
-			 * instance pends on this thread below (the thread-signal route
-			 * honours the mask) but is pending for the process, so publish it
-			 * in the process-wide set every thread's sigwait and sigpending
-			 * read. Unlike kill(getpid()) (see kill.c), this delivery makes no
-			 * host router copies, so this mark is the ONLY instance a sibling
-			 * can accept: MEASURED without it, a sibling's sigwaitinfo never
-			 * returned (#P8H litmus `rt-queue`, setup timeout). With it, the
-			 * caller's own copy stays pending after a sibling accepts (the
-			 * same arm: pending in main 1, Linux 0) -- a stale view, not a
-			 * loss; making a self-sigqueue a host process signal retires it. */
 			if (__wasm_thread_sig_blocked(sig)) {
-				a_or(&__wasm_pending_sigs[(sig - 1) / 32], 1 << ((sig - 1) % 32));
+				/* firebox#C3E — sigqueue(2) is PROCESS-directed. Blocked here,
+				 * it must stay acceptable by any thread, so send it the way
+				 * kill(getpid()) does: the host router (#JRS) gives every
+				 * thread a copy, publishes the instance once all are routed,
+				 * and retires the other threads' tokens when the consumer next
+				 * enters the host. This replaces a thread-signal to self plus
+				 * an eager process-wide mark: the mark was the only instance a
+				 * sibling could accept, and the caller's own pend stayed behind
+				 * it, so after a sibling's sigwaitinfo took both queued values
+				 * the caller still read it pending (MEASURED: #P8H litmus
+				 * `rt-queue`, main 1 3 of 3; Linux 0). Without the mark and
+				 * without the router a sibling never saw it at all (the same
+				 * arm timed out). The queued record above is the value: the
+				 * accepting thread pops it (sigtimedwait.c, sigaction.c drain).
+				 * Unlike kill.c's RT path, no eager __fbx_rtsig_repend: the
+				 * router writes the pend. */
+				e = __wasi_proc_signal((__wasi_pid_t)pid, (__wasi_signal_t)sig);
+			} else {
+				/* Unblocked here: deliver on this thread now, as Linux prefers
+				 * the sending thread when it does not block the signal. The
+				 * thread-signal → __wasm_signal path mirrors raise(). */
+				e = __wasi_thread_signal((__wasi_tid_t)self->tid,
+				                         (__wasi_signal_t)sig);
 			}
-			/* Self-delivery: respect the per-thread block mask via the
-			 * thread-signal → __wasm_signal path (mirrors raise()). */
-			e = __wasi_thread_signal((__wasi_tid_t)self->tid,
-			                         (__wasi_signal_t)sig);
 		} else if (sig >= 35 && sig <= (_NSIG - 1)) {
 			/* firebox#EMN — cross-process RT sigqueue: carry the si_value to
 			 * the target THROUGH THE HOST. The queued value cannot ride in
