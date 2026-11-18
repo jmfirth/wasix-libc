@@ -20,7 +20,8 @@ ssize_t pread(int fildes, void *buf, size_t nbyte, off_t offset) {
   __cloudlibc_testcancel();
 
   __wasi_errno_t error =
-      __wasi_fd_pread(fildes, &iov, 1, offset, &bytes_read);
+      __CLOUDLIBC_CP_CALL(fildes, __CLOUDLIBC_CP_NOSOCK,
+      __wasi_fd_pread(fildes, &iov, 1, offset, &bytes_read));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED

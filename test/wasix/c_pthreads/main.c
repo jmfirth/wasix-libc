@@ -102,6 +102,20 @@ static void *timed_mutex_wait(void *arg)
 __wasi_errno_t __real___wasi_poll_oneoff(const __wasi_subscription_t *,
                                        __wasi_event_t *, __wasi_size_t, __wasi_size_t *);
 
+static void open_gate(int *gate);
+static void wait_for_gate(int *gate);
+
+/* A disabled-cancellation import seam: the import publishes `at_import` and
+ * waits on `may_enter` before the real import, so the canceller can land the
+ * request in the import's entry drain. `returns` counts real-import returns
+ * and `first_returned` opens after the first, so the canceller makes data
+ * available only after an interruption the libc did not restart. */
+struct import_seam {
+    int at_import, may_enter, first_returned;
+    int calls, returns;
+};
+static _Thread_local struct import_seam *poll_seam;
+
 __wasi_errno_t __wrap___wasi_poll_oneoff(const __wasi_subscription_t *in,
                                        __wasi_event_t *out, __wasi_size_t n,
                                        __wasi_size_t *nevents)
@@ -110,7 +124,34 @@ __wasi_errno_t __wrap___wasi_poll_oneoff(const __wasi_subscription_t *in,
         sleep_entered_host_poll = 1;
         return __WASI_ERRNO_INTR;
     }
-    return __real___wasi_poll_oneoff(in, out, n, nevents);
+    struct import_seam *seam = poll_seam;
+    if (seam && seam->calls++ == 0) {
+        open_gate(&seam->at_import);
+        wait_for_gate(&seam->may_enter);
+    }
+    __wasi_errno_t error = __real___wasi_poll_oneoff(in, out, n, nevents);
+    if (seam && seam->returns++ == 0)
+        open_gate(&seam->first_returned);
+    return error;
+}
+
+__wasi_errno_t __real___wasi_fd_read(__wasi_fd_t, const __wasi_iovec_t *,
+                                     size_t, __wasi_size_t *);
+static _Thread_local struct import_seam *read_seam;
+
+__wasi_errno_t __wrap___wasi_fd_read(__wasi_fd_t fd, const __wasi_iovec_t *iovs,
+                                     size_t count, __wasi_size_t *nread)
+{
+    struct import_seam *seam = read_seam;
+    if (seam && seam->calls++ == 0) {
+        open_gate(&seam->at_import);
+        if (!seam->may_enter)
+            wait_for_gate(&seam->may_enter);
+    }
+    __wasi_errno_t error = __real___wasi_fd_read(fd, iovs, count, nread);
+    if (seam && seam->returns++ == 0)
+        open_gate(&seam->first_returned);
+    return error;
 }
 
 static void *pending_cancel_at_sleep(void *arg)
@@ -223,6 +264,127 @@ static int restore_drains_process_signal(void)
     return test.handler_calls_after_kill == 1;
 }
 
+/* musl's SIGCANCEL handler is SA_RESTART and returns while cancellation is
+ * disabled, so a restart-list call resumes: the read below returns the byte
+ * written after its first interruption, whether the request lands in the
+ * import's entry drain (`hold`) or while it waits. A handler that really ran
+ * without SA_RESTART still interrupts it with EINTR; one with SA_RESTART
+ * does not. */
+static volatile sig_atomic_t interrupting_handler_calls;
+
+static void interrupting_handler(int signal)
+{
+    if (signal == SIGUSR1)
+        interrupting_handler_calls++;
+}
+
+struct disabled_read_test {
+    struct import_seam seam;
+    int fds[2];
+    ssize_t n;
+    int error;
+};
+
+static void *disabled_reader(void *arg)
+{
+    struct disabled_read_test *test = arg;
+    char byte;
+    require(pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL) == 0);
+    read_seam = &test->seam;
+    test->n = read(test->fds[0], &byte, 1);
+    test->error = test->n < 0 ? errno : 0;
+    read_seam = NULL;
+    require(pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL) == 0);
+    pthread_testcancel();
+    return NULL;
+}
+
+static void disabled_read(int hold, int with_handler, struct disabled_read_test *test)
+{
+    struct sigaction action = {
+        .sa_handler = interrupting_handler,
+        .sa_flags = with_handler == 2 ? SA_RESTART : 0,
+    };
+    struct sigaction saved_action;
+    pthread_t reader;
+    void *result;
+    *test = (struct disabled_read_test){0};
+    test->seam.may_enter = !hold;
+    interrupting_handler_calls = 0;
+    require(pipe(test->fds) == 0);
+    require(sigemptyset(&action.sa_mask) == 0);
+    require(sigaction(SIGUSR1, &action, &saved_action) == 0);
+    require(pthread_create(&reader, NULL, disabled_reader, test) == 0);
+    wait_for_gate(&test->seam.at_import);
+    require(pthread_cancel(reader) == 0);
+    if (with_handler)
+        require(pthread_kill(reader, SIGUSR1) == 0);
+    if (hold)
+        open_gate(&test->seam.may_enter);
+    wait_for_gate(&test->seam.first_returned);
+    require(write(test->fds[1], "x", 1) == 1);
+    require(pthread_join(reader, &result) == 0);
+    require(result == PTHREAD_CANCELED);
+    require(sigaction(SIGUSR1, &saved_action, NULL) == 0);
+    require(close(test->fds[0]) == 0 && close(test->fds[1]) == 0);
+}
+
+static int disabled_read_restarts(int hold)
+{
+    struct disabled_read_test test;
+    disabled_read(hold, 0, &test);
+    return test.n == 1 && test.seam.calls == 2;
+}
+
+static int handler_interrupts_disabled_read(void)
+{
+    struct disabled_read_test test;
+    disabled_read(1, 1, &test);
+    return test.n == -1 && test.error == EINTR && test.seam.calls == 1 &&
+           interrupting_handler_calls == 1;
+}
+
+static int restart_handler_keeps_disabled_read_restarting(void)
+{
+    struct disabled_read_test test;
+    disabled_read(1, 2, &test);
+    return test.n == 1 && test.seam.calls == 2 && interrupting_handler_calls == 1;
+}
+
+/* nanosleep is never restarted (signal(7)); with cancellation disabled musl
+ * returns EINTR for the nudge, and so must this libc. */
+struct disabled_sleep_test {
+    struct import_seam seam;
+    int rc, error;
+};
+
+static void *disabled_sleeper(void *arg)
+{
+    struct disabled_sleep_test *test = arg;
+    require(pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL) == 0);
+    poll_seam = &test->seam;
+    test->rc = nanosleep(&(struct timespec){.tv_sec = 120}, NULL);
+    test->error = test->rc < 0 ? errno : 0;
+    poll_seam = NULL;
+    require(pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL) == 0);
+    pthread_testcancel();
+    return NULL;
+}
+
+static int disabled_sleep_interrupts(void)
+{
+    struct disabled_sleep_test test = {0};
+    pthread_t sleeper;
+    void *result;
+    require(pthread_create(&sleeper, NULL, disabled_sleeper, &test) == 0);
+    wait_for_gate(&test.seam.at_import);
+    require(pthread_cancel(sleeper) == 0);
+    open_gate(&test.seam.may_enter);
+    require(pthread_join(sleeper, &result) == 0);
+    require(result == PTHREAD_CANCELED);
+    return test.rc == -1 && test.error == EINTR && test.seam.calls == 1;
+}
+
 void *thread(void *ptr)
 {
     long type = (long)ptr;
@@ -265,6 +427,11 @@ int main(int argc, char **argv)
     int sleep_correct = result == PTHREAD_CANCELED && !sleep_entered_host_poll;
     int directed_correct = directed_signal_stays_with_target();
     int restore_correct = restore_drains_process_signal();
+    int entry_restart_correct = disabled_read_restarts(1);
+    int wait_restart_correct = disabled_read_restarts(0);
+    int handler_eintr_correct = handler_interrupts_disabled_read();
+    int restart_handler_correct = restart_handler_keeps_disabled_read_restarting();
+    int sleep_eintr_correct = disabled_sleep_interrupts();
 
     if (!cancel_correct)
         fputs("pending condvar cancellation did not unwind\n", stderr);
@@ -276,8 +443,20 @@ int main(int argc, char **argv)
         fputs("a different thread could consume a directed signal\n", stderr);
     if (!restore_correct)
         fputs("pthread_kill did not drain the signal when it restored the mask\n", stderr);
+    if (!entry_restart_correct)
+        fputs("disabled-cancellation read did not restart after an entry-drained nudge\n", stderr);
+    if (!wait_restart_correct)
+        fputs("disabled-cancellation read did not restart after a nudge during the wait\n", stderr);
+    if (!handler_eintr_correct)
+        fputs("a non-SA_RESTART handler did not interrupt a disabled-cancellation read\n", stderr);
+    if (!restart_handler_correct)
+        fputs("an SA_RESTART handler stopped a disabled-cancellation read from restarting\n", stderr);
+    if (!sleep_eintr_correct)
+        fputs("disabled-cancellation nanosleep did not return EINTR for the nudge\n", stderr);
     if (!cancel_correct || !mutex_timeout_correct || !sleep_correct ||
-        !directed_correct || !restore_correct)
+        !directed_correct || !restore_correct || !entry_restart_correct ||
+        !wait_restart_correct || !handler_eintr_correct || !restart_handler_correct ||
+        !sleep_eintr_correct)
         return 1;
 
     fprintf(stdout, "threads joined\n");

@@ -2025,7 +2025,14 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 		if (self && handler_ran && ksa.handler != SIG_IGN) {
 			a_inc(&self->sigsuspend_tick);
 			__wake(&self->sigsuspend_tick, 1, 1);
-			a_inc(&self->sigdispatch_tick);
+			/* firebox#JIT — the low 16 bits count handlers that ran WITHOUT
+			 * SA_RESTART; an SA_RESTART handler advances only the high bits.
+			 * Every other reader only asks whether the tick CHANGED. The
+			 * cancellation-point restart (pthread_cancel.c,
+			 * __fbx_cancel_nudge_restartable) asks whether a handler that
+			 * makes Linux return EINTR ran during the call. */
+			a_fetch_add(&self->sigdispatch_tick,
+			            (ksa.flags & SA_RESTART) ? 0x10000 : 1);
 			__wake(&self->sigdispatch_tick, 1, 1);
 		}
 	}

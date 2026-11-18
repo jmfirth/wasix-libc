@@ -36,8 +36,9 @@ ssize_t readv(int fildes, const struct iovec *iov, int iovcnt) {
   __cloudlibc_testcancel();
 
   __wasi_size_t bytes_read;
-  __wasi_errno_t error = __wasi_fd_read(
-      fildes, (const __wasi_iovec_t *)iov, iovcnt, &bytes_read);
+  __wasi_errno_t error = __CLOUDLIBC_CP_CALL(fildes, __CLOUDLIBC_CP_RECV,
+      __wasi_fd_read(
+      fildes, (const __wasi_iovec_t *)iov, iovcnt, &bytes_read));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED

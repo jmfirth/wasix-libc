@@ -71,4 +71,55 @@ static inline void __cloudlibc_testcancel_if_intr(__wasi_errno_t error) {
     __testcancel();
 }
 
+// firebox#JIT — restart a restart-list import that only the pthread_cancel
+// nudge interrupted, while cancellation is disabled (musl's SIGCANCEL handler
+// is SA_RESTART and returns in that state, so Linux resumes the call). The
+// predicate and its argument live in pthread_cancel.c, next to __testcancel;
+// they are weak for the same single-threaded-build reason (no cancellation
+// exists there, so nothing restarts). The never-restart family (poll,
+// pselect, the clock sleeps) does not use this and keeps EINTR, per signal(7).
+//
+// `timeout_option` is __CLOUDLIBC_CP_RECV / __CLOUDLIBC_CP_SEND for a call
+// that a socket's SO_RCVTIMEO / SO_SNDTIMEO exempts from restarting, or
+// __CLOUDLIBC_CP_NOSOCK for one no socket option governs.
+__attribute__((__weak__, __visibility__("hidden"))) int __fbx_cancel_nudge_tick(void);
+__attribute__((__weak__, __visibility__("hidden"))) int
+__fbx_cancel_nudge_restartable(int tick, int fd, int timeout_option);
+
+#define __CLOUDLIBC_CP_NOSOCK (-1)
+#define __CLOUDLIBC_CP_RECV ((int)__WASI_SOCK_OPTION_RECV_TIMEOUT)
+#define __CLOUDLIBC_CP_SEND ((int)__WASI_SOCK_OPTION_SEND_TIMEOUT)
+
+static inline int __cloudlibc_cp_tick(void) {
+  return &__fbx_cancel_nudge_tick != 0 ? __fbx_cancel_nudge_tick() : 0;
+}
+
+// After `error` came back from the import issued at `tick`: 1 to issue it
+// again. Acts on an enabled pending cancel first (never returns then).
+static inline int __cloudlibc_cp_restart(__wasi_errno_t error, int tick,
+                                         int fd, int timeout_option) {
+  if (error != __WASI_ERRNO_INTR)
+    return 0;
+  __cloudlibc_testcancel_if_intr(error);
+  return &__fbx_cancel_nudge_restartable != 0 &&
+         __fbx_cancel_nudge_restartable(tick, fd, timeout_option);
+}
+
+// Issue `call` (an expression yielding __wasi_errno_t) until it is not an
+// EINTR that __cloudlibc_cp_restart restarts: the request is pending with
+// cancellation disabled and no handler without SA_RESTART ran during the
+// call. The caller keeps its own pre-call __cloudlibc_testcancel and
+// post-call __cloudlibc_testcancel_if_intr.
+#define __CLOUDLIBC_CP_CALL(fd, timeout_option, call)                        \
+  ({                                                                         \
+    __wasi_errno_t __cp_error;                                               \
+    int __cp_tick;                                                           \
+    do {                                                                     \
+      __cp_tick = __cloudlibc_cp_tick();                                     \
+      __cp_error = (call);                                                   \
+    } while (__cloudlibc_cp_restart(__cp_error, __cp_tick, (fd),             \
+                                    (timeout_option)));                      \
+    __cp_error;                                                              \
+  })
+
 #endif

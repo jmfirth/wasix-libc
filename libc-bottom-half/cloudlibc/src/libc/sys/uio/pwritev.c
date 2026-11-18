@@ -20,8 +20,9 @@ ssize_t pwritev(int fildes, const struct iovec *iov, int iovcnt, off_t offset) {
   // already-pending cancel BEFORE parking in the host await.
   __cloudlibc_testcancel();
 
-  __wasi_errno_t error = __wasi_fd_pwrite(
-      fildes, (const __wasi_ciovec_t *)iov, iovcnt, offset, &bytes_written);
+  __wasi_errno_t error = __CLOUDLIBC_CP_CALL(fildes, __CLOUDLIBC_CP_NOSOCK,
+      __wasi_fd_pwrite(
+      fildes, (const __wasi_ciovec_t *)iov, iovcnt, offset, &bytes_written));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED

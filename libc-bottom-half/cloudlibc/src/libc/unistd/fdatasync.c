@@ -13,7 +13,8 @@ int fdatasync(int fildes) {
   // already-pending cancel BEFORE parking in the host await.
   __cloudlibc_testcancel();
 
-  __wasi_errno_t error = __wasi_fd_datasync(fildes);
+  __wasi_errno_t error = __CLOUDLIBC_CP_CALL(fildes, __CLOUDLIBC_CP_NOSOCK,
+      __wasi_fd_datasync(fildes));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED

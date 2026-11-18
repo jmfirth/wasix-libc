@@ -91,15 +91,17 @@ static int openat_impl(int fd, const char *path, int oflag, int has_mode,
   __cloudlibc_testcancel();
 
   if (has_mode)
-    error = __wasix_path_open_mode(fd, lookup_flags, path, strlen(path),
+    error = __CLOUDLIBC_CP_CALL(fd, __CLOUDLIBC_CP_NOSOCK,
+      __wasix_path_open_mode(fd, lookup_flags, path, strlen(path),
                                    __wasilibc_oflags_to_wasi(oflag),
                                    fs_rights_base, fs_rights_inheriting,
-                                   fs_flags, fd_flags, (uint32_t)mode, &newfd);
+                                   fs_flags, fd_flags, (uint32_t)mode, &newfd));
   else
-    error = __wasi_path_open2(fd, lookup_flags, path,
+    error = __CLOUDLIBC_CP_CALL(fd, __CLOUDLIBC_CP_NOSOCK,
+      __wasi_path_open2(fd, lookup_flags, path,
                               __wasilibc_oflags_to_wasi(oflag),
                               fs_rights_base, fs_rights_inheriting, fs_flags,
-                              fd_flags, &newfd);
+                              fd_flags, &newfd));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED

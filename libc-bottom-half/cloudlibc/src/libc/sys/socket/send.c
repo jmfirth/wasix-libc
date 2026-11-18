@@ -32,7 +32,8 @@ ssize_t send(int socket, const void *buffer, size_t length, int flags) {
   // already-pending cancel BEFORE parking in the host await.
   __cloudlibc_testcancel();
 
-  __wasi_errno_t error = __wasi_sock_send(socket, si_data, si_data_len, si_flags, &so_datalen);
+  __wasi_errno_t error = __CLOUDLIBC_CP_CALL(socket, __CLOUDLIBC_CP_SEND,
+      __wasi_sock_send(socket, si_data, si_data_len, si_flags, &so_datalen));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED

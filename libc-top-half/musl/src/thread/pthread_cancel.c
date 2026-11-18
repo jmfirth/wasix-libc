@@ -56,6 +56,55 @@ void __testcancel()
 		__cancel();
 }
 
+/* firebox#JIT — the SA_RESTART half of musl's cancellation handler.
+ *
+ * musl installs its SIGCANCEL handler with SA_RESTART, and the handler
+ * returns without acting when cancellation is disabled, so a restart-list
+ * syscall (read, write, recv, accept, open of a FIFO, …) resumes and the
+ * caller never sees EINTR. WASIX runs no SA_RESTART handler for SIGCANCEL,
+ * so the host interrupts the wait with EINTR for the pthread_cancel nudge
+ * whether it lands during the park or is consumed by the import's entry
+ * drain. The bottom half's cancellation-point wrappers (common/cancel.h)
+ * ask here whether that EINTR is the nudge alone, and if so re-issue the
+ * import, as the kernel would.
+ *
+ * The interruption is the nudge alone when a request is pending, the
+ * caller has cancellation DISABLED (enabled means __testcancel already
+ * acted and never returned; MASKED is internal to the condition wait and
+ * keeps its ECANCELED path), and no user handler WITHOUT SA_RESTART ran
+ * since the wrapper snapshotted sigdispatch_tick before the import. Such a
+ * handler is a real interruption and keeps EINTR (signal(7)); one with
+ * SA_RESTART does not change the verdict, exactly as the kernel restarts a
+ * call when every handler that ran carried SA_RESTART. __fbx_dispatch_signal
+ * bumps the low 16 bits of sigdispatch_tick for each handler it runs
+ * without SA_RESTART and only the high bits for one with it (not SIG_IGN,
+ * not a default action).
+ *
+ * signal(7): a socket call whose SO_RCVTIMEO / SO_SNDTIMEO is set is never
+ * restarted (Linux: sock_intr_errno). timeout_option names the option that
+ * applies to the call's direction, or is negative for a non-socket call;
+ * a non-socket descriptor answers the query with an error and restarts. */
+hidden int __fbx_cancel_nudge_tick(void)
+{
+	return __pthread_self()->sigdispatch_tick;
+}
+
+hidden int __fbx_cancel_nudge_restartable(int tick, int fd, int timeout_option)
+{
+	pthread_t self = __pthread_self();
+	if (!self->cancel || self->canceldisable != PTHREAD_CANCEL_DISABLE)
+		return 0;
+	if (((unsigned)self->sigdispatch_tick - (unsigned)tick) & 0xffffu)
+		return 0;
+	if (timeout_option >= 0) {
+		__wasi_option_timestamp_t tm;
+		if (__wasi_sock_get_opt_time(fd, (__wasi_sock_option_t)timeout_option, &tm) == 0
+		    && tm.tag == __WASI_OPTION_SOME && tm.u.some != 0)
+			return 0;
+	}
+	return 1;
+}
+
 /* firebox#5RE — act on a pending ASYNCHRONOUS cancel regardless of the
  * deferred-cancellation disable bracket. Async cancellation
  * (PTHREAD_CANCEL_ASYNCHRONOUS) is defined to take effect at any point in
