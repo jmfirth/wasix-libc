@@ -205,6 +205,7 @@ int timer_create(clockid_t clk, struct sigevent *restrict evp, timer_t *restrict
 #include <stdint.h>
 #include <unistd.h>
 #include <signal.h>
+#include <common/clock.h>
 #include <wasi/api.h>
 
 /* Cross-thread signal delivery + RT-depth machinery (shared with raise.c /
@@ -269,32 +270,6 @@ static int ts_lt(const struct timespec *a, const struct timespec *b)
 {
 	if (a->tv_sec != b->tv_sec) return a->tv_sec < b->tv_sec;
 	return a->tv_nsec < b->tv_nsec;
-}
-
-/* Read "now" in a timer's clock domain. The CPU-time clocks have no Firebox
- * countdown source; schedule them off CLOCK_MONOTONIC (for the busy-loop Open
- * POSIX CPUTIME tests wall time tracks CPU time, so the wall deadline fires at
- * the right accumulated-CPU point). */
-static void ts_now(clockid_t clk, struct timespec *out)
-{
-	clockid_t c = clk;
-	if (c == CLOCK_PROCESS_CPUTIME_ID || c == CLOCK_THREAD_CPUTIME_ID)
-		c = CLOCK_MONOTONIC;
-	if (clock_gettime(c, out) != 0) { out->tv_sec = 0; out->tv_nsec = 0; }
-}
-
-static int clock_supported(clockid_t clk)
-{
-	switch (clk) {
-	case CLOCK_REALTIME:
-	case CLOCK_MONOTONIC:
-		return 1;
-	case CLOCK_PROCESS_CPUTIME_ID:
-	case CLOCK_THREAD_CPUTIME_ID:
-		return clock_getres(clk, NULL) == 0;
-	default:
-		return 0;
-	}
 }
 
 /* ---- fork handling ---- */
@@ -439,7 +414,10 @@ static void *fbx_timer_manager(void *arg)
 			struct fbx_timer *t = &g_timers[i];
 			if (!t->in_use || !t->armed) continue;
 			struct timespec now;
-			ts_now(t->clock, &now);
+			if (clock_gettime(t->clock, &now)) {
+				t->armed = 0;
+				continue;
+			}
 			if (!ts_ge(&now, &t->next)) continue;
 			fbx_fire_locked(t, batch, &nbatch, 32);
 			if (t->interval.tv_sec || t->interval.tv_nsec) {
@@ -464,14 +442,24 @@ static void *fbx_timer_manager(void *arg)
 			struct fbx_timer *t = &g_timers[i];
 			if (!t->in_use || !t->armed) continue;
 			struct timespec now, rem;
-			ts_now(t->clock, &now);
+			if (clock_gettime(t->clock, &now)) {
+				t->armed = 0;
+				continue;
+			}
 			ts_diff(&t->next, &now, &rem);
+			/* CPU time can stop during sleep or advance faster than
+			 * wall time across multiple workers. Wake to recheck
+			 * the actual clock; the wall timeout never fires it. */
+			if (t->clock == CLOCK_PROCESS_CPUTIME_ID ||
+			    __wasilibc_is_named_cpu_clock((uintptr_t)t->clock)) {
+				const struct timespec cpu_recheck = {0, 10000000};
+				if (ts_lt(&cpu_recheck, &rem)) rem = cpu_recheck;
+			}
 			if (!have || ts_lt(&rem, &min_rem)) { min_rem = rem; have = 1; }
 		}
 
-		if (have) {
-			struct timespec deadline;
-			clock_gettime(CLOCK_MONOTONIC, &deadline);
+		struct timespec deadline;
+		if (have && clock_gettime(CLOCK_MONOTONIC, &deadline) == 0) {
 			ts_add(&deadline, &min_rem);
 			pthread_cond_timedwait(&g_cond, &g_lock, &deadline);
 		} else {
@@ -514,17 +502,17 @@ static int fbx_ensure_manager_locked(void)
 
 /* ---- gettime helper (g_lock held) ---- */
 
-static void fbx_gettime_locked(struct fbx_timer *t, struct itimerspec *out)
+static int fbx_gettime_locked(struct fbx_timer *t, struct itimerspec *out)
 {
-	out->it_interval = t->interval;
+	struct timespec remaining = {0, 0};
 	if (t->armed) {
 		struct timespec now;
-		ts_now(t->clock, &now);
-		ts_diff(&t->next, &now, &out->it_value);
-	} else {
-		out->it_value.tv_sec = 0;
-		out->it_value.tv_nsec = 0;
+		if (clock_gettime(t->clock, &now)) return -1;
+		ts_diff(&t->next, &now, &remaining);
 	}
+	out->it_interval = t->interval;
+	out->it_value = remaining;
+	return 0;
 }
 
 /* ---- public API ---- */
@@ -532,8 +520,14 @@ static void fbx_gettime_locked(struct fbx_timer *t, struct itimerspec *out)
 int timer_create(clockid_t clk, struct sigevent *restrict evp,
                  timer_t *restrict res)
 {
-	if (!clock_supported(clk)) { errno = EINVAL; return -1; }
+	if (clock_getres(clk, NULL)) return -1;
 	if (!res) { errno = EFAULT; return -1; }
+	/* The manager runs on its own pthread. Bind the creator's thread
+	 * clock while that creator is still the calling thread. */
+	if (clk == CLOCK_THREAD_CPUTIME_ID) {
+		int error = pthread_getcpuclockid(pthread_self(), &clk);
+		if (error) { errno = error; return -1; }
+	}
 
 	int notify = evp ? evp->sigev_notify : SIGEV_SIGNAL;
 	int signo = SIGALRM;
@@ -610,13 +604,23 @@ int timer_settime(timer_t tt, int flags, const struct itimerspec *restrict val,
 	struct fbx_timer *t = fbx_lookup(tt);
 	if (!t) { pthread_mutex_unlock(&g_lock); errno = EINVAL; return -1; }
 
-	if (old) fbx_gettime_locked(t, old);
+	if (old && fbx_gettime_locked(t, old)) {
+		pthread_mutex_unlock(&g_lock);
+		return -1;
+	}
 
 	int arm = (val->it_value.tv_sec != 0 || val->it_value.tv_nsec != 0);
-	t->interval = val->it_interval;
 	if (arm) {
 		struct timespec now;
-		ts_now(t->clock, &now);
+		if (clock_gettime(t->clock, &now)) {
+			pthread_mutex_unlock(&g_lock);
+			return -1;
+		}
+		if (fbx_ensure_manager_locked() != 0) {
+			pthread_mutex_unlock(&g_lock);
+			errno = EAGAIN;
+			return -1;
+		}
 		if (flags & TIMER_ABSTIME) {
 			t->next = val->it_value;      /* absolute in the clock domain */
 		} else {
@@ -625,15 +629,10 @@ int timer_settime(timer_t tt, int flags, const struct itimerspec *restrict val,
 		}
 		t->armed = 1;
 		t->overrun = 0;
-		if (fbx_ensure_manager_locked() != 0) {
-			t->armed = 0;
-			pthread_mutex_unlock(&g_lock);
-			errno = EAGAIN;
-			return -1;
-		}
 	} else {
 		t->armed = 0;                     /* it_value == 0 disarms */
 	}
+	t->interval = val->it_interval;
 
 	if (g_cond_ready) pthread_cond_signal(&g_cond);
 	pthread_mutex_unlock(&g_lock);
@@ -681,9 +680,9 @@ int timer_gettime(timer_t tt, struct itimerspec *val)
 	fbx_check_fork();
 	struct fbx_timer *t = fbx_lookup(tt);
 	if (!t) { pthread_mutex_unlock(&g_lock); errno = EINVAL; return -1; }
-	fbx_gettime_locked(t, val);
+	int result = fbx_gettime_locked(t, val);
 	pthread_mutex_unlock(&g_lock);
-	return 0;
+	return result;
 }
 
 int timer_getoverrun(timer_t tt)
