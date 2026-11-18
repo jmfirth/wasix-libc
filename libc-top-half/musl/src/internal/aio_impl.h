@@ -15,6 +15,9 @@ extern hidden void __aio_atfork(int);
  * Defined in aio.c. See the definition there for the delivery rationale. */
 #include <signal.h>
 hidden void __aio_notify_signal(int signo, union sigval value);
+/* firebox#SGV — completions published but whose signal is not yet sent.
+ * lio_listio's list notification waits for zero (see wait_thread). */
+extern hidden volatile int __aio_notify_inflight;
 #endif
 
 #endif

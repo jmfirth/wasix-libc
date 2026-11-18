@@ -128,6 +128,9 @@ struct aio_thread {
 	 * cancel paths a target needs. Safe to read there because a worker that
 	 * is NOT in the wait holds q->lock, so aio_cancel cannot be running. */
 	volatile int seq_waiting;
+	/* firebox#SGV — set by submit() just before the submitting call returns;
+	 * the worker starts its I/O only then (see the wait in io_thread_func). */
+	volatile int go;
 	int err, op;
 	ssize_t ret;
 };
@@ -152,12 +155,16 @@ struct aio_args {
 	struct aio_queue *q;
 	int op;
 	sem_t sem;
+	volatile int *go;   /* firebox#SGV — the worker's at.go */
 };
 
 static pthread_rwlock_t maplock = PTHREAD_RWLOCK_INITIALIZER;
 static struct aio_queue *****map;
 static volatile int aio_fd_cnt;
 volatile int __aio_fut;
+#ifndef __wasilibc_unmodified_upstream
+volatile int __aio_notify_inflight;   /* firebox#SGV — see aio_impl.h */
+#endif
 
 static size_t io_thread_stack_size;
 
@@ -272,6 +279,16 @@ static void cleanup(void *ctx)
 	 * again. Publishing EARLIER also NARROWS the pre-existing window in
 	 * which the app could free cb before our own __err store. */
 	cb->__ret = at->ret;
+#ifndef __wasilibc_unmodified_upstream
+	/* firebox#SGV — this completion's signal is owed from the moment its
+	 * __err is visible until __aio_notify_signal below has sent it. A
+	 * lio_listio LIST notification must not overtake it: Open POSIX
+	 * lio_listio/4-1, 7-1 and 15-1 count the per-request signals when the
+	 * list signal arrives. lio's wait_thread sees every __err published, then
+	 * waits for this count to drain before it signals. */
+	int owes_signal = sev.sigev_notify == SIGEV_SIGNAL && sev.sigev_signo != 0;
+	if (owes_signal) a_inc(&__aio_notify_inflight);
+#endif
 	if (a_swap(&cb->__err, at->err) != EINPROGRESS)
 		__wake(&cb->__err, -1, 1);
 	if (a_swap(&at->running, 0) < 0)
@@ -317,6 +334,10 @@ static void cleanup(void *ctx)
 		__aio_notify_signal(sev.sigev_signo, sev.sigev_value);
 #endif
 	}
+#ifndef __wasilibc_unmodified_upstream
+	if (owes_signal && a_fetch_add(&__aio_notify_inflight, -1) == 1)
+		__wake(&__aio_notify_inflight, -1, 1);
+#endif
 	if (sev.sigev_notify == SIGEV_THREAD) {
 		a_store(&__pthread_self()->cancel, 0);
 		sev.sigev_notify_function(sev.sigev_value);
@@ -339,6 +360,8 @@ static void *io_thread_func(void *ctx)
 	ssize_t ret;
 
 	pthread_mutex_lock(&q->lock);
+	at.go = 0;
+	args->go = &at.go;
 	sem_post(&args->sem);
 
 	at.op = op;
@@ -393,6 +416,19 @@ static void *io_thread_func(void *ctx)
 	}
 
 	pthread_mutex_unlock(&q->lock);
+
+	/* firebox#SGV — start the I/O only once the submitting call is returning.
+	 * POSIX says aio_fsync/aio_read/aio_write return when the request is
+	 * QUEUED, and on Linux the caller in practice sees it in progress: Open
+	 * POSIX aio_fsync/5-1 requires aio_error() == EINPROGRESS straight after
+	 * aio_fsync() (MEASURED 0/40 complete-before-return on alpine:3.24 and
+	 * debian:trixie). Here the worker was woken first and an fsync on an
+	 * in-memory file is one host call, so it often finished before the
+	 * submitter, woken from sem_wait, ran again: 36/40 (wasm32) and 40/40
+	 * (wasm64) complete before return. Parked on this word, the worker needs
+	 * a futex wake and an OS reschedule after the submitter's last store,
+	 * which leaves the submitter its few instructions back to the caller. */
+	while (!at.go) __wait(&at.go, 0, 0, 1);
 
 	/* firebox#VBY — aio_cancel MARKED us (it does not publish anything; see
 	 * the cancel path). Our I/O was never started, so skip straight to
@@ -488,6 +524,12 @@ static int submit(struct aiocb *cb, int op)
 
 	if (!ret) {
 		while (sem_wait(&args.sem));
+		/* firebox#SGV — release the worker. `go` is on its stack, which
+		 * lives until it has seen the store; a wake landing after it
+		 * exited is a spurious futex wake, which every waiter tolerates. */
+		volatile int *go = args.go;
+		a_store(go, 1);
+		__wake(go, 1, 1);
 	}
 
 	return ret;

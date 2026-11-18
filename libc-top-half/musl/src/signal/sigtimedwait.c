@@ -166,21 +166,35 @@ static void __sigtw_settle(int own)
 	if (own) (void)__wasi_sched_yield();
 }
 
+/* firebox#SGV — a POSIX timer's signal was accepted (sigaction.c's
+ * __fbx_note_consumed has the whole contract). */
+extern void __fbx_timer_signal_consumed(int sig, siginfo_t *si) __attribute__((__weak__));
+
 static void __sigtw_fill_si(siginfo_t *si, int sig)
 {
-	if (!si) return;
+	/* firebox#SGV — the accepted instance's record is consumed whether or not
+	 * the caller asked for it (sigtimedwait(set, NULL, ts) is valid). Leaving
+	 * it queued handed it to a LATER instance. */
+	siginfo_t local;
+	if (!si) si = &local;
 	/* firebox#C2Q/#HPT — if sigqueue enqueued a real siginfo record for this
 	 * RT signal, hand back its si_value/si_code/si_pid/si_uid (POSIX: a
 	 * synchronous accept returns the QUEUED value, FIFO within a signal; the
 	 * caller's low-to-high scan in __sigtw_claim already picks the lowest RT
-	 * signal first, so this just pops that signal's FIFO head). */
-	if (__fbx_rtsigq_pop_si(sig, si)) return;
-	/* Minimal siginfo: only si_signo is authoritative from the libc pending
-	 * bitmask (a raise()/kill()-delivered signal carries no queued value).
-	 * si_code SI_USER matches a kill()/raise()-delivered signal. */
-	memset(si, 0, sizeof *si);
-	si->si_signo = sig;
-	si->si_code = SI_USER;
+	 * signal first, so this just pops that signal's FIFO head). A standard
+	 * signal's single record (SI_QUEUE, SI_ASYNCIO) pops the same way. */
+	if (!__fbx_rtsigq_pop_si(sig, si)) {
+		/* Minimal siginfo: only si_signo is authoritative from the libc
+		 * pending bitmask (a raise()/kill()-delivered signal carries no
+		 * queued value). si_code SI_USER matches a kill()/raise()-delivered
+		 * signal. */
+		memset(si, 0, sizeof *si);
+		si->si_signo = sig;
+		si->si_code = SI_USER;
+	}
+	/* A timer's instance: SI_TIMER, si_value, si_timerid, si_overrun, and
+	 * the timer settles (POSIX: the overrun count is reset on acceptance). */
+	if (__fbx_timer_signal_consumed != NULL) __fbx_timer_signal_consumed(sig, si);
 }
 
 int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const struct timespec *restrict timeout)

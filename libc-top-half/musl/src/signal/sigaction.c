@@ -675,6 +675,10 @@ struct __fbx_sigq_ent {
 	int   code;
 	pid_t pid;
 	uid_t uid;
+	/* firebox#SGV — the POSIX timer that generated an SI_TIMER record (its
+	 * timer_t value), so the consumer can report si_timerid/si_overrun and
+	 * settle exactly that timer. 0 for every other code. */
+	int   timer;
 };
 struct __fbx_sigq {
 	volatile int lock[1];   /* futex lock, same discipline as __eintr_handler_lock */
@@ -684,18 +688,104 @@ struct __fbx_sigq {
 };
 static struct __fbx_sigq __fbx_rtsigq[__FBX_RTSIG_N];
 
+/* firebox#SGV — the siginfo of a pending STANDARD signal (1..31).
+ *
+ * A standard signal does not queue, but on Linux its one pending instance still
+ * carries a siginfo: the one it was generated with. Later instances while it is
+ * pending are discarded whole (kernel legacy_queue), so the first one wins.
+ * MEASURED on alpine:3.24 and debian:trixie: sigqueue(getpid(), SIGUSR1, 77)
+ * gives an SA_SIGINFO handler si_code SI_QUEUE and si_value 77. An aio
+ * completion signalled with SIGUSR2 gives SI_ASYNCIO and its sigev_value.
+ * Firebox kept records for RT signals only, so these read SI_USER and 0.
+ *
+ * One slot per standard signal, first-wins. Only producers with something to
+ * report store here (SI_QUEUE, SI_ASYNCIO, SI_MESGQ). kill(), raise() and
+ * pthread_kill() store nothing, because the consumer's no-record default is
+ * already their SI_USER. Timers store nothing either: an expiry's
+ * SI_TIMER/si_overrun is filled at consumption by
+ * __fbx_timer_signal_consumed, which owns the timer's state.
+ *
+ * Every guest consumption point empties the slot (__fbx_dispatch_signal on
+ * every arm that delivers, the unblock drain's hand-off of a default action to
+ * the host, and sigtimedwait), so a record does not outlive its instance.
+ * Same residual as the RT rings (#YBR): an instance the host disposes of
+ * without entering the guest leaves its record behind. */
+struct __fbx_stdsigq {
+	volatile int lock[1];
+	int full;
+	struct __fbx_sigq_ent ent;
+};
+static struct __fbx_stdsigq __fbx_stdsigq[32];
+
 static inline int __fbx_sig_is_rt(int sig) {
 	return sig >= __FBX_RTSIG_MIN && sig <= __FBX_RTSIG_MAX;
 }
 
-/* Enqueue one queued siginfo record for RT signal `sig` (FIFO tail). A non-RT
- * signal has no queue: return 0 (success, no-op) so the caller proceeds with
- * the existing coalescing delivery. Returns 0 on success, -1 if this signal's
- * queue is full (caller maps to EAGAIN, the POSIX sigqueue over-limit error).
+static inline int __fbx_sig_is_std(int sig) {
+	return sig >= 1 && sig <= 31;
+}
+
+/* firebox#SGV — codes whose siginfo differs from the consumer's SI_USER
+ * default, i.e. worth keeping for a standard signal. */
+static inline int __fbx_std_code_kept(int code) {
+	return code == SI_QUEUE || code == SI_ASYNCIO || code == SI_MESGQ;
+}
+
+static int __fbx_stdsigq_take(int sig, struct __fbx_sigq_ent *out) {
+	struct __fbx_stdsigq *q = &__fbx_stdsigq[sig];
+	int got = 0;
+	if (!q->full) return 0;
+	LOCK(q->lock);
+	if (q->full) {
+		if (out) *out = q->ent;
+		q->full = 0;
+		got = 1;
+	}
+	UNLOCK(q->lock);
+	return got;
+}
+
+/* firebox#SGV — consume (and discard) the pending record of `sig`, at a
+ * consumption point that delivers no siginfo. RT records are left alone: they
+ * carry depth and their dispatch arms pop them. */
+static void __fbx_stdsigq_discard(int sig) {
+	if (__fbx_sig_is_std(sig)) (void)__fbx_stdsigq_take(sig, 0);
+}
+
+/* Enqueue one queued siginfo record for RT signal `sig` (FIFO tail). A
+ * standard signal keeps at most one record (first wins; see __fbx_stdsigq),
+ * and only for the codes __fbx_std_code_kept names; otherwise this is a no-op
+ * returning 0 so the caller proceeds with the coalescing delivery. Returns 0
+ * on success, -1 if an RT signal's queue is full (caller maps to EAGAIN, the
+ * POSIX sigqueue over-limit error).
  * The lock is held only across the tiny record copy — never across a handler
  * call — so it cannot deadlock the cooperative dispatcher. */
+int __fbx_rtsigq_push_timer(int sig, union sigval value, int code,
+                            pid_t pid, uid_t uid, int timer);
+
 int __fbx_rtsigq_push(int sig, union sigval value, int code,
                       pid_t pid, uid_t uid) {
+	return __fbx_rtsigq_push_timer(sig, value, code, pid, uid, 0);
+}
+
+/* firebox#SGV — __fbx_rtsigq_push carrying the generating timer (SI_TIMER). */
+int __fbx_rtsigq_push_timer(int sig, union sigval value, int code,
+                            pid_t pid, uid_t uid, int timer) {
+	if (__fbx_sig_is_std(sig)) {
+		if (!__fbx_std_code_kept(code)) return 0;
+		struct __fbx_stdsigq *sq = &__fbx_stdsigq[sig];
+		LOCK(sq->lock);
+		if (!sq->full) {
+			sq->ent.value = value;
+			sq->ent.code  = code;
+			sq->ent.pid   = pid;
+			sq->ent.uid   = uid;
+			sq->ent.timer = timer;
+			sq->full = 1;
+		}
+		UNLOCK(sq->lock);
+		return 0;
+	}
 	if (!__fbx_sig_is_rt(sig)) return 0;
 	struct __fbx_sigq *q = &__fbx_rtsigq[sig - __FBX_RTSIG_MIN];
 	int rc = 0;
@@ -708,6 +798,7 @@ int __fbx_rtsigq_push(int sig, union sigval value, int code,
 		q->ent[tail].code  = code;
 		q->ent[tail].pid   = pid;
 		q->ent[tail].uid   = uid;
+		q->ent[tail].timer = timer;
 		q->count++;
 	}
 	UNLOCK(q->lock);
@@ -718,27 +809,39 @@ int __fbx_rtsigq_push(int sig, union sigval value, int code,
  * *si first, then setting si_signo/si_code/si_value/si_pid/si_uid). Returns 1
  * if a record was dequeued, 0 if the queue was empty (caller builds the
  * minimal SI_USER siginfo for a raise()/kill()-delivered RT signal that
- * carries no queued value). The lock is dropped before *si is populated. */
+ * carries no queued value). The lock is dropped before *si is populated.
+ * firebox#SGV — a standard signal's single record (__fbx_stdsigq) is popped
+ * the same way. An SI_TIMER record reports si_timerid (si_overrun is filled
+ * by __fbx_timer_signal_consumed at the consumption point). */
 int __fbx_rtsigq_pop_si(int sig, siginfo_t *si) {
-	if (!si || !__fbx_sig_is_rt(sig)) return 0;
-	struct __fbx_sigq *q = &__fbx_rtsigq[sig - __FBX_RTSIG_MIN];
+	if (!si) return 0;
 	struct __fbx_sigq_ent e;
 	int got = 0;
-	LOCK(q->lock);
-	if (q->count > 0) {
-		e = q->ent[q->head];
-		q->head = (q->head + 1) % __FBX_SIGQ_DEPTH;
-		q->count--;
-		got = 1;
+	if (__fbx_sig_is_std(sig)) {
+		got = __fbx_stdsigq_take(sig, &e);
+	} else if (__fbx_sig_is_rt(sig)) {
+		struct __fbx_sigq *q = &__fbx_rtsigq[sig - __FBX_RTSIG_MIN];
+		LOCK(q->lock);
+		if (q->count > 0) {
+			e = q->ent[q->head];
+			q->head = (q->head + 1) % __FBX_SIGQ_DEPTH;
+			q->count--;
+			got = 1;
+		}
+		UNLOCK(q->lock);
 	}
-	UNLOCK(q->lock);
 	if (!got) return 0;
 	memset(si, 0, sizeof *si);
 	si->si_signo = sig;
 	si->si_code  = e.code;
 	si->si_value = e.value;
-	si->si_pid   = e.pid;
-	si->si_uid   = e.uid;
+	if (e.code == SI_TIMER) {
+		si->si_timerid = e.timer;
+		si->si_overrun = 0;
+	} else {
+		si->si_pid   = e.pid;
+		si->si_uid   = e.uid;
+	}
 	return 1;
 }
 
@@ -819,6 +922,11 @@ void __fbx_clear_pending_on_fork(void) {
 		__fbx_rtsigq[i].lock[0] = 0;
 		__fbx_rtsigq[i].head = 0;
 		__fbx_rtsigq[i].count = 0;
+	}
+	/* firebox#SGV — and every standard signal's pending record. */
+	for (int i = 0; i < 32; i++) {
+		__fbx_stdsigq[i].lock[0] = 0;
+		__fbx_stdsigq[i].full = 0;
 	}
 	/* Clear the process-wide + this-thread pending bitmasks. */
 	for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
@@ -1398,6 +1506,7 @@ static int __fbx_claim_pending_bit(volatile int *word, int bit) {
 }
 
 static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain);
+static inline void __fbx_note_consumed(int sig, siginfo_t *si);
 
 static int __wasm_drain_pending_pass(struct pthread *self) {
 	int tid = self->tid;
@@ -1437,7 +1546,13 @@ static int __wasm_drain_pending_pass(struct pthread *self) {
 				 * batch to it would lose the opportunity to prepare nested
 				 * frames. Default actions remain owned by the host. */
 				if (__fbx_handler_installed(sig)) __fbx_dispatch_signal(sig, 0, 1);
-				else (void)__wasi_thread_signal(tid, (__wasi_signal_t)sig);
+				else {
+					/* firebox#SGV — the host's default action consumes this
+					 * instance; its siginfo record and timer go with it. */
+					__fbx_stdsigq_discard(sig);
+					__fbx_note_consumed(sig, NULL);
+					(void)__wasi_thread_signal(tid, (__wasi_signal_t)sig);
+				}
 			}
 		}
 	}
@@ -1561,28 +1676,6 @@ static void __fbx_call_on_altstack_1(void (*handler)(int), int sig,
 		: "r"(saved_sp));
 }
 
-__attribute__((noinline))
-static void __fbx_call_on_altstack_3(
-	void (*handler)(int, siginfo_t *, void *), int sig,
-	siginfo_t *si, void *uc, uintptr_t alt_top) {
-	uintptr_t saved_sp;
-	__asm__ volatile(__FBX_SP_GLOBALTYPE
-		"global.get __stack_pointer\n"
-		"local.set %0\n"
-		: "=r"(saved_sp));
-	__asm__ volatile(__FBX_SP_GLOBALTYPE
-		"local.get %0\n"
-		"global.set __stack_pointer\n"
-		:
-		: "r"(alt_top));
-	handler(sig, si, uc);
-	__asm__ volatile(__FBX_SP_GLOBALTYPE
-		"local.get %0\n"
-		"global.set __stack_pointer\n"
-		:
-		: "r"(saved_sp));
-}
-
 /* True iff the active disposition wants on-altstack delivery AND a usable
  * alt stack is registered AND we are not already executing on it. */
 static inline int __fbx_should_use_altstack(const struct k_sigaction *ksa) {
@@ -1604,6 +1697,141 @@ static inline void __fbx_prepare_pending_frame(int sig, int on_alt,
 		__fbx_call_on_altstack_1(__fbx_stack_pending_handlers, sig, alt_top);
 	else
 		__fbx_stack_pending_handlers(sig);
+}
+
+/* firebox#SGV — CALL A HANDLER WITH THE TYPE IT WAS DEFINED WITH.
+ *
+ * C programs routinely install a handler whose type does not match sa_flags:
+ * `sa.sa_handler = h1; sa.sa_flags = SA_SIGINFO;` with `void h1(int)` (Open
+ * POSIX aio_suspend/4-1), a `void h(void)` cast into sa_sigaction, a 2-arg
+ * `void h(int, siginfo_t *)`. On Linux the call works: the extra arguments sit
+ * in registers the callee never reads. MEASURED on alpine:3.24 and
+ * debian:trixie, all three run (SGV probe sigshape, arms A, C, F). On wasm,
+ * call_indirect checks the callee's exact type, so the 3-arg call made for
+ * SA_SIGINFO trapped "indirect call type mismatch" before the handler ran
+ * (rc 129 at both widths).
+ *
+ * wasm cannot ask a funcref its type, but the host can: WASIX's
+ * reflect_signature import (used by libffi closures; every Firebox host has
+ * it). sigaction() asks once at install time and records which of these four
+ * shapes the handler has. The dispatcher then calls it that way. Anything
+ * else, or a host whose answer fails the calibration below, keeps the
+ * convention sa_flags declares, which is the old behaviour. */
+enum {
+	__FBX_SHAPE_DECLARED = 0,    /* call as sa_flags says */
+	__FBX_SHAPE_0,               /* void (void)                        */
+	__FBX_SHAPE_1,               /* void (int)                         */
+	__FBX_SHAPE_2,               /* void (int, siginfo_t *)            */
+	__FBX_SHAPE_3,               /* void (int, siginfo_t *, void *)    */
+};
+/* Written under __eintr_handler_lock together with the action it describes. */
+static volatile unsigned char __fbx_handler_shape[_NSIG];
+
+static void __fbx_shape_probe(int sig, siginfo_t *si, void *uc)
+{
+	(void)sig; (void)si; (void)uc;
+}
+
+static int __fbx_reflect_shape(void (*fn)(void))
+{
+	__wasi_wasm_value_type_t args[4], res[2];
+	__wasi_reflection_result_t rr;
+	memset(&rr, 0, sizeof rr);
+	if (__wasi_reflect_signature((__wasi_function_pointer_t)(uintptr_t)fn,
+	                             args, 4, res, 2, &rr) != 0)
+		return __FBX_SHAPE_DECLARED;
+	if (rr.results != 0 || rr.arguments > 3) return __FBX_SHAPE_DECLARED;
+	const __wasi_wasm_value_type_t ptr = sizeof(void *) == 8
+		? __WASI_WASM_VALUE_TYPE_I64 : __WASI_WASM_VALUE_TYPE_I32;
+	for (int i = 0; i < rr.arguments; i++)
+		if (args[i] != (i == 0 ? __WASI_WASM_VALUE_TYPE_I32 : ptr))
+			return __FBX_SHAPE_DECLARED;
+	return __FBX_SHAPE_0 + rr.arguments;
+}
+
+/* The shape to record for a newly installed handler. CALIBRATED: the host must
+ * first report this file's own 3-arg probe as 3-arg. A host that answers
+ * `() -> ()` for everything (the JS backend for a module without the dynamic
+ * linker's type map, wasmer js table.rs) fails the calibration, and every
+ * handler keeps its declared convention instead of being called with no
+ * arguments. */
+static int __fbx_handler_shape_for(sighandler_t h)
+{
+	static volatile int trusted = -1;
+	/* SIG_IGN is libc's own one-argument no-op (signal.c), whatever sa_flags
+	 * says; SIG_DFL is never called. */
+	if (h == SIG_IGN) return __FBX_SHAPE_1;
+	if (h == SIG_DFL || h == 0) return __FBX_SHAPE_DECLARED;
+	if (trusted < 0)
+		trusted = __fbx_reflect_shape((void (*)(void))__fbx_shape_probe)
+		          == __FBX_SHAPE_3;
+	if (!trusted) return __FBX_SHAPE_DECLARED;
+	return __fbx_reflect_shape((void (*)(void))h);
+}
+
+/* Call `h` for `sig`. `siginfo_flag` is the SA_SIGINFO convention the action
+ * declared; `shape` is what __fbx_handler_shape_for found. `si` must be valid
+ * whenever the call could pass it. */
+static void __fbx_call_shaped(int shape, int siginfo_flag, sighandler_t h,
+                              int sig, siginfo_t *si)
+{
+	if (shape == __FBX_SHAPE_DECLARED)
+		shape = siginfo_flag ? __FBX_SHAPE_3 : __FBX_SHAPE_1;
+	switch (shape) {
+	case __FBX_SHAPE_0:
+		((void (*)(void))(void *)h)();
+		break;
+	case __FBX_SHAPE_1:
+		h(sig);
+		break;
+	case __FBX_SHAPE_2:
+		((void (*)(int, siginfo_t *))(void *)h)(sig, si);
+		break;
+	default:
+		((void (*)(int, siginfo_t *, void *))(void *)h)(sig, si, NULL);
+		break;
+	}
+}
+
+__attribute__((noinline))
+static void __fbx_call_shaped_on_altstack(int shape, int siginfo_flag,
+	sighandler_t h, int sig, siginfo_t *si, uintptr_t alt_top) {
+	uintptr_t saved_sp;
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"global.get __stack_pointer\n"
+		"local.set %0\n"
+		: "=r"(saved_sp));
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"local.get %0\n"
+		"global.set __stack_pointer\n"
+		:
+		: "r"(alt_top));
+	__fbx_call_shaped(shape, siginfo_flag, h, sig, si);
+	__asm__ volatile(__FBX_SP_GLOBALTYPE
+		"local.get %0\n"
+		"global.set __stack_pointer\n"
+		:
+		: "r"(saved_sp));
+}
+
+static void __fbx_invoke_handler(int shape, int siginfo_flag, sighandler_t h,
+	int sig, siginfo_t *si, int on_alt, uintptr_t alt_top)
+{
+	if (on_alt) __fbx_call_shaped_on_altstack(shape, siginfo_flag, h, sig, si, alt_top);
+	else __fbx_call_shaped(shape, siginfo_flag, h, sig, si);
+}
+
+/* firebox#SGV — a POSIX timer's signal was consumed (delivered to a handler or
+ * a default action, or accepted by sigwait) on this thread. timer_create.c
+ * defines it: it settles the timer that generated the instance (Linux re-arms a
+ * timer and fixes its overrun when its signal is dequeued) and fills `si`'s
+ * si_code/si_value/si_timerid/si_overrun when `si` is non-null. Weak, so a
+ * program that never links the timer machinery pays one null test. */
+extern void __fbx_timer_signal_consumed(int sig, siginfo_t *si) __attribute__((__weak__));
+
+static inline void __fbx_note_consumed(int sig, siginfo_t *si)
+{
+	if (__fbx_timer_signal_consumed != NULL) __fbx_timer_signal_consumed(sig, si);
 }
 
 static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
@@ -1706,11 +1934,13 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 	__block_all_sigs(lock_mask);
 	LOCK(__eintr_handler_lock);
 	struct k_sigaction ksa = __eintr_handler_callbacks[sig];
+	int shape = __fbx_handler_shape[sig];   /* firebox#SGV — the action's handler type */
 	/* SA_RESETHAND: reset handler to SIG_DFL atomically with snapshot,
 	 * so a concurrent sigaction() on another thread sees the reset. */
 	if (ksa.handler != 0 && (ksa.flags & SA_RESETHAND)) {
 		const struct k_sigaction ksa_default = { .handler = SIG_DFL };
 		__fbx_replace_action_locked(sig, &ksa_default, 0);
+		__fbx_handler_shape[sig] = __FBX_SHAPE_DECLARED;
 	}
 	UNLOCK(__eintr_handler_lock);
 	/* This dispatch already owns the callback. Restore only the mask here:
@@ -1828,9 +2058,13 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 			__fbx_frame->depth = __self_dispatch != 0;
 			__fbx_frame->nodefer = nodefer;
 		}
+		/* firebox#SGV — every handler call below goes through
+		 * __fbx_invoke_handler, which calls the handler with the type it
+		 * was defined with (`shape`, recorded by sigaction) and falls back
+		 * to the convention sa_flags declares. Every consumed instance is
+		 * reported to the timer machinery first (__fbx_note_consumed), so
+		 * a POSIX timer's si_overrun is filled and the timer settles. */
 		if (ksa.flags & SA_SIGINFO) {
-			void (*h3)(int, siginfo_t *, void *) =
-				(void (*)(int, siginfo_t *, void *))(void *)ksa.handler;
 			siginfo_t si;
 			/* firebox#C2Q/#HPT — RT-signal queued delivery. If sigqueue
 			 * enqueued one or more siginfo records for this RT signal,
@@ -1850,12 +2084,10 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 			if (__fbx_rtsigq_pop_si(sig, &si)) {
 				do {
 					handler_ran = 1;
+					__fbx_note_consumed(sig, &si);
 					__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
-					if (on_alt) {
-						__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
-					} else {
-						h3(sig, &si, NULL);
-					}
+					__fbx_invoke_handler(shape, 1, ksa.handler, sig, &si,
+					                     on_alt, alt_top);
 				} while (__fbx_rtsigq_pop_si(sig, &si));
 			} else if (__fbx_sig_is_rt(sig) && __fbx_signal_info_fill_si(sig, &si)) {
 				handler_ran = 1;
@@ -1871,11 +2103,8 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 				 * queued value either, an RT dispatch delivers NOTHING (the
 				 * firebox#PNB rule stated at the end of this branch); a non-RT
 				 * signal falls through to the SI_USER default below. */
-				if (on_alt) {
-					__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
-				} else {
-					h3(sig, &si, NULL);
-				}
+				__fbx_invoke_handler(shape, 1, ksa.handler, sig, &si,
+				                     on_alt, alt_top);
 			} else if (!__fbx_sig_is_rt(sig)) {
 				handler_ran = 1;
 				memset(&si, 0, sizeof si);
@@ -1897,12 +2126,12 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 						si.si_code = __fbx_code;
 					}
 				}
+				/* firebox#SGV — a timer's standard signal carries no record;
+				 * the timer machinery fills SI_TIMER/si_value/si_overrun. */
+				__fbx_note_consumed(sig, &si);
 				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
-				if (on_alt) {
-					__fbx_call_on_altstack_3(h3, sig, &si, NULL, alt_top);
-				} else {
-					h3(sig, &si, NULL);
-				}
+				__fbx_invoke_handler(shape, 1, ksa.handler, sig, &si,
+				                     on_alt, alt_top);
 			}
 			/* firebox#PNB — RT signal, NO record consumed => deliver ZERO.
 			 *
@@ -1965,34 +2194,44 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 			siginfo_t si;
 			while (__fbx_rtsigq_pop_si(sig, &si)) {
 				handler_ran = 1;
+				__fbx_note_consumed(sig, &si);
 				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
-				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
-				else ksa.handler(sig);
+				__fbx_invoke_handler(shape, 0, ksa.handler, sig, &si,
+				                     on_alt, alt_top);
 			}
 			while (__fbx_signal_info_fill_si(sig, &si)) {
 				handler_ran = 1;
 				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
-				if (on_alt) __fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
-				else ksa.handler(sig);
+				__fbx_invoke_handler(shape, 0, ksa.handler, sig, &si,
+				                     on_alt, alt_top);
 			}
 			/* no record consumed -> deliver ZERO (spurious doorbell) */
 		} else {
 			/* Standard signal (1..31): at-most-one-pending coalescing — deliver
-			 * ONCE (the pending bitmask has no depth; unchanged pre-#VYD path). */
-			handler_ran = 1;
-			__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
-			if (on_alt) {
-				__fbx_call_on_altstack_1(ksa.handler, sig, alt_top);
-			} else {
-				ksa.handler(sig);
+			 * ONCE (the pending bitmask has no depth; unchanged pre-#VYD path).
+			 * firebox#SGV — the instance's record is consumed with it, and a
+			 * handler whose own type takes a siginfo still gets one. */
+			siginfo_t si;
+			if (!__fbx_rtsigq_pop_si(sig, &si)) {
+				memset(&si, 0, sizeof si);
+				si.si_signo = sig;
+				si.si_code = SI_USER;
 			}
+			handler_ran = 1;
+			__fbx_note_consumed(sig, &si);
+			__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
+			__fbx_invoke_handler(shape, 0, ksa.handler, sig, &si,
+			                     on_alt, alt_top);
 		}
 		if (nodefer) __wasm_nodefer_active[sig]--;
 		if (__self_dispatch) __self_dispatch->in_handler_depth--;
 		__wasm_restore_handler_mask(saved_mask);
 		if (on_alt) __fbx_altstack_depth--;
-	} else if (default_handler != 0) {
-		default_handler(sig);
+	} else {
+		/* firebox#SGV — a default action consumes the instance too. */
+		__fbx_stdsigq_discard(sig);
+		__fbx_note_consumed(sig, NULL);
+		if (default_handler != 0) default_handler(sig);
 	}
 	/* else: SIG_DFL with default_handler unset — drop. */
 
@@ -2418,6 +2657,9 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 		__wasi_callback_signal("__wasm_signal");
 	}
 	int r = 0;
+	/* firebox#SGV — the handler's own type, asked of the host outside the
+	 * lock and published with the action under it. */
+	int shape = sa ? __fbx_handler_shape_for(sa->sa_handler) : 0;
 	/* firebox#HXF: block only THIS thread while it may hold or wait for the
 	 * disposition lock. In particular a process-directed SIGTERM delivered
 	 * to the registrar must pend before __wasm_signal tries this same lock.
@@ -2427,8 +2669,10 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 	__block_all_sigs(lock_mask);
 	LOCK(__eintr_handler_lock);
 	ksa_old = __eintr_handler_callbacks[sig];
-	if (sa)
+	if (sa) {
 		__fbx_replace_action_locked(sig, &ksa, sa->sa_flags);
+		__fbx_handler_shape[sig] = (unsigned char)shape;
+	}
 	UNLOCK(__eintr_handler_lock);
 #endif
 	if (old && !r) {

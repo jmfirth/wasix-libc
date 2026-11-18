@@ -68,6 +68,18 @@ static void *wait_thread(void *p)
 	free(st);
 	switch (sev->sigev_notify) {
 	case SIGEV_SIGNAL:
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#SGV — lio_wait returned on seeing every request's __err
+		 * published, which each worker does BEFORE sending its own
+		 * completion signal. Sent now, the list signal could overtake the
+		 * last of those, and Open POSIX lio_listio/4-1, 7-1, 15-1 (which
+		 * count the per-request signals when the list signal arrives) read
+		 * one short. Wait until every published completion has been
+		 * signalled. The count is process-wide, so an unrelated request can
+		 * extend the wait by its own publish-to-send window, never more. */
+		for (int n; (n = __aio_notify_inflight); )
+			__wait(&__aio_notify_inflight, 0, n, 1);
+#endif
 		notify_signal(sev);
 		break;
 	case SIGEV_THREAD:
