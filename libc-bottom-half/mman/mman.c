@@ -1560,9 +1560,8 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     //   * offset 0 only — the host maps the object from its start; a non-zero
     //     offset into a windowed object is the §7.4 segment-sizing follow-up, so
     //     it falls through to the legacy path rather than mis-map.
-    // Ordinary files can fall back to the legacy write-back path. A /dev/shm
-    // descriptor requires a shared window, so return the host error if its
-    // backend or heap cannot provide one.
+    // Without a shared window, keep the legacy file mapping path. Other
+    // failures from the descriptor route must reach the caller.
     if ((flags & MAP_SHARED) != 0 && (flags & MAP_ANON) == 0 && fd >= 0 &&
         offset == 0) {
         struct stat shm_st;
@@ -1622,7 +1621,7 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             int32_t map_error = is_shm
                 ? __wasilibc_shm_map_fd(fd, shm_map_len, &shm_off, &shm_created)
                 : __wasilibc_shm_map((uint64_t)shm_st.st_ino, shm_map_len, &shm_off, &shm_created);
-            if (is_shm && map_error != 0) {
+            if (is_shm && map_error != 0 && map_error != ENOTSUP) {
                 errno = map_error;
                 return MAP_FAILED;
             }
