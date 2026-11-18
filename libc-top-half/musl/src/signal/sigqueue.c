@@ -16,6 +16,9 @@
  * standard signal. */
 extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
+/* firebox#C3E — the process-wide (process-directed) pending set. */
+extern volatile int __wasm_pending_sigs[];
+int __wasm_thread_sig_blocked(int sig);
 
 /* firebox#EMN — cross-process sigqueue si_value. A sigqueue to ANOTHER process
  * cannot stash the value in the self-ring above (the forked receiver has a
@@ -126,11 +129,20 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 				errno = EAGAIN;
 				return -1;
 			}
-			/* firebox#C3E — no process-wide mark here. The delivery below is
-			 * thread-directed at this thread, so a blocked instance also pends
-			 * in this thread's own set; a process-wide bit next to it would be
-			 * a second instance that a sibling's sigwait could take while this
-			 * thread's own copy stayed pending (see kill.c). */
+			/* firebox#C3E — sigqueue(2) is PROCESS-directed. A blocked
+			 * instance pends on this thread below (the thread-signal route
+			 * honours the mask) but is pending for the process, so publish it
+			 * in the process-wide set every thread's sigwait and sigpending
+			 * read. Unlike kill(getpid()) (see kill.c), this delivery makes no
+			 * host router copies, so this mark is the ONLY instance a sibling
+			 * can accept: MEASURED without it, a sibling's sigwaitinfo never
+			 * returned (#P8H litmus `rt-queue`, setup timeout). With it, the
+			 * caller's own copy stays pending after a sibling accepts (the
+			 * same arm: pending in main 1, Linux 0) -- a stale view, not a
+			 * loss; making a self-sigqueue a host process signal retires it. */
+			if (__wasm_thread_sig_blocked(sig)) {
+				a_or(&__wasm_pending_sigs[(sig - 1) / 32], 1 << ((sig - 1) % 32));
+			}
 			/* Self-delivery: respect the per-thread block mask via the
 			 * thread-signal → __wasm_signal path (mirrors raise()). */
 			e = __wasi_thread_signal((__wasi_tid_t)self->tid,
