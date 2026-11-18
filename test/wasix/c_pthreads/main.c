@@ -1,6 +1,8 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,6 +122,59 @@ static void *pending_cancel_at_sleep(void *arg)
     return NULL;
 }
 
+struct directed_signal_test {
+    sigset_t set;
+    int armed, enter_host, dispatched, other_checked;
+    int accepted;
+};
+
+static void open_gate(int *gate)
+{
+    __atomic_store_n(gate, 1, __ATOMIC_RELEASE);
+    __builtin_wasm_memory_atomic_notify(gate, 1);
+}
+
+static void wait_for_gate(int *gate)
+{
+    /* Use a raw Wasm wait so this gate does not dispatch host signals. */
+    __builtin_wasm_memory_atomic_wait32(gate, 0, -1);
+    require(__atomic_load_n(gate, __ATOMIC_ACQUIRE) == 1);
+}
+
+static void *directed_signal_target(void *arg)
+{
+    struct directed_signal_test *test = arg;
+    open_gate(&test->armed);
+    wait_for_gate(&test->enter_host);
+    /* Let the host dispatch while SIGUSR1 is blocked and before sigwait. */
+    require(sched_yield() == 0);
+    open_gate(&test->dispatched);
+    wait_for_gate(&test->other_checked);
+    test->accepted = sigtimedwait(&test->set, NULL, &(struct timespec){0});
+    return NULL;
+}
+
+static int directed_signal_stays_with_target(void)
+{
+    struct directed_signal_test test = {0};
+    sigset_t saved;
+    pthread_t target;
+    require(sigemptyset(&test.set) == 0);
+    require(sigaddset(&test.set, SIGUSR1) == 0);
+    require(pthread_sigmask(SIG_BLOCK, &test.set, &saved) == 0);
+    require(pthread_create(&target, NULL, directed_signal_target, &test) == 0);
+    wait_for_gate(&test.armed);
+    require(pthread_kill(target, SIGUSR1) == 0);
+    open_gate(&test.enter_host);
+    wait_for_gate(&test.dispatched);
+    int received = sigtimedwait(&test.set, NULL, &(struct timespec){0});
+    int no_signal = received == -1 && errno == EAGAIN;
+    open_gate(&test.other_checked);
+    require(pthread_join(target, NULL) == 0);
+    require(pthread_sigmask(SIG_SETMASK, &saved, NULL) == 0);
+    return no_signal && test.accepted == SIGUSR1;
+}
+
 void *thread(void *ptr)
 {
     long type = (long)ptr;
@@ -160,6 +215,7 @@ int main(int argc, char **argv)
     require(pthread_create(&waiter, NULL, pending_cancel_at_sleep, NULL) == 0);
     require(pthread_join(waiter, &result) == 0);
     int sleep_correct = result == PTHREAD_CANCELED && !sleep_entered_host_poll;
+    int directed_correct = directed_signal_stays_with_target();
 
     if (!cancel_correct)
         fputs("pending condvar cancellation did not unwind\n", stderr);
@@ -167,7 +223,9 @@ int main(int argc, char **argv)
         fputs("timed mutex wait did not honor its absolute deadline\n", stderr);
     if (!sleep_correct)
         fputs("clock sleep parked with cancellation already pending\n", stderr);
-    if (!cancel_correct || !mutex_timeout_correct || !sleep_correct)
+    if (!directed_correct)
+        fputs("a different thread could consume a directed signal\n", stderr);
+    if (!cancel_correct || !mutex_timeout_correct || !sleep_correct || !directed_correct)
         return 1;
 
     fprintf(stdout, "threads joined\n");
