@@ -157,11 +157,13 @@
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/ipc.h>
 #include <sys/param.h>
 #include <sys/poll.h>
 #include <sys/random.h>
 #include <sys/reg.h>
 #include <sys/select.h>
+#include <sys/sem.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>

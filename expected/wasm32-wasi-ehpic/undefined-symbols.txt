@@ -12,6 +12,9 @@ __floatsitf
 __floatunsitf
 __getf2
 __gttf2
+__imported_sysv_sem_ctl
+__imported_sysv_sem_get
+__imported_sysv_sem_op
 __imported_wasi_snapshot_preview1_args_get
 __imported_wasi_snapshot_preview1_args_sizes_get
 __imported_wasi_snapshot_preview1_clock_res_get

@@ -962,6 +962,7 @@ ftell
 ftello
 ftello64
 ftime
+ftok
 ftruncate
 ftrylockfile
 funlockfile
@@ -1530,6 +1531,10 @@ sem_timedwait
 sem_trywait
 sem_unlink
 sem_wait
+semctl
+semget
+semop
+semtimedop
 send
 sendfile
 sendmsg
