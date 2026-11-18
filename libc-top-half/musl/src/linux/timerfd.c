@@ -1,5 +1,6 @@
 #include <sys/timerfd.h>
 #include <errno.h>
+#ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
 
 #define IS32BIT(x) !((x)+0x80000000ULL>>32)
@@ -57,3 +58,56 @@ int timerfd_gettime(int fd, struct itimerspec *cur)
 #endif
 	return syscall(SYS_timerfd_gettime, fd, cur);
 }
+#else
+#include <wasi/api_firebox.h>
+#include <wasi/libc.h>
+
+static void unpack(struct itimerspec *out, const int64_t value[4])
+{
+	out->it_interval.tv_sec = value[0];
+	out->it_interval.tv_nsec = value[1];
+	out->it_value.tv_sec = value[2];
+	out->it_value.tv_nsec = value[3];
+}
+
+int timerfd_create(int clockid, int flags)
+{
+	int32_t fd;
+	__wasi_errno_t error = __wasix_timerfd_create(clockid, flags, &fd);
+	if (!error) return fd;
+	errno = __wasilibc_errno_from_wasi(error);
+	return -1;
+}
+
+int timerfd_settime(int fd, int flags, const struct itimerspec *new, struct itimerspec *old)
+{
+	int64_t input[4];
+	int64_t output[4];
+	if (new) {
+		input[0] = new->it_interval.tv_sec;
+		input[1] = new->it_interval.tv_nsec;
+		input[2] = new->it_value.tv_sec;
+		input[3] = new->it_value.tv_nsec;
+	}
+	__wasi_errno_t error = __wasix_timerfd_settime(fd, flags,
+	                                           new ? input : 0, old ? output : 0);
+	if (error) {
+		errno = __wasilibc_errno_from_wasi(error);
+		return -1;
+	}
+	if (old) unpack(old, output);
+	return 0;
+}
+
+int timerfd_gettime(int fd, struct itimerspec *cur)
+{
+	int64_t output[4];
+	__wasi_errno_t error = __wasix_timerfd_gettime(fd, cur ? output : 0);
+	if (error) {
+		errno = __wasilibc_errno_from_wasi(error);
+		return -1;
+	}
+	unpack(cur, output);
+	return 0;
+}
+#endif

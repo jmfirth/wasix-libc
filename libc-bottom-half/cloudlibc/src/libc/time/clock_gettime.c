@@ -9,8 +9,19 @@
 #include <errno.h>
 #include <time.h>
 #include <wasi/libc.h>
+#include <wasi/api_firebox.h>
 
 int __clock_gettime(clockid_t clock_id, struct timespec *tp) {
+  if (clock_id == CLOCK_BOOTTIME) {
+    __wasi_timestamp_t ts;
+    __wasi_errno_t error = __wasix_clock_boottime_get(0, &ts);
+    if (error) {
+      errno = __wasilibc_errno_from_wasi(error);
+      return -1;
+    }
+    *tp = timestamp_to_timespec(ts);
+    return 0;
+  }
   // firebox#79E — reject an unknown clock_id with EINVAL (POSIX) instead of
   // dereferencing it as a pointer-ABI clockid (avoids the out-of-bounds
   // fault on bogus integer ids).

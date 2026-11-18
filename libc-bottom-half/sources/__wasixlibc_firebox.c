@@ -306,3 +306,29 @@ int32_t __imported_wasix_fbx_system_info(intptr_t) __attribute__((__import_modul
 __wasi_errno_t __wasix_system_info(uint64_t *out){return (uint16_t)__imported_wasix_fbx_system_info((intptr_t)out);}
 int32_t __imported_wasix_fbx_clock_discipline_get(intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("clock_discipline_get")));
 __wasi_errno_t __wasix_clock_discipline_get(int64_t *out){return (uint16_t)__imported_wasix_fbx_clock_discipline_get((intptr_t)out);}
+
+int32_t __imported_wasix_fbx_timerfd_create(int32_t, int32_t, intptr_t)
+    __attribute__((__import_module__(FBX_WASIX_V1), __import_name__("timerfd_create")));
+int32_t __imported_wasix_fbx_timerfd_settime(int32_t, int32_t, intptr_t, intptr_t)
+    __attribute__((__import_module__(FBX_WASIX_V1), __import_name__("timerfd_settime")));
+int32_t __imported_wasix_fbx_timerfd_gettime(int32_t, intptr_t)
+    __attribute__((__import_module__(FBX_WASIX_V1), __import_name__("timerfd_gettime")));
+int32_t __imported_wasix_fbx_clock_boottime_get(int32_t, intptr_t)
+    __attribute__((__import_module__(FBX_WASIX_V1), __import_name__("clock_boottime_get")));
+
+__wasi_errno_t __wasix_timerfd_create(int32_t clock, int32_t flags, int32_t *fd) {
+    return __imported_wasix_fbx_timerfd_create(clock, flags, (intptr_t)fd);
+}
+
+__wasi_errno_t __wasix_timerfd_settime(int32_t fd, int32_t flags,
+                                    const int64_t *new_value, int64_t *old_value) {
+    return __imported_wasix_fbx_timerfd_settime(fd, flags, (intptr_t)new_value, (intptr_t)old_value);
+}
+
+__wasi_errno_t __wasix_timerfd_gettime(int32_t fd, int64_t *value) {
+    return __imported_wasix_fbx_timerfd_gettime(fd, (intptr_t)value);
+}
+
+__wasi_errno_t __wasix_clock_boottime_get(int32_t query_resolution, uint64_t *out) {
+    return __imported_wasix_fbx_clock_boottime_get(query_resolution, (intptr_t)out);
+}

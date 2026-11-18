@@ -74,7 +74,6 @@ MUSL_OMIT_HEADERS += \
     "net/route.h" \
     "netinet/if_ether.h" \
     "netinet/ether.h" \
-    "sys/timerfd.h" \
     "sys/sysmacros.h"
 # firebox#5DB — aio.h is NO LONGER omitted: POSIX AIO is now provided (musl's
 # thread-backed src/aio/*.c, enabled above). The header ships so aio_read/
