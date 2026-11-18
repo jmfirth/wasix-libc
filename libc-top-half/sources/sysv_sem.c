@@ -120,6 +120,8 @@ int semop(int id, struct sembuf *ops, size_t count)
 
 int semtimedop(int id, struct sembuf *ops, size_t count, const struct timespec *timeout)
 {
+    /* Linux checks its SEMOPM default before inspecting the timeout. */
+    if (count > 500) return fail(E2BIG);
     if (!timeout) return semop(id, ops, count);
     const int64_t billion = 1000000000;
     if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 || timeout->tv_nsec >= billion)
