@@ -30,6 +30,7 @@
 LIBC_TOP_HALF_MUSL_SOURCES = \
     $(addprefix $(LIBC_TOP_HALF_MUSL_SRC_DIR)/, \
         internal/syscall_ret.c \
+        ipc/ftok.c \
         legacy/err.c \
         legacy/isastream.c \
         misc/a64l.c \

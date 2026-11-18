@@ -36,11 +36,11 @@ MUSL_OMIT_HEADERS += \
 MUSL_OMIT_HEADERS += \
     "sys/procfs.h" \
     "sys/user.h" \
-    "sys/kd.h" "sys/vt.h" "sys/soundcard.h" "sys/sem.h" \
-    "sys/shm.h" "sys/msg.h" "sys/ipc.h" "sys/ptrace.h" \
+    "sys/kd.h" "sys/vt.h" "sys/soundcard.h" \
+    "sys/shm.h" "sys/msg.h" "sys/ptrace.h" \
     "sys/statfs.h" \
-    "bits/kd.h" "bits/vt.h" "bits/soundcard.h" "bits/sem.h" \
-    "bits/shm.h" "bits/msg.h" "bits/ipc.h" "bits/ptrace.h" \
+    "bits/kd.h" "bits/vt.h" "bits/soundcard.h" \
+    "bits/shm.h" "bits/msg.h" "bits/ptrace.h" \
     "bits/statfs.h" \
     "sys/vfs.h" \
     "sys/syslog.h" \
