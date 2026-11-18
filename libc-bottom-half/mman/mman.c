@@ -99,6 +99,8 @@ int *__errno_location(void);
 // the fd's bytes exactly once — see the routing block below.
 extern int32_t __wasilibc_shm_map(uint64_t inode, uint64_t len, uint64_t *ret_offset,
                                   uint32_t *ret_created);
+extern int32_t __wasilibc_shm_map_fd(int fd, uint64_t len, uint64_t *ret_offset,
+                                    uint32_t *ret_created);
 extern int __wasix_is_shm_inode(ino_t ino);
 
 // firebox#SAH (native-only, #5WQ mechanism): the HOST mprotect libcall. Applies
@@ -1558,9 +1560,9 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     //   * offset 0 only — the host maps the object from its start; a non-zero
     //     offset into a windowed object is the §7.4 segment-sizing follow-up, so
     //     it falls through to the legacy path rather than mis-map.
-    // Any host failure (no window reserved: non-Static heap / the browser js/v8
-    // backends, the §4-B3 known-gap; or an OS map error) falls through to the
-    // legacy emulation below — never silently wrong.
+    // Ordinary files can fall back to the legacy write-back path. A /dev/shm
+    // descriptor requires a shared window, so return the host error if its
+    // backend or heap cannot provide one.
     if ((flags & MAP_SHARED) != 0 && (flags & MAP_ANON) == 0 && fd >= 0 &&
         offset == 0) {
         struct stat shm_st;
@@ -1617,8 +1619,15 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                     shm_map_len = rounded;
                 }
             }
-            if (__wasilibc_shm_map((uint64_t)shm_st.st_ino, shm_map_len,
-                                   &shm_off, &shm_created) == 0) {                // firebox#V12 gap #1: the host window is a FRESH zero-filled OS
+            int32_t map_error = is_shm
+                ? __wasilibc_shm_map_fd(fd, shm_map_len, &shm_off, &shm_created)
+                : __wasilibc_shm_map((uint64_t)shm_st.st_ino, shm_map_len, &shm_off, &shm_created);
+            if (is_shm && map_error != 0) {
+                errno = map_error;
+                return MAP_FAILED;
+            }
+            if (map_error == 0) {
+                // firebox#V12 gap #1: the host window is a FRESH zero-filled OS
                 // object; the fd's current bytes (e.g. the `value` musl write()s
                 // into a named sem before mmap, or the byte mmap/1-2 write()s)
                 // are NOT in it. Seed the window from the fd — but ONLY on the
