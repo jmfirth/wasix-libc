@@ -124,6 +124,26 @@ int32_t __imported_wasix_fbx_shm_map_at(int64_t, int64_t, int64_t, intptr_t)
 int32_t __imported_wasix_fbx_shm_release(int64_t)
     __attribute__((__import_module__(WASIX_MMAN_FBX_MODULE), __import_name__("shm_release")));
 
+// firebox#GAG: the host page cache for a regular file's MAP_SHARED mapping, one
+// more additive function in the same module. shm_file(op, fd, len, ret_offset):
+//   WASIX_SHM_FILE_MAP    map fd's regular file into this process's window and
+//                         write the address to *ret_offset. The host binds the
+//                         window segment to the file: it seeds the segment from
+//                         the file itself (the first mapper only), keeps read(),
+//                         write() and ftruncate() coherent with it, and writes its
+//                         stores to the file however this process ends — exit,
+//                         _exit, exec, a fatal signal — not only at msync/munmap.
+//   WASIX_SHM_FILE_SYNC   msync: write the segment's stores to the file now.
+//   WASIX_SHM_FILE_UNMAP  this process no longer maps the file (its last munmap).
+// Returns 0, or a WASI errno; a MAP failure (no window — the browser —, a full
+// window, a live segment shorter than this mapping) leaves the caller on the
+// private-copy path. len and ret_offset are ignored except by MAP.
+int32_t __imported_wasix_fbx_shm_file(int32_t, int32_t, int64_t, intptr_t)
+    __attribute__((__import_module__(WASIX_MMAN_FBX_MODULE), __import_name__("shm_file")));
+#define WASIX_SHM_FILE_MAP 0
+#define WASIX_SHM_FILE_SYNC 1
+#define WASIX_SHM_FILE_UNMAP 2
+
 // firebox#SAH (native-only, #5WQ mechanism): the HOST mprotect libcall. Applies
 // a host `region::protect` to `[offset, offset+len)` of the guest linear memory
 // so a guest access that violates `prot` FAULTS on the host — a real SIGSEGV
@@ -757,6 +777,9 @@ static struct {
     off_t offset;      // fd offset the mapping starts at (0 in the routed posture)
     size_t length;     // user-requested mapping length (the writeback extent)
     int writeback;     // 1 => regular-file MAP_SHARED PROT_WRITE (flush on sync)
+                       // 2 => firebox#GAG: the host page cache owns the bytes;
+                       //      msync/munmap tell the host (shm_file), the guest
+                       //      never copies them itself
     dev_t dev;         // firebox#MMP: the mapped object's identity, so a later
     ino_t ino;         // mapping of the same object seeds from the window's bytes
 } g_window_maps[WASIX_MMAN_WINDOW_MAX];
@@ -831,6 +854,13 @@ static void wasix_window_writeback(uintptr_t addr, size_t cap) {
         if (g_window_maps[i].addr == addr) {
             if (!g_window_maps[i].writeback)
                 return;                          // /dev/shm entry: no file flush
+            if (g_window_maps[i].writeback == 2) {
+                // firebox#GAG: the host page cache flushes the whole file; a
+                // guest pwrite here would race other mappers' stores.
+                if (g_window_maps[i].fd >= 0)
+                    (void)__imported_wasix_fbx_shm_file(WASIX_SHM_FILE_SYNC, g_window_maps[i].fd, 0, 0);
+                return;
+            }
             const int fd = g_window_maps[i].fd;
             const off_t base_off = g_window_maps[i].offset;
             if (fd < 0)
@@ -870,8 +900,23 @@ static int wasix_window_release(uintptr_t addr, size_t *length) {
     for (int i = 0; i < g_window_count; i++) {
         if (g_window_maps[i].addr == addr) {
             const int fd = g_window_maps[i].fd;
+            const int host_cached = g_window_maps[i].writeback == 2;
+            const dev_t dev = g_window_maps[i].dev;
+            const ino_t ino = g_window_maps[i].ino;
             if (length) *length = g_window_maps[i].length;
             g_window_maps[i] = g_window_maps[--g_window_count];
+            // firebox#GAG: the last mapping of a host-cached file in this
+            // process ends this process's claim on the host page cache (which
+            // flushes). Told while the held fd is still open: it names the file.
+            if (host_cached && fd >= 0) {
+                int still_mapped = 0;
+                for (int j = 0; j < g_window_count; j++)
+                    if (g_window_maps[j].writeback == 2 && g_window_maps[j].dev == dev &&
+                        g_window_maps[j].ino == ino)
+                        still_mapped = 1;
+                if (!still_mapped)
+                    (void)__imported_wasix_fbx_shm_file(WASIX_SHM_FILE_UNMAP, fd, 0, 0);
+            }
             if (fd >= 0) close(fd);
             return 1;
         }
@@ -1726,10 +1771,15 @@ static void wasix_seed_from_live_copy(char *dst, off_t off, size_t extent, dev_t
 // FILE's bytes where the file has them — mmap/3-1 maps page_size+2 bytes of a
 // two-page file and reads pa[page_size+2], which Linux answers with the file's
 // byte — and zero past the end of the file, as before (mmap/11-4/5/6).
+//
+// firebox#GAG: `host_cached` — the mapping came from shm_file(MAP): the host page
+// cache seeded the segment and owns its bytes, so the guest seeds nothing (a guest
+// re-seed would overwrite another live mapper's stores with the file's older
+// bytes) and registers the entry writeback=2.
 static void wasix_window_adopt(uintptr_t win_addr, uint32_t created, int fd, int prot,
                                size_t length, size_t map_len, const struct stat *st,
-                               int is_shm, int is_regfile) {
-    const int reg_reseed = (is_regfile && !is_shm);
+                               int is_shm, int is_regfile, int host_cached) {
+    const int reg_reseed = (is_regfile && !is_shm && !host_cached);
     if (created || reg_reseed) {
         volatile unsigned char *win = (volatile unsigned char *)win_addr;
         unsigned char seedbuf[512];
@@ -1753,7 +1803,7 @@ static void wasix_window_adopt(uintptr_t win_addr, uint32_t created, int fd, int
             done += (size_t)nread;
         }
     }
-    if (reg_reseed) {
+    if (reg_reseed || host_cached) {
         const struct timespec atime_now[2] = {
             { .tv_sec = 0, .tv_nsec = UTIME_NOW },   // st_atime -> now
             { .tv_sec = 0, .tv_nsec = UTIME_OMIT },  // st_mtime untouched
@@ -1763,7 +1813,8 @@ static void wasix_window_adopt(uintptr_t win_addr, uint32_t created, int fd, int
     const int held = dup(fd);
     if (held >= 0)
         wasix_window_register(win_addr, held, 0, length,
-                              /*writeback=*/(reg_reseed && (prot & PROT_WRITE) != 0),
+                              /*writeback=*/host_cached ? 2
+                                  : (reg_reseed && (prot & PROT_WRITE) != 0),
                               st->st_dev, st->st_ino);
     wasix_map_count_inc();
 }
@@ -1819,7 +1870,8 @@ static void *wasix_mmap_fixed_window(void *addr, size_t length, int prot, int fl
     // Every mapping that started at `a` is gone: drop its inode pin and its count.
     while (wasix_window_release(a, NULL))
         wasix_map_count_dec();
-    wasix_window_adopt(a, created, fd, prot, length, map_len, &st, is_shm, is_regfile);
+    wasix_window_adopt(a, created, fd, prot, length, map_len, &st, is_shm, is_regfile,
+                       /*host_cached=*/0);
     return addr;
 }
 
@@ -2044,7 +2096,28 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                     shm_map_len = rounded;
                 }
             }
-            if (__wasilibc_shm_map((uint64_t)shm_st.st_ino, shm_map_len,
+            // firebox#GAG: a regular file goes through the HOST page cache, not the
+            // guest-managed window below. The guest-managed path re-seeds the shared
+            // segment from the file on every map (discarding a live mapper's
+            // unsynced stores) and reaches the file only by its own pwrite at
+            // msync/munmap, so a process that exits, _exits, execs or dies by a
+            // signal without munmap lost its stores (Linux keeps them: the page
+            // cache, not the process, owns the pages). With shm_file the host binds
+            // the segment to the file and writes it back whenever a mapper goes, and
+            // read()/write()/ftruncate() see and update the same bytes. If the host
+            // cannot take it, the mapping is a private copy (below) — never the
+            // guest-managed window, whose re-seed would overwrite the page cache.
+            if (is_regfile && !is_shm) {
+                uint64_t file_off = 0;
+                if (__imported_wasix_fbx_shm_file(WASIX_SHM_FILE_MAP, fd, (int64_t)shm_map_len,
+                                                  (intptr_t)&file_off) == 0) {
+                    wasix_window_adopt((uintptr_t)file_off, 0, fd, prot, length,
+                                       (size_t)shm_map_len, &shm_st, is_shm, is_regfile,
+                                       /*host_cached=*/1);
+                    return (void *)(uintptr_t)file_off;
+                }
+                // else: fall through to the private emulation below.
+            } else if (__wasilibc_shm_map((uint64_t)shm_st.st_ino, shm_map_len,
                                    &shm_off, &shm_created) == 0) {                // firebox#V12 gap #1: the host window is a FRESH zero-filled OS
                 // object; the fd's current bytes (e.g. the `value` musl write()s
                 // into a named sem before mmap, or the byte mmap/1-2 write()s)
@@ -2093,7 +2166,8 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                 // mapping count live in wasix_window_adopt, shared with the
                 // MAP_FIXED-into-the-window path (wasix_mmap_fixed_window).
                 wasix_window_adopt((uintptr_t)shm_off, shm_created, fd, prot, length,
-                                   (size_t)shm_map_len, &shm_st, is_shm, is_regfile);
+                                   (size_t)shm_map_len, &shm_st, is_shm, is_regfile,
+                                   /*host_cached=*/0);
                 return (void *)(uintptr_t)shm_off;
             }
             // else: fall through to the private emulation below.
