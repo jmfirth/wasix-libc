@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 #include <wasi/api.h>
 
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -175,6 +176,53 @@ static int directed_signal_stays_with_target(void)
     return no_signal && test.accepted == SIGUSR1;
 }
 
+struct process_signal_test {
+    sigset_t set;
+    int armed, enter_kill;
+    int handler_calls_after_kill;
+};
+static volatile sig_atomic_t process_signal_calls;
+
+static void record_process_signal(int signal)
+{
+    if (signal == SIGUSR2)
+        process_signal_calls++;
+}
+
+static void *eligible_signal_target(void *arg)
+{
+    struct process_signal_test *test = arg;
+    require(pthread_sigmask(SIG_UNBLOCK, &test->set, NULL) == 0);
+    open_gate(&test->armed);
+    wait_for_gate(&test->enter_kill);
+    /* The next host entry is inside pthread_kill's temporary signal mask. */
+    require(pthread_kill(pthread_self(), 0) == 0);
+    test->handler_calls_after_kill = process_signal_calls;
+    return NULL;
+}
+
+static int restore_drains_process_signal(void)
+{
+    struct process_signal_test test = {0};
+    struct sigaction action = {.sa_handler = record_process_signal};
+    struct sigaction saved_action;
+    sigset_t saved_mask;
+    pthread_t target;
+    require(sigemptyset(&action.sa_mask) == 0);
+    require(sigaction(SIGUSR2, &action, &saved_action) == 0);
+    require(sigemptyset(&test.set) == 0);
+    require(sigaddset(&test.set, SIGUSR2) == 0);
+    require(pthread_sigmask(SIG_BLOCK, &test.set, &saved_mask) == 0);
+    require(pthread_create(&target, NULL, eligible_signal_target, &test) == 0);
+    wait_for_gate(&test.armed);
+    require(kill(getpid(), SIGUSR2) == 0);
+    open_gate(&test.enter_kill);
+    require(pthread_join(target, NULL) == 0);
+    require(sigaction(SIGUSR2, &saved_action, NULL) == 0);
+    require(pthread_sigmask(SIG_SETMASK, &saved_mask, NULL) == 0);
+    return test.handler_calls_after_kill == 1;
+}
+
 void *thread(void *ptr)
 {
     long type = (long)ptr;
@@ -216,6 +264,7 @@ int main(int argc, char **argv)
     require(pthread_join(waiter, &result) == 0);
     int sleep_correct = result == PTHREAD_CANCELED && !sleep_entered_host_poll;
     int directed_correct = directed_signal_stays_with_target();
+    int restore_correct = restore_drains_process_signal();
 
     if (!cancel_correct)
         fputs("pending condvar cancellation did not unwind\n", stderr);
@@ -225,7 +274,10 @@ int main(int argc, char **argv)
         fputs("clock sleep parked with cancellation already pending\n", stderr);
     if (!directed_correct)
         fputs("a different thread could consume a directed signal\n", stderr);
-    if (!cancel_correct || !mutex_timeout_correct || !sleep_correct || !directed_correct)
+    if (!restore_correct)
+        fputs("pthread_kill did not drain the signal when it restored the mask\n", stderr);
+    if (!cancel_correct || !mutex_timeout_correct || !sleep_correct ||
+        !directed_correct || !restore_correct)
         return 1;
 
     fprintf(stdout, "threads joined\n");
