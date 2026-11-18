@@ -288,9 +288,10 @@ static int clock_supported(clockid_t clk)
 	switch (clk) {
 	case CLOCK_REALTIME:
 	case CLOCK_MONOTONIC:
+		return 1;
 	case CLOCK_PROCESS_CPUTIME_ID:
 	case CLOCK_THREAD_CPUTIME_ID:
-		return 1;
+		return clock_getres(clk, NULL) == 0;
 	default:
 		return 0;
 	}

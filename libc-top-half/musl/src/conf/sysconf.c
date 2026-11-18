@@ -9,6 +9,8 @@
 #include <sys/sysinfo.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
+#else
+#include <wasi/api.h>
 #endif
 #include "libc.h"
 
@@ -245,6 +247,15 @@ long sysconf(int name)
 		extern int __wasilibc_mprotect_host(uintptr_t, uintptr_t, int);
 		return __wasilibc_mprotect_host(0, 0, 0) == 0 ? _POSIX_VERSION : -1;
 	}
+
+#ifndef __wasilibc_unmodified_upstream
+	if (name == _SC_CPUTIME || name == _SC_THREAD_CPUTIME) {
+		__wasi_timestamp_t resolution;
+		__wasi_clockid_t id = name == _SC_CPUTIME ?
+			__WASI_CLOCKID_PROCESS_CPUTIME_ID : __WASI_CLOCKID_THREAD_CPUTIME_ID;
+		return __wasi_clock_res_get(id, &resolution) == 0 ? _POSIX_VERSION : -1;
+	}
+#endif
 
 	if (name >= sizeof(values)/sizeof(values[0]) || !values[name]) {
 		errno = EINVAL;

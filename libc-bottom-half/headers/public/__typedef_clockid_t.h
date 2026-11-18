@@ -1,8 +1,8 @@
 #ifndef __wasilibc___typedef_clockid_t_h
 #define __wasilibc___typedef_clockid_t_h
 
-#ifndef COMMON_CLOCK_H
-#define COMMON_CLOCK_H
+#ifndef __WASILIBC_CLOCKID_STRUCT
+#define __WASILIBC_CLOCKID_STRUCT
 #include <wasi/api.h>
 
 // In this implementation we define clockid_t as a pointer type, so that
