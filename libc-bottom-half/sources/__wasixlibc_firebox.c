@@ -20,6 +20,7 @@
  * wasm64 ONLY — defining it for wasm32 too would duplicate the generated symbol.
  */
 #include <wasi/api_firebox.h>
+#include <wasi/libc.h>
 
 #ifdef __wasm64__
 #define FBX_WASIX_V1 "wasix_64v1"
@@ -117,7 +118,9 @@ int32_t __wasilibc_shm_map(uint64_t inode,uint64_t len,uint64_t *ret_offset,uint
 int32_t __imported_wasix_fbx_shm_map_fd(int32_t,int64_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_map_fd")));
 int32_t __wasilibc_shm_map_fd(int fd, uint64_t len, uint64_t *offset, uint32_t *created)
 {
-    return __imported_wasix_fbx_shm_map_fd(fd, (int64_t)len, (intptr_t)offset, (intptr_t)created);
+    __wasi_errno_t error = __imported_wasix_fbx_shm_map_fd(
+        fd, (int64_t)len, (intptr_t)offset, (intptr_t)created);
+    return __wasilibc_errno_from_wasi(error);
 }
 
 /* Keep timer expirations distinguishable from ordinary pending signals at exec. */
