@@ -675,7 +675,18 @@ static void *wasix_res_alloc(size_t align, size_t size, int *needs_zero) {
 // growth / a tracked hole). Only an owned range is handed back to the hole list
 // on munmap — donating memory mman never owned would let the reservation
 // allocator hand out someone else's live bytes. `len` is page-rounded.
-static struct { uintptr_t addr; size_t len; int owned; } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
+// `wb_fd`/`wb_off` (firebox#MMP): for a writable MAP_SHARED file mapping, a dup of
+// its fd and the file offset of `addr`, so its stores reach the file at msync and
+// munmap — and when a later MAP_FIXED replaces it — as the private-copy path's
+// do. -1 for every other fixed mapping. Before this a MAP_FIXED|MAP_SHARED file
+// mapping's stores were silently dropped (a false success).
+static struct {
+    uintptr_t addr;
+    size_t len;
+    int owned;
+    int wb_fd;
+    off_t wb_off;
+} g_fixed_maps[WASIX_MMAN_FIXED_MAX];
 static int g_fixed_count;
 
 // firebox#FWX: the lock over both mapping registries (g_fixed_maps and the
@@ -980,6 +991,37 @@ static int wasix_fixed_contains(uintptr_t addr) {
     return 0;
 }
 
+// firebox#MMP: write [s, e) of fixed mapping `i` back to its file, if it is a
+// written-back one (see `wb_fd`): from `wb_off + (s - addr)`, never past the
+// file's current end (wasix_file_writeback_extent, as the private-copy path).
+// Best-effort like that path's munmap; returns -1 if a pwrite failed (msync
+// reports it). Caller holds g_vma_lock. A fixed mapping lives below
+// memory.size, so its bytes are written straight from linear memory.
+static int wasix_fixed_writeback_locked(int i, uintptr_t s, uintptr_t e) {
+    const int fd = g_fixed_maps[i].wb_fd;
+    if (fd < 0) return 0;
+    const uintptr_t fa = g_fixed_maps[i].addr;
+    const off_t base = g_fixed_maps[i].wb_off;
+    const size_t limit = wasix_file_writeback_extent(fd, base, g_fixed_maps[i].len);
+    if (e > fa + limit) e = fa + limit;
+    const char *body = (const char *)s;
+    size_t len = s < e ? (size_t)(e - s) : 0;
+    off_t off = base + (off_t)(s - fa);
+    while (len > 0) {
+        const ssize_t n = pwrite(fd, body, len, off);
+        if (n > 0) {
+            len -= (size_t)n;
+            off += n;
+            body += (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 // firebox#FWX: unmap the page range [a, b) from the fixed registry, as Linux
 // unmaps it from its VMAs: an entry wholly inside is removed, one that overlaps
 // an edge is trimmed, and one that strictly contains the range is split in two.
@@ -988,10 +1030,17 @@ static int wasix_fixed_contains(uintptr_t addr) {
 // answer when a split would exceed the mapping limit — and nothing is changed.
 // Returns 0, or -1 for that ENOMEM. Caller holds g_vma_lock (not g_res_lock).
 static int wasix_fixed_unmap_locked(uintptr_t a, uintptr_t b) {
+    // firebox#MMP: the split tail of a written-back mapping needs its own fd; dup
+    // it before anything changes, so a failure leaves the registry as it was.
+    int tail_fd = -1;
     for (int i = 0; i < g_fixed_count; i++) {
         uintptr_t fa = g_fixed_maps[i].addr;
         uintptr_t fb = fa + g_fixed_maps[i].len;
-        if (fa < a && b < fb && g_fixed_count >= WASIX_MMAN_FIXED_MAX) return -1;
+        if (fa < a && b < fb) {
+            if (g_fixed_count >= WASIX_MMAN_FIXED_MAX) return -1;
+            if (g_fixed_maps[i].wb_fd >= 0 && (tail_fd = dup(g_fixed_maps[i].wb_fd)) < 0)
+                return -1;
+        }
     }
     for (int i = 0; i < g_fixed_count;) {
         uintptr_t fa = g_fixed_maps[i].addr;
@@ -1000,18 +1049,26 @@ static int wasix_fixed_unmap_locked(uintptr_t a, uintptr_t b) {
         uintptr_t s = fa > a ? fa : a;
         uintptr_t e = fb < b ? fb : b;
         int owned = g_fixed_maps[i].owned;
+        const int wb_fd = g_fixed_maps[i].wb_fd;
+        const off_t wb_off = g_fixed_maps[i].wb_off;
+        // firebox#MMP: the piece's stores reach the file before it goes away.
+        wasix_fixed_writeback_locked(i, s, e);
         if (s == fa && e == fb) {
+            if (wb_fd >= 0) (void)close(wb_fd);
             g_fixed_maps[i] = g_fixed_maps[--g_fixed_count];   // re-examine slot i
         } else {
             if (s == fa) {                                     // head unmapped
                 g_fixed_maps[i].addr = e;
                 g_fixed_maps[i].len = (size_t)(fb - e);
+                if (wb_fd >= 0) g_fixed_maps[i].wb_off = wb_off + (off_t)(e - fa);
             } else {                                           // tail (and maybe middle)
                 g_fixed_maps[i].len = (size_t)(s - fa);
                 if (e != fb) {                                 // middle: split off the tail
                     g_fixed_maps[g_fixed_count].addr = e;
                     g_fixed_maps[g_fixed_count].len = (size_t)(fb - e);
                     g_fixed_maps[g_fixed_count].owned = owned;
+                    g_fixed_maps[g_fixed_count].wb_fd = wb_fd >= 0 ? tail_fd : -1;
+                    g_fixed_maps[g_fixed_count].wb_off = wb_off + (off_t)(e - fa);
                     g_fixed_count++;
                 }
             }
@@ -1038,6 +1095,20 @@ static int wasix_fixed_unmap_locked(uintptr_t a, uintptr_t b) {
 
 static int wasix_fixed_unmap_shared_files(uintptr_t a, uintptr_t b);
 
+// firebox#MMP: a MAP_FIXED that fails after registering its range undoes it with
+// munmap — which would write the range back to the NEW mapping's file before its
+// bytes were ever read from it. Drop the write-back first.
+static void wasix_fixed_disarm_writeback(uintptr_t addr) {
+    wasix_vma_lock_acquire();
+    for (int i = 0; i < g_fixed_count; i++) {
+        if (g_fixed_maps[i].addr == addr && g_fixed_maps[i].wb_fd >= 0) {
+            (void)close(g_fixed_maps[i].wb_fd);
+            g_fixed_maps[i].wb_fd = -1;
+        }
+    }
+    wasix_vma_lock_release();
+}
+
 static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
                               int fd, off_t offset) {
     uintptr_t target = (uintptr_t)addr;
@@ -1059,12 +1130,29 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
 #ifdef MAP_FIXED_NOREPLACE
     noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;   // wins over MAP_FIXED, as on Linux
 #endif
+    // firebox#MMP: a writable MAP_SHARED file mapping keeps a dup of its fd so its
+    // stores are written back (see g_fixed_maps' `wb_fd`). dup()'s errno (EMFILE)
+    // is kept, as on the private-copy path.
+    int wb_fd = -1;
+    if ((flags & MAP_SHARED) && !(flags & MAP_ANON) && (prot & PROT_WRITE) && fd >= 0 &&
+        (wb_fd = dup(fd)) < 0)
+        return MAP_FAILED;
     int owned;
     wasix_vma_lock_acquire();
     // A live fixed mapping is occupied by definition.
     if (noreplace && wasix_fixed_overlaps(target, span_end)) {
         wasix_vma_lock_release();
+        if (wb_fd >= 0) (void)close(wb_fd);
         errno = EEXIST;
+        return MAP_FAILED;
+    }
+    // firebox#MMP: a written-back mapping must be registered, or its stores are
+    // lost; refuse it while the registry is (nearly — a split may need a slot)
+    // full, before anything changes. ENOMEM: the mapping limit.
+    if (wb_fd >= 0 && g_fixed_count >= WASIX_MMAN_FIXED_MAX - 1) {
+        wasix_vma_lock_release();
+        (void)close(wb_fd);
+        errno = ENOMEM;
         return MAP_FAILED;
     }
     // firebox#FWX: a plain MAP_FIXED REPLACES the fixed mappings under it — it
@@ -1074,6 +1162,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // proved unowned by the take below and stays owned.
     if (!noreplace && wasix_fixed_unmap_locked(target, span_end) != 0) {
         wasix_vma_lock_release();
+        if (wb_fd >= 0) (void)close(wb_fd);
         errno = ENOMEM;
         return MAP_FAILED;
     }
@@ -1089,6 +1178,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         if (got == (uintptr_t)-1) {
             wasix_res_lock_release();
             wasix_vma_lock_release();
+            if (wb_fd >= 0) (void)close(wb_fd);
             errno = ENOMEM;
             return MAP_FAILED;
         }
@@ -1104,6 +1194,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
             // false success silently overwrites live memory (invariant 0).
             wasix_res_lock_release();
             wasix_vma_lock_release();
+            if (wb_fd >= 0) (void)close(wb_fd);
             errno = EEXIST;
             return MAP_FAILED;
         }
@@ -1121,8 +1212,12 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         g_fixed_maps[g_fixed_count].addr = target;
         g_fixed_maps[g_fixed_count].len = (size_t)(span_end - target);
         g_fixed_maps[g_fixed_count].owned = owned;
+        g_fixed_maps[g_fixed_count].wb_fd = wb_fd;
+        g_fixed_maps[g_fixed_count].wb_off = offset;
         g_fixed_count++;
         registered = 1;
+    } else if (wb_fd >= 0) {
+        (void)close(wb_fd);   // unreachable: refused above while the registry was full
     }
     wasix_vma_lock_release();
     // firebox#MMP: MAP_FIXED UNMAPS what it replaces (POSIX: "any previous mapping
@@ -1133,6 +1228,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // full registry) keeps the old behaviour rather than risk handing the new
     // mapping's bytes to malloc.
     if (!noreplace && registered && wasix_fixed_unmap_shared_files(target, span_end) != 0) {
+        wasix_fixed_disarm_writeback(target);
         (void)munmap(addr, length);
         errno = ENOMEM;
         return MAP_FAILED;
@@ -1164,6 +1260,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
                 // firebox#FWX: undo the registration (an owned range goes back
                 // on the hole list) and keep pread's errno.
                 const int e = errno;
+                wasix_fixed_disarm_writeback(target);
                 (void)munmap(addr, length);
                 errno = e;
                 return MAP_FAILED;
@@ -2411,13 +2508,29 @@ int msync (void *addr, size_t length, int flags) {
         return -1;
     }
     // firebox#796: fixed mappings (blink wasm64 linear mapping) have no
-    // header and no separate backing file to flush — the bytes already live in
-    // linear memory. Treat msync as a no-op success.
+    // header — the bytes already live in linear memory. firebox#MMP: a written-back
+    // one (a writable MAP_SHARED file mapping) flushes the requested range to its
+    // file; every other fixed mapping has no file to flush and msync is a no-op
+    // success.
     wasix_vma_lock_acquire();
     const int in_fixed = wasix_fixed_contains((uintptr_t)addr);
+    int fixed_rc = 0;
+    if (in_fixed) {
+        uintptr_t ma = (uintptr_t)addr, mb;
+        if (__builtin_add_overflow(ma, length, &mb)) mb = UINTPTR_MAX;
+        for (int i = 0; i < g_fixed_count; i++) {
+            const uintptr_t fa = g_fixed_maps[i].addr;
+            const uintptr_t fb = fa + g_fixed_maps[i].len;
+            if (fa < mb && ma < fb &&
+                wasix_fixed_writeback_locked(i, fa > ma ? fa : ma, fb < mb ? fb : mb) != 0)
+                fixed_rc = -1;
+        }
+    }
+    const int fixed_errno = errno;
     wasix_vma_lock_release();
     if (in_fixed) {
-        return 0;
+        if (fixed_rc != 0) errno = fixed_errno;
+        return fixed_rc;
     }
     // firebox#61X: a window mapping IS the live host-backed shared memory — the
     // bytes already are the shared object, there is nothing to flush — so msync
