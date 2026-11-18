@@ -4,6 +4,7 @@
 #include "syscall.h"
 #endif
 #ifndef __wasilibc_unmodified_upstream
+#include <__wasilibc_mq.h>
 #include <__wasilibc_rlimit.h>
 // firebox#48H: __wasix_resource_get_nofile (api.h pulls in api_firebox.h) and
 // __wasilibc_errno_from_wasi (wasi/libc.h).
@@ -45,7 +46,8 @@ int getrlimit(int resource, struct rlimit *rlim)
 	// reports and programs size tables from (GNU patch's dirfd cache died "out of
 	// memory" on it), and a read-modify-write then passed hard=INFINITY back to
 	// setrlimit, which the host rightly refused as a hard-limit raise (EPERM).
-	if (resource == RLIMIT_NOFILE || resource == RLIMIT_MSGQUEUE) {
+	if (resource == RLIMIT_NOFILE ||
+	    (resource == RLIMIT_MSGQUEUE && __wasilibc_mq_host_supported())) {
 		uint64_t lim[2];
 		int32_t e = resource == RLIMIT_NOFILE ? __wasix_resource_get_nofile(lim)
 		                                     : __wasilibc_mq_rlimit(0, lim);

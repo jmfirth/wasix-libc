@@ -13,13 +13,7 @@
 #include "libc.h"
 
 #ifndef __wasilibc_unmodified_upstream
-#ifdef __wasm64__
-#define MQ_MODULE "wasix_64v1"
-#else
-#define MQ_MODULE "wasix_32v1"
-#endif
-extern int mq_host_supported(void)
-	__attribute__((__import_module__(MQ_MODULE), __import_name__("mq_supported")));
+#include <__wasilibc_mq.h>
 #endif
 
 #define JT(x) (-256|(x))
@@ -256,11 +250,10 @@ long sysconf(int name)
 		return __wasilibc_mprotect_host(0, 0, 0) == 0 ? _POSIX_VERSION : -1;
 	}
 #ifndef __wasilibc_unmodified_upstream
-	if (name == _SC_MESSAGE_PASSING || name == _SC_MQ_PRIO_MAX) {
-		if (!mq_host_supported()) return -1;
-		return name == _SC_MESSAGE_PASSING ? _POSIX_VERSION : MQ_PRIO_MAX;
+	if (name == _SC_MESSAGE_PASSING) return _POSIX_VERSION;
+	if ((name == _SC_MQ_PRIO_MAX || name == _SC_MQ_OPEN_MAX) && __wasilibc_mq_host_supported()) {
+		return name == _SC_MQ_PRIO_MAX ? MQ_PRIO_MAX : -1;
 	}
-	if (name == _SC_MQ_OPEN_MAX) return -1;
 #endif
 
 	if (name >= sizeof(values)/sizeof(values[0]) || !values[name]) {

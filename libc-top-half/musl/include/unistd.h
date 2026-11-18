@@ -372,11 +372,9 @@ pid_t gettid(void);
 #define _POSIX_JOB_CONTROL      1
 #define _POSIX_MAPPED_FILES     _POSIX_VERSION
 #define _POSIX_MEMORY_PROTECTION _POSIX_VERSION
-#define _POSIX_MESSAGE_PASSING  _POSIX_VERSION
-#else
-/* firebox#2FX: query sysconf(_SC_MESSAGE_PASSING) for the host profile. */
-#define _POSIX_MESSAGE_PASSING  0
 #endif
+/* Both the host-backed and process-local queue implementations provide mq_*. */
+#define _POSIX_MESSAGE_PASSING  _POSIX_VERSION
 /* firebox#E1F: mapped files are real but OPT-IN, so the macro is conditional
  * rather than absent or unconditional -- both of the simpler answers lie.
  * `mmap`/`munmap`/`msync` live ONLY in libwasi-emulated-mman.a (never in

@@ -7,6 +7,7 @@
 #include "libc.h"
 #include <wasi/libc.h>
 #ifndef __wasilibc_unmodified_upstream
+#include <__wasilibc_mq.h>
 #include <__wasilibc_rlimit.h>
 #include "lock.h"
 // firebox#1GJ: __wasix_resource_set_nofile + __WASI_ERRNO_* (api.h pulls in
@@ -173,7 +174,7 @@ static int setrlimit_locked(int resource, const struct rlimit *rlim) {
 		}
 		return 0;
 	}
-	if (resource == RLIMIT_MSGQUEUE) {
+	if (resource == RLIMIT_MSGQUEUE && __wasilibc_mq_host_supported()) {
 		uint64_t lim[2] = { rlim->rlim_cur, rlim->rlim_max };
 		int32_t e = __wasilibc_mq_rlimit(lim, 0);
 		if (e != __WASI_ERRNO_SUCCESS) {

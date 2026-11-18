@@ -12,15 +12,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <wasi/libc.h>
+#include <__wasilibc_mq.h>
 
 #include "pthread_impl.h"
-
-#ifdef __wasm64__
-#define MQ_MODULE "wasix_64v1"
-#else
-#define MQ_MODULE "wasix_32v1"
-#endif
-#define MQ_IMPORT(name) __attribute__((__import_module__(MQ_MODULE), __import_name__(name)))
 
 extern int32_t mq_host_open(const char *, size_t, uint32_t, uint32_t,
                             int64_t, int64_t, int32_t *) MQ_IMPORT("mq_open");
@@ -41,6 +35,8 @@ static int mq_result(int32_t result)
 
 mqd_t __fbx_mq_open(const char *name, int flags, mode_t mode, struct mq_attr *attr)
 {
+	if (!__wasilibc_mq_host_supported())
+		return __fbx_mq_guest_open(name && *name == '/' ? name + 1 : name, flags, mode, attr);
 	int32_t fd;
 	if (!name) {
 		errno = EFAULT;
@@ -55,8 +51,16 @@ mqd_t __fbx_mq_open(const char *name, int flags, mode_t mode, struct mq_attr *at
 	return fd;
 }
 
+int __fbx_mq_close(mqd_t mqd)
+{
+	if (!__wasilibc_mq_host_supported()) return __fbx_mq_guest_close(mqd);
+	return close(mqd);
+}
+
 int __fbx_mq_unlink(const char *name)
 {
+	if (!__wasilibc_mq_host_supported())
+		return __fbx_mq_guest_unlink(name && *name == '/' ? name + 1 : name);
 	if (!name) {
 		errno = EFAULT;
 		return -1;
@@ -67,6 +71,7 @@ int __fbx_mq_unlink(const char *name)
 
 int __fbx_mq_getsetattr(mqd_t mqd, const struct mq_attr *neu, struct mq_attr *old)
 {
+	if (!__wasilibc_mq_host_supported()) return __fbx_mq_guest_getsetattr(mqd, neu, old);
 	int64_t slots[4];
 	if (neu && (neu->mq_flags & ~O_NONBLOCK)) {
 		errno = EINVAL;
@@ -87,6 +92,7 @@ int __fbx_mq_getsetattr(mqd_t mqd, const struct mq_attr *neu, struct mq_attr *ol
 int __fbx_mq_timedsend(mqd_t mqd, const char *msg, size_t len, unsigned prio,
                       const struct timespec *at)
 {
+	if (!__wasilibc_mq_host_supported()) return __fbx_mq_guest_timedsend(mqd, msg, len, prio, at);
 	int64_t deadline[2];
 	if (at) {
 		deadline[0] = at->tv_sec;
@@ -104,6 +110,7 @@ int __fbx_mq_timedsend(mqd_t mqd, const char *msg, size_t len, unsigned prio,
 ssize_t __fbx_mq_timedreceive(mqd_t mqd, char *msg, size_t len, unsigned *prio,
                              const struct timespec *at)
 {
+	if (!__wasilibc_mq_host_supported()) return __fbx_mq_guest_timedreceive(mqd, msg, len, prio, at);
 	int64_t deadline[2];
 	uint32_t written;
 	if (at) {
@@ -139,6 +146,7 @@ static void *run_callback(void *ptr)
 
 int __fbx_mq_notify(mqd_t mqd, const struct sigevent *sev)
 {
+	if (!__wasilibc_mq_host_supported()) return __fbx_mq_guest_notify(mqd, sev);
 	if (!sev) return mq_result(mq_host_notify(mqd, -1, 0, 0));
 	if (sev->sigev_notify != SIGEV_THREAD) {
 		uint64_t value = 0;
