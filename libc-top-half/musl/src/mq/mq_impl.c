@@ -30,6 +30,12 @@
 #include <unistd.h>
 
 #include "pthread_impl.h" /* __timedwait, __wake, a_inc */
+#include <signal.h>
+#include <wasi/api.h>
+/* firebox#SGV — the self-directed sigqueue path (sigaction.c, pthread_sigmask.c). */
+extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
+                             pid_t pid, uid_t uid);
+int __wasm_thread_sig_blocked(int sig);
 
 #define FBX_MQ_MAX_QUEUES 128
 #define FBX_MQ_MAX_DESC 256
@@ -155,11 +161,24 @@ static void mq_deliver_notify(const struct sigevent *sev)
 	switch (sev->sigev_notify) {
 	case SIGEV_NONE:
 		break;
-	case SIGEV_SIGNAL:
+	case SIGEV_SIGNAL: {
 		/* Process-directed, as POSIX specifies (single process here, so the
-		 * registrant IS the caller). */
-		raise(sev->sigev_signo);
+		 * registrant IS the caller). firebox#SGV — and it carries si_code
+		 * SI_MESGQ and the sigev_value, as on Linux; raise() delivered
+		 * SI_TKILL/SI_USER and value 0. This is sigqueue()'s self-directed
+		 * path (sigqueue.c) with SI_MESGQ: record first, then a process signal
+		 * if this thread blocks it, else a thread signal to itself. */
+		int sig = sev->sigev_signo;
+		if (sig <= 0 || sig >= _NSIG) break;
+		if (__fbx_rtsigq_push(sig, sev->sigev_value, SI_MESGQ, getpid(), getuid()) != 0)
+			break;   /* RT queue full: Linux drops the notification too */
+		if (__wasm_thread_sig_blocked(sig))
+			(void)__wasi_proc_signal((__wasi_pid_t)getpid(), (__wasi_signal_t)sig);
+		else
+			(void)__wasi_thread_signal((__wasi_tid_t)__pthread_self()->tid,
+			                           (__wasi_signal_t)sig);
 		break;
+	}
 	case SIGEV_THREAD: {
 		struct sigevent *copy = malloc(sizeof *copy);
 		if (!copy) break;

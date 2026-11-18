@@ -131,6 +131,7 @@ struct aio_thread {
 	/* firebox#SGV — set by submit() just before the submitting call returns;
 	 * the worker starts its I/O only then (see the wait in io_thread_func). */
 	volatile int go;
+#define FBX_AIO_GO_POLL_NS 200000
 	int err, op;
 	ssize_t ret;
 };
@@ -425,10 +426,20 @@ static void *io_thread_func(void *ctx)
 	 * debian:trixie). Here the worker was woken first and an fsync on an
 	 * in-memory file is one host call, so it often finished before the
 	 * submitter, woken from sem_wait, ran again: 36/40 (wasm32) and 40/40
-	 * (wasm64) complete before return. Parked on this word, the worker needs
-	 * a futex wake and an OS reschedule after the submitter's last store,
-	 * which leaves the submitter its few instructions back to the caller. */
-	while (!at.go) __wait(&at.go, 0, 0, 1);
+	 * (wasm64) complete before return. Parked on this word with a futex wake
+	 * from the submitter it was still 21/40: the wake is a host call on the
+	 * submitter's return path, and the host can run the woken worker first.
+	 * So the submitter's release is a plain store, and the worker polls it
+	 * at FBX_AIO_GO_POLL_NS: the submitter's return to its caller is a few
+	 * instructions against a whole poll period. The cost is at most one
+	 * period of start latency per request. */
+	while (!at.go) {
+		struct timespec dl;
+		clock_gettime(CLOCK_MONOTONIC, &dl);
+		dl.tv_nsec += FBX_AIO_GO_POLL_NS;
+		if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+		__timedwait(&at.go, 0, CLOCK_MONOTONIC, &dl, 1);
+	}
 
 	/* firebox#VBY — aio_cancel MARKED us (it does not publish anything; see
 	 * the cancel path). Our I/O was never started, so skip straight to
@@ -524,12 +535,11 @@ static int submit(struct aiocb *cb, int op)
 
 	if (!ret) {
 		while (sem_wait(&args.sem));
-		/* firebox#SGV — release the worker. `go` is on its stack, which
-		 * lives until it has seen the store; a wake landing after it
-		 * exited is a spurious futex wake, which every waiter tolerates. */
-		volatile int *go = args.go;
-		a_store(go, 1);
-		__wake(go, 1, 1);
+		/* firebox#SGV — release the worker: a store and nothing after it
+		 * (no host call), so this thread is back in its caller before the
+		 * worker's next poll (io_thread_func). `go` is on the worker's
+		 * stack, which lives until it has seen the store. */
+		a_store(args.go, 1);
 	}
 
 	return ret;

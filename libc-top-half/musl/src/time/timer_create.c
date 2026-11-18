@@ -275,6 +275,7 @@ struct fbx_timer {
 	struct timespec rearm;       /* CONSUMED: the next expiry */
 	volatile int    overrun_last;
 	int             helper;      /* SIGEV_THREAD: notification thread alive */
+	int             sent_blocked; /* the owner blocked signo when it was sent */
 };
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -393,15 +394,34 @@ static int fbx_overrun_at(const struct fbx_timer *t, const struct timespec *now,
  * arithmetic (no host call, so no signal can be dispatched inside it), which
  * is what lets a g_lock holder wait it out (fbx_quiesce). */
 #define FBX_CLAIMING (FBX_SENT + 16)
-static int fbx_consume(struct fbx_timer *t, const struct timespec *now)
+static int fbx_consume_as(struct fbx_timer *t, const struct timespec *now, int dequeued)
 {
 	if (a_cas(&t->state, FBX_SENT, FBX_CLAIMING) != FBX_SENT) return -1;
 	struct timespec rearm;
 	int ov = fbx_overrun_at(t, now, &rearm);
 	t->rearm = rearm;
-	a_store(&t->overrun_last, ov);
+	if (dequeued) a_store(&t->overrun_last, ov);
 	a_store(&t->state, FBX_CONSUMED);
 	return ov;
+}
+
+static int fbx_consume(struct fbx_timer *t, const struct timespec *now)
+{
+	return fbx_consume_as(t, now, 1);
+}
+
+/* firebox#SGV — was this expiry DEQUEUED (it sets it_overrun_last) or
+ * DISCARDED at generation (it does not)? Linux discards a signal whose action
+ * is to ignore it, SIG_DFL for SIGCONT/SIGCHLD/SIGURG/SIGWINCH included, when
+ * it is generated and not blocked; a blocked one is queued and dequeued at the
+ * unblock. Open POSIX timer_getoverrun/2-1..2-3 block SIGCONT, sleep, unblock
+ * and read the overrun of THAT dequeue. With a 1-2 us interval the timer
+ * re-arms and fires again before timer_getoverrun runs; that expiry, sent
+ * while unblocked, reaches a default-ignore action and must not overwrite the
+ * count. A consumer with a handler (si != NULL) is always a dequeue. */
+static int fbx_dequeued(const struct fbx_timer *t, const siginfo_t *si)
+{
+	return si != NULL || t->sent_blocked;
 }
 
 /* g_lock held: wait out a consumer inside fbx_consume's claim. */
@@ -453,7 +473,7 @@ void __fbx_timer_signal_consumed(int sig, siginfo_t *si)
 			continue;
 		struct timespec now;
 		ts_now(t->clock, &now);
-		int ov = fbx_consume(t, &now);
+		int ov = fbx_consume_as(t, &now, fbx_dequeued(t, si));
 		if (ov < 0) continue;
 		if (si) {
 			si->si_code = SI_TIMER;
@@ -623,6 +643,7 @@ static int fbx_fire_locked(struct fbx_timer *t, int idx,
 	struct fbx_deliver *d = &out[(*n)++];
 	t->e0 = t->next;
 	t->sent_at = *now;
+	t->sent_blocked = t->notify == SIGEV_SIGNAL && fbx_owner_blocks(t);
 	t->state = FBX_SENT;
 	if (!fbx_periodic(t)) t->armed = 0;
 	d->notify = t->notify;
@@ -674,8 +695,10 @@ static void *fbx_timer_manager(void *arg)
 			if (!t->in_use) continue;
 			struct timespec now, wake;
 			ts_now(t->clock, &now);
+			/* Lost while unblocked: the host discarded it (default-ignore),
+			 * which is not a dequeue (fbx_dequeued). */
 			if (t->state == FBX_SENT && fbx_lost_locked(t, &now))
-				(void)fbx_consume(t, &now);
+				(void)fbx_consume_as(t, &now, t->sent_blocked);
 			fbx_quiesce(t);
 			/* Settle a consumed expiry: re-arm past the consumption. */
 			if (t->state == FBX_CONSUMED) {
