@@ -491,7 +491,12 @@ pid_t gettid(void);
  && !defined(__FIREBOX_NO_THREADS__)
 #define _POSIX_THREADS          _POSIX_VERSION
 #endif
+#ifdef __wasilibc_unmodified_upstream
 #define _POSIX_THREAD_PROCESS_SHARED _POSIX_VERSION
+#else
+/* The runtime may lack a shared mapping window. Query sysconf. */
+#define _POSIX_THREAD_PROCESS_SHARED 0
+#endif
 #define _POSIX_THREAD_SAFE_FUNCTIONS _POSIX_VERSION
 #define _POSIX_THREAD_ATTR_STACKADDR _POSIX_VERSION
 #define _POSIX_THREAD_ATTR_STACKSIZE _POSIX_VERSION
