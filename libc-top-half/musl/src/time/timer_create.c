@@ -447,14 +447,12 @@ static void *fbx_timer_manager(void *arg)
 				continue;
 			}
 			ts_diff(&t->next, &now, &rem);
-			/* CPU time can stop during sleep or advance faster than
-			 * wall time across multiple workers. Wake to recheck
-			 * the actual clock; the wall timeout never fires it. */
+		/* CPU time can stop during sleep or advance faster than wall
+		 * time across workers. Poll at a fixed interval so a parked
+		 * clock with very little CPU time remaining cannot spin. */
 			if (t->clock == CLOCK_PROCESS_CPUTIME_ID ||
-			    __wasilibc_is_named_cpu_clock((uintptr_t)t->clock)) {
-				const struct timespec cpu_recheck = {0, 10000000};
-				if (ts_lt(&cpu_recheck, &rem)) rem = cpu_recheck;
-			}
+		    __wasilibc_is_named_cpu_clock((uintptr_t)t->clock))
+			rem = (struct timespec){0, 10000000};
 			if (!have || ts_lt(&rem, &min_rem)) { min_rem = rem; have = 1; }
 		}
 
