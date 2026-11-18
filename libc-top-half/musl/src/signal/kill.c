@@ -29,8 +29,6 @@ extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
 extern void __fbx_rtsig_repend(int sig);
 int __wasm_signal_self(int sig, int code);
 int __wasm_thread_sig_blocked(int sig);
-/* firebox#C3E — the process-wide (process-directed) pending set. */
-extern volatile int __wasm_pending_sigs[];
 #endif
 
 int kill(pid_t pid, int sig)
@@ -107,19 +105,25 @@ int kill(pid_t pid, int sig)
 		 * and the RT ring are two stores that must agree; keeping the write
 		 * behind the one helper is what stops them being separated again. */
 		__fbx_rtsig_repend(sig);
-	} else if (sig > 0 && pid == (pid_t)getpid() && __wasm_thread_sig_blocked(sig)) {
-		/* firebox#C3E — a process-directed instance is pending for the process
-		 * the moment kill() returns (Linux: shared_pending). The thread-pend in
-		 * __wasm_pend_signal used to mirror into the process-wide word, which
-		 * hid that the host publishes this instance there only once every
-		 * thread's copy is routed: a thread created in that window read
-		 * sigpending() without it. Mark it now. This is not a lone process-wide
-		 * write (#4MP): this thread's own copy arrives blocked and pends its
-		 * per-thread bit, which arms the drain's clear, and if an unblocked
-		 * sibling takes the instance instead, the host router's claim clears
-		 * the process-wide bit. */
-		a_or(&__wasm_pending_sigs[(sig - 1) / 32], 1 << ((sig - 1) % 32));
 	}
+	/* firebox#C3E — do NOT mark a blocked self-kill in the process-wide word
+	 * here. That word is what any thread's sigwait claims from, and the host
+	 * router (#JRS) publishes a process-directed instance there only once
+	 * every thread's copy has been routed, because a parked sigwaiter that
+	 * takes it before its own copy is routed has no token: its copy then
+	 * pends the signal a second time and the router publishes it again.
+	 * An eager mark here reopened exactly that. MEASURED (LH2, LSR `r2
+	 * kwaith`: main blocks SIGUSR2, a sibling parks in sigwait, main's
+	 * SIGUSR1 handler kills itself with SIGUSR2): the sibling woke on the
+	 * copy's arrival, took the marked bit, and the copy routed afterwards
+	 * left SIGUSR2 pending everywhere, `mainpending=1` 19 of 20 at both
+	 * widths; Linux prints 0. Without the mark the C3E probe's case B (a
+	 * thread created after kill(getpid()) sees it pending) still matches
+	 * Linux: outside a handler this thread's own copy is routed when
+	 * proc_signal returns, which publishes a single thread's instance before
+	 * pthread_create runs. (Inside a handler that route waits for the
+	 * handler's return, so a thread created by the handler itself does not
+	 * see it yet; Linux would show it.) */
 	__wasi_errno_t e = __wasi_proc_signal(pid, (__wasi_signal_t)sig);
 	if (e != __WASI_ERRNO_SUCCESS) {
 		errno = __wasilibc_errno_from_wasi((int)e);
