@@ -101,6 +101,29 @@ extern int32_t __wasilibc_shm_map(uint64_t inode, uint64_t len, uint64_t *ret_of
                                   uint32_t *ret_created);
 extern int __wasix_is_shm_inode(ino_t ino);
 
+// firebox#MMP: two more host shared-window imports, additive functions in the
+// existing firebox module (they ship together with the runtime that provides
+// them, as shm_map does):
+//   shm_map_at(inode, len, offset, ret_created) maps the object at the window
+//     address `offset`, replacing the whole window mappings there — MAP_FIXED at a
+//     window address (mmap/3-1). Returns 0, or nonzero when the host refuses (no
+//     window, unaligned, or a range that would split an existing mapping).
+//   shm_release(offset) unmaps THIS process's window mapping at `offset`, leaving
+//     the range inaccessible so a later access faults (munmap/1-1, 1-2). The object
+//     is untouched. Returns 0, or nonzero when nothing was released.
+// Declared HERE as direct host imports rather than as libc wrappers, so the
+// libwasi-emulated-mman.a a program links stays the only thing that names them:
+// a libc.so provider gains no symbol a consumer would then demand of it.
+#ifdef __wasm64__
+#define WASIX_MMAN_FBX_MODULE "wasix_64v1"
+#else
+#define WASIX_MMAN_FBX_MODULE "wasix_32v1"
+#endif
+int32_t __imported_wasix_fbx_shm_map_at(int64_t, int64_t, int64_t, intptr_t)
+    __attribute__((__import_module__(WASIX_MMAN_FBX_MODULE), __import_name__("shm_map_at")));
+int32_t __imported_wasix_fbx_shm_release(int64_t)
+    __attribute__((__import_module__(WASIX_MMAN_FBX_MODULE), __import_name__("shm_release")));
+
 // firebox#SAH (native-only, #5WQ mechanism): the HOST mprotect libcall. Applies
 // a host `region::protect` to `[offset, offset+len)` of the guest linear memory
 // so a guest access that violates `prot` FAULTS on the host — a real SIGSEGV
@@ -378,6 +401,16 @@ struct map {
     //                  handed back to the allocator would fault a normal access).
     size_t prefix;
     int host_protected;
+    // firebox#MMP: the mapped file's identity (st_dev, st_ino), recorded for a
+    // file-backed mapping so a LATER mapping of the same object can be seeded from
+    // this one's live bytes (wasix_seed_from_live_copy). On Linux every mapping of a
+    // file is a view of one page cache; this emulation keeps a private copy per
+    // mapping and writes a MAP_SHARED one back only at msync/munmap, so the live
+    // bytes of a MAP_SHARED mapping are newer than the file's. `has_ino` is 0 for an
+    // anonymous mapping and for a file whose fstat failed.
+    int has_ino;
+    dev_t dev;
+    ino_t ino;
     // firebox#7KH: file-local storage discriminator + double-unmap poison. Both
     // are at the END of the struct (dead_magic last) so a reservation free-list
     // node or dlfree bin-linkage overwrite of the payload start cannot reach
@@ -713,23 +746,56 @@ static struct {
     off_t offset;      // fd offset the mapping starts at (0 in the routed posture)
     size_t length;     // user-requested mapping length (the writeback extent)
     int writeback;     // 1 => regular-file MAP_SHARED PROT_WRITE (flush on sync)
+    dev_t dev;         // firebox#MMP: the mapped object's identity, so a later
+    ino_t ino;         // mapping of the same object seeds from the window's bytes
 } g_window_maps[WASIX_MMAN_WINDOW_MAX];
 static int g_window_count;
 
 static void wasix_window_register(uintptr_t addr, int fd, off_t offset,
-                                  size_t length, int writeback) {
+                                  size_t length, int writeback, dev_t dev, ino_t ino) {
     if (g_window_count < WASIX_MMAN_WINDOW_MAX) {
         g_window_maps[g_window_count].addr = addr;
         g_window_maps[g_window_count].fd = fd;
         g_window_maps[g_window_count].offset = offset;
         g_window_maps[g_window_count].length = length;
         g_window_maps[g_window_count].writeback = writeback;
+        g_window_maps[g_window_count].dev = dev;
+        g_window_maps[g_window_count].ino = ino;
         g_window_count++;
     } else {
         // Registry full — cannot track the held fd for later close, so don't
         // leak it. The inode-pin is best-effort; drop it rather than leak.
         close(fd);
     }
+}
+
+// firebox#MMP: the POSIX extent of a `length`-byte mapping — whole 4096 pages.
+// POSIX mmap(2) maps whole pages ("any partial page specified by [pa, pa+len)"),
+// so the bytes of the last page past `length` are part of the mapping: they show
+// the FILE's bytes where the file has them (mmap/3-1 reads pa[len+1] and expects
+// the file's byte there) and zero past the end of the file (mmap/11-4/5/6).
+static size_t wasix_posix_extent(size_t length) {
+    size_t r;
+    if (__builtin_add_overflow(length, WASIX_MMAN_SYS_PAGE_SIZE - 1, &r))
+        return length;
+    return r & ~(WASIX_MMAN_SYS_PAGE_SIZE - 1);
+}
+
+// firebox#MMP: how many bytes of a mapping's `extent`, starting at file offset
+// `offset`, a write-back may write: never past the file's CURRENT end. Linux
+// writes a MAP_SHARED page back only up to the end of the file, so a store into
+// the zero-filled tail past EOF is never persisted (mmap/11-4), while a store into
+// the part of the last page that IS inside the file reaches it. `extent` itself is
+// returned when the size cannot be read (a write-back has always been
+// best-effort about the file it targets).
+static size_t wasix_file_writeback_extent(int fd, off_t offset, size_t extent) {
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0)
+        return extent;
+    if (st.st_size <= offset)
+        return 0;
+    const uint64_t in_file = (uint64_t)(st.st_size - offset);
+    return in_file < (uint64_t)extent ? (size_t)in_file : extent;
 }
 
 // firebox#ZBK: flush a regular-file MAP_SHARED window mapping's live bytes back to
@@ -756,11 +822,14 @@ static void wasix_window_writeback(uintptr_t addr, size_t cap) {
                 return;                          // /dev/shm entry: no file flush
             const int fd = g_window_maps[i].fd;
             const off_t base_off = g_window_maps[i].offset;
-            size_t total = g_window_maps[i].length;
-            if (cap < total)
-                total = cap;
             if (fd < 0)
                 return;
+            // firebox#MMP: the whole last page, up to the file's current end —
+            // not just `length` (see wasix_file_writeback_extent).
+            size_t total = wasix_file_writeback_extent(
+                fd, base_off, wasix_posix_extent(g_window_maps[i].length));
+            if (cap < total)
+                total = cap;
             volatile unsigned char *win = (volatile unsigned char *)addr;
             unsigned char wbbuf[512];
             size_t done = 0;
@@ -784,15 +853,28 @@ static void wasix_window_writeback(uintptr_t addr, size_t cap) {
 
 // Close + drop the held /dev/shm fd for a window mapping at `addr` (releasing the
 // inode-lifetime pin). No-op if `addr` was not a window mapping we pinned.
-static void wasix_window_release(uintptr_t addr) {
+// firebox#MMP: returns 1 and the released entry's mapped length in *length when an
+// entry was released, else 0.
+static int wasix_window_release(uintptr_t addr, size_t *length) {
     for (int i = 0; i < g_window_count; i++) {
         if (g_window_maps[i].addr == addr) {
             const int fd = g_window_maps[i].fd;
+            if (length) *length = g_window_maps[i].length;
             g_window_maps[i] = g_window_maps[--g_window_count];
             if (fd >= 0) close(fd);
-            return;
+            return 1;
         }
     }
+    return 0;
+}
+
+// firebox#MMP: does any registered window mapping still start at `addr`? Every
+// mapping of one window slot shares its address, so the host pages there may be
+// released only when the last of them goes.
+static int wasix_window_addr_live(uintptr_t addr) {
+    for (int i = 0; i < g_window_count; i++)
+        if (g_window_maps[i].addr == addr) return 1;
+    return 0;
 }
 
 // firebox#6Q8: widen the host protection of every WASIX_MMAN_HOST_PAGE_SIZE unit
@@ -954,6 +1036,8 @@ static int wasix_fixed_unmap_locked(uintptr_t a, uintptr_t b) {
     return 0;
 }
 
+static int wasix_fixed_unmap_shared_files(uintptr_t a, uintptr_t b);
+
 static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
                               int fd, off_t offset) {
     uintptr_t target = (uintptr_t)addr;
@@ -1032,13 +1116,27 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // thread can NOREPLACE into it between the take above and the fill below.
     // (A full registry leaves the mapping unregistered, as it always has: munmap
     // then finds nothing to trim and it is never donated.)
+    int registered = 0;
     if (g_fixed_count < WASIX_MMAN_FIXED_MAX) {
         g_fixed_maps[g_fixed_count].addr = target;
         g_fixed_maps[g_fixed_count].len = (size_t)(span_end - target);
         g_fixed_maps[g_fixed_count].owned = owned;
         g_fixed_count++;
+        registered = 1;
     }
     wasix_vma_lock_release();
+    // firebox#MMP: MAP_FIXED UNMAPS what it replaces (POSIX: "any previous mapping
+    // ... for those whole pages ... shall be removed"); see
+    // wasix_fixed_unmap_shared_files. Only once the range is REGISTERED as fixed:
+    // releasing the last piece of a backing finalizes it, and finalize keeps (never
+    // frees) an allocation a live fixed mapping covers. An unregistered range (a
+    // full registry) keeps the old behaviour rather than risk handing the new
+    // mapping's bytes to malloc.
+    if (!noreplace && registered && wasix_fixed_unmap_shared_files(target, span_end) != 0) {
+        (void)munmap(addr, length);
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
     // firebox#6Q8: MAP_FIXED REPLACES whatever was mapped at [addr, addr+length)
     // — on Linux the new mapping carries its OWN protection and the old mapping's
     // protection does not constrain it. ld-musl loads every shared library that
@@ -1049,10 +1147,15 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // into pages the OLD mapping protected. So first retire the old mapping's
     // protection over the range (the "replace" half of MAP_FIXED); the new
     // mapping's own protection is applied after the fill (below).
-    wasix_host_widen_rw(target, length);
+    // firebox#MMP: the fill covers the whole POSIX extent — the last page past
+    // `length` shows the file's bytes (zero past its end), as Linux maps whole
+    // pages (mmap/3-1 reads pa2[size2+1] of its MAP_FIXED replacement and expects
+    // the NEW file's byte there, not the replaced mapping's).
+    const size_t extent = wasix_posix_extent(length);
+    wasix_host_widen_rw(target, extent);
     if ((flags & MAP_ANON) == 0) {
         char *body = (char *)addr;
-        size_t rem = length;
+        size_t rem = extent;
         off_t off = offset;
         while (rem > 0) {
             const ssize_t n = pread(fd, body, rem, off);
@@ -1074,7 +1177,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
             body += (size_t)n;
         }
     } else {
-        memset(addr, 0, length);
+        memset(addr, 0, extent);
     }
     // firebox#6Q8: the new mapping's own protection — the other half of MAP_FIXED
     // replace. Before #6Q8 a fixed mapping ignored `prot` entirely, so a PROT_READ
@@ -1245,14 +1348,27 @@ struct wasix_piece {
     struct map *hdr;
 };
 
+// firebox#MMP: a writable MAP_SHARED file mapping — the one kind of private copy
+// whose bytes are written back to a file (wasix_map_writeback) and read by a later
+// mapping of that file (wasix_seed_from_live_copy). A MAP_FIXED over part of one
+// must unmap that part first (wasix_mmap_fixed), or the new mapping's bytes
+// would later be written into the OLD file and seed the old file's next mapping.
+static int wasix_map_is_writable_shared_file(const struct map *m) {
+    return m->fd >= 0 && (m->flags & MAP_SHARED) != 0 && (m->flags & MAP_ANON) == 0 &&
+           (m->prot & PROT_WRITE) != 0;
+}
+
 // Take ONE piece of [a, b) out of the fragment table: remove, trim or split the
 // first fragment that overlaps it, pin its header (inflight), and return 1; or 0
 // when nothing in [a, b) is mapped. A split needs one free slot, which the caller
-// reserved before its first take. Caller holds g_vma_lock.
-static int wasix_frags_take_locked(uintptr_t a, uintptr_t b, struct wasix_piece *pc) {
+// reserved before its first take. With `shared_only`, only fragments of writable
+// MAP_SHARED file mappings are considered (firebox#MMP). Caller holds g_vma_lock.
+static int wasix_frags_take_locked(uintptr_t a, uintptr_t b, struct wasix_piece *pc,
+                                   int shared_only) {
     for (size_t i = 0; i < g_frag_count; i++) {
         struct wasix_frag *f = &g_frags[i];
         if (!(f->start < b && a < f->end)) continue;
+        if (shared_only && !wasix_map_is_writable_shared_file(f->hdr)) continue;
         uintptr_t s = f->start > a ? f->start : a;
         uintptr_t e = f->end < b ? f->end : b;
         struct map *m = f->hdr;
@@ -1279,8 +1395,9 @@ static int wasix_frags_take_locked(uintptr_t a, uintptr_t b, struct wasix_piece 
 }
 
 // Would unmapping [a, b) split a fragment (one strictly contains the range)?
-static int wasix_frags_would_split_locked(uintptr_t a, uintptr_t b) {
+static int wasix_frags_would_split_locked(uintptr_t a, uintptr_t b, int shared_only) {
     for (size_t i = 0; i < g_frag_count; i++) {
+        if (shared_only && !wasix_map_is_writable_shared_file(g_frags[i].hdr)) continue;
         if (g_frags[i].start < a && b < g_frags[i].end) return 1;
     }
     return 0;
@@ -1309,7 +1426,10 @@ static int wasix_map_writeback(const struct map *m, uintptr_t start, uintptr_t e
         (m->flags & MAP_ANON) != 0)
         return 0;
     const uintptr_t addr0 = wasix_map_addr0(m);
-    if (end > addr0 + m->length) end = addr0 + m->length;
+    // firebox#MMP: the whole last page, up to the file's current end.
+    const size_t limit =
+        wasix_file_writeback_extent(m->fd, m->offset, wasix_posix_extent(m->length));
+    if (end > addr0 + limit) end = addr0 + limit;
     const char *body = (const char *)start;
     size_t len = start < end ? (size_t)(end - start) : 0;
     off_t off = m->offset + (off_t)(start - addr0);
@@ -1392,12 +1512,218 @@ static void wasix_piece_release(const struct wasix_piece *pc) {
     if (last) wasix_map_finalize(m);
 }
 
+// firebox#MMP: unmap, under a MAP_FIXED that replaces [a, b), every piece of a
+// writable MAP_SHARED file mapping there. Its fragment must not outlive the
+// replacement: its later write-back would put the NEW mapping's bytes into the OLD
+// file, and wasix_seed_from_live_copy would hand them to that file's next mapping
+// (mmap/3-1 on the browser, where both mappings are private copies). Each piece is
+// written back first — the memory still holds the old mapping's bytes, the new
+// mapping's fill comes after — exactly as munmap would. Other kinds keep their
+// fragment: their bytes reach nothing but themselves, and munmap of the range trims
+// both. Only file mappings qualify, and those are never reservation-backed, so the
+// release never hands the range back to the reservation allocator. Returns -1
+// (ENOMEM) when a split finds no fragment slot.
+static int wasix_fixed_unmap_shared_files(uintptr_t a, uintptr_t b) {
+    for (;;) {
+        struct wasix_piece pcs[8];
+        size_t k = 0;
+        wasix_vma_lock_acquire();
+        if (wasix_frags_would_split_locked(a, b, 1) && wasix_frags_reserve(1) != 0) {
+            wasix_vma_lock_release();
+            return -1;
+        }
+        while (k < sizeof pcs / sizeof pcs[0] && wasix_frags_take_locked(a, b, &pcs[k], 1))
+            k++;
+        wasix_vma_lock_release();
+        for (size_t i = 0; i < k; i++) wasix_piece_release(&pcs[i]);
+        if (k < sizeof pcs / sizeof pcs[0])
+            return 0;
+    }
+}
+
 // Drop an msync pin; finalize if a munmap emptied the mapping meanwhile.
 static void wasix_map_unpin(struct map *m) {
     wasix_vma_lock_acquire();
     int last = --m->inflight == 0 && m->nfrags == 0;
     wasix_vma_lock_release();
     if (last) wasix_map_finalize(m);
+}
+
+// firebox#MMP: overlay onto a NEW private-copy mapping of a file — `dst` holds
+// file bytes [off, off+extent), just pread from the file — the bytes this
+// process's live SHARED mappings of the same file hold over that range.
+//
+// WHY: on Linux every mapping of a file is a view of one page cache, so a store
+// through a MAP_SHARED mapping is visible at once to every later mapping of the
+// file, MAP_PRIVATE included (POSIX: MAP_SHARED stores "change the underlying
+// object"; mmap/7-4 stores through a /dev/shm MAP_SHARED mapping, forks, and maps
+// the object MAP_PRIVATE in the child). Here a shared mapping is NOT the file:
+// either it is the host shared window (a separate host object — the VFS file is
+// only its seed), or, where there is no window (the browser, or a mapping the
+// window cannot take), it is a private copy written back only at msync/munmap. So
+// the file is stale while such a mapping lives, and a new mapping must take the
+// overlap from the live copy instead. A forked child inherits its parent's
+// mappings and their bytes, so the same rule covers mmap/7-4's child on both
+// profiles. Only THIS process's mappings are visible here; a shared mapping held
+// solely by an unrelated process is still read from the file (the residual of the
+// no-shared-page-cache model).
+//
+// The window is preferred: it is the object itself. A legacy copy qualifies only
+// if it is MAP_SHARED, readable, and writable — a read-only copy can hold nothing
+// newer than the file. Caller does not hold g_vma_lock.
+static void wasix_seed_from_live_copy(char *dst, off_t off, size_t extent, dev_t dev,
+                                      ino_t ino, const struct map *self) {
+    if (off < 0 || extent == 0)
+        return;
+    const uint64_t a = (uint64_t)off;
+    const uint64_t b = a + (uint64_t)extent;
+    // Every window mapping of one object shares one slot. Read no further than the
+    // SHORTEST of them: the slot was sized by its first mapper, and a byte past
+    // the slot is a host fault, not a byte of the object.
+    int win_i = -1;
+    for (int i = 0; i < g_window_count; i++) {
+        if (g_window_maps[i].dev != dev || g_window_maps[i].ino != ino)
+            continue;
+        if (win_i < 0 || g_window_maps[i].length < g_window_maps[win_i].length)
+            win_i = i;
+    }
+    if (win_i >= 0) {
+        const uint64_t w0 = (uint64_t)g_window_maps[win_i].offset;
+        const uint64_t w1 = w0 + (uint64_t)wasix_posix_extent(g_window_maps[win_i].length);
+        const uint64_t s = a > w0 ? a : w0;
+        const uint64_t e = b < w1 ? b : w1;
+        // The window lives above memory.size: read it with raw volatile loads
+        // (never memcpy, which bounds-traps there — see the routing block).
+        volatile const unsigned char *win =
+            (volatile const unsigned char *)g_window_maps[win_i].addr;
+        for (uint64_t o = s; o < e; o++)
+            dst[o - a] = win[o - w0];
+        return;
+    }
+    wasix_vma_lock_acquire();
+    for (size_t i = 0; i < g_frag_count; i++) {
+        const struct map *h = g_frags[i].hdr;
+        if (h == self || !h->has_ino || h->dev != dev || h->ino != ino)
+            continue;
+        if ((h->flags & MAP_SHARED) == 0 || (h->flags & MAP_ANON) != 0 ||
+            (h->prot & (PROT_READ | PROT_WRITE)) != (PROT_READ | PROT_WRITE))
+            continue;
+        const uint64_t f0 = (uint64_t)h->offset + (uint64_t)(g_frags[i].start - wasix_map_addr0(h));
+        const uint64_t f1 = f0 + (uint64_t)(g_frags[i].end - g_frags[i].start);
+        const uint64_t s = a > f0 ? a : f0;
+        const uint64_t e = b < f1 ? b : f1;
+        if (s < e)
+            memcpy(dst + (s - a), (const char *)g_frags[i].start + (s - f0), (size_t)(e - s));
+    }
+    wasix_vma_lock_release();
+}
+
+// firebox#V12/#ZBK (moved here by firebox#MMP): adopt a window slot the host just
+// mapped for `fd` at `win_addr` as THIS mmap's mapping — seed it, mark the atime,
+// pin the inode and count the mapping. The reasoning for each step is the routing
+// block's in mmap() below; this is its single body, shared by the MAP_FIXED-into-
+// the-window path (wasix_mmap_fixed_window).
+//
+// firebox#MMP: the seed covers the whole POSIX extent `map_len` (the 4096-rounded
+// length), not just `length`. The bytes of the last page past `length` show the
+// FILE's bytes where the file has them — mmap/3-1 maps page_size+2 bytes of a
+// two-page file and reads pa[page_size+2], which Linux answers with the file's
+// byte — and zero past the end of the file, as before (mmap/11-4/5/6).
+static void wasix_window_adopt(uintptr_t win_addr, uint32_t created, int fd, int prot,
+                               size_t length, size_t map_len, const struct stat *st,
+                               int is_shm, int is_regfile) {
+    const int reg_reseed = (is_regfile && !is_shm);
+    if (created || reg_reseed) {
+        volatile unsigned char *win = (volatile unsigned char *)win_addr;
+        unsigned char seedbuf[512];
+        size_t done = 0;
+        while (done < map_len) {
+            size_t want = map_len - done;
+            if (want > sizeof seedbuf) want = sizeof seedbuf;
+            const ssize_t nread = pread(fd, seedbuf, want, (off_t)done);
+            if (nread < 0 && errno == EINTR) continue;
+            if (nread <= 0) {
+                // End of file (or a best-effort seed failure): the rest of the
+                // extent is the file's zeros. A FRESH /dev/shm object is already
+                // zero, so this only writes for a regular-file RE-map, which may
+                // hold a prior mapping's bytes (#ZBK, mmap/11-4).
+                if (reg_reseed)
+                    for (size_t z = done; z < map_len; z++) win[z] = 0;
+                break;
+            }
+            for (ssize_t i = 0; i < nread; i++)
+                win[done + (size_t)i] = seedbuf[i];   // raw i32.store8 -> window
+            done += (size_t)nread;
+        }
+    }
+    if (reg_reseed) {
+        const struct timespec atime_now[2] = {
+            { .tv_sec = 0, .tv_nsec = UTIME_NOW },   // st_atime -> now
+            { .tv_sec = 0, .tv_nsec = UTIME_OMIT },  // st_mtime untouched
+        };
+        (void)futimens(fd, atime_now);
+    }
+    const int held = dup(fd);
+    if (held >= 0)
+        wasix_window_register(win_addr, held, 0, length,
+                              /*writeback=*/(reg_reseed && (prot & PROT_WRITE) != 0),
+                              st->st_dev, st->st_ino);
+    wasix_map_count_inc();
+}
+
+// firebox#MMP: MAP_FIXED at the address of a live window mapping — replace it.
+//
+// POSIX mmap(2): with MAP_FIXED "any previous mapping ... for those whole pages
+// ... shall be removed" and the new one takes its place at exactly `addr`
+// (mmap/3-1 maps a second file over a live MAP_SHARED mapping of the first and
+// must read the second file's bytes there). A window address is not linear memory
+// mman owns — it is host pages aliasing an OS object — so the private MAP_FIXED
+// path cannot place anything there (its grow fails: ENOMEM). The host can:
+// shm_map_at maps the new object's segment over the old one.
+//
+// Only a mapping the window can hold is placed there: MAP_SHARED, offset 0, a
+// /dev/shm object or a writable regular file — exactly the routing rule of mmap()
+// below. Anything else, and any host refusal (a replacement that would split a
+// mapping, or one that is not host-page aligned), fails with ENOMEM and leaves
+// the old mapping as it was. An honest failure: the private path's answer for
+// this address was already ENOMEM, and a half-replaced mapping would be a lie.
+// MAP_FIXED_NOREPLACE over a live mapping is EEXIST, as on Linux.
+static void *wasix_mmap_fixed_window(void *addr, size_t length, int prot, int flags,
+                                     int fd, off_t offset) {
+    const uintptr_t a = (uintptr_t)addr;
+#ifdef MAP_FIXED_NOREPLACE
+    if ((flags & MAP_FIXED_NOREPLACE) != 0) {
+        errno = EEXIST;
+        return MAP_FAILED;
+    }
+#endif
+    struct stat st;
+    if ((flags & MAP_SHARED) == 0 || (flags & MAP_ANON) != 0 || fd < 0 || offset != 0 ||
+        fstat(fd, &st) != 0) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    const int is_shm = __wasix_is_shm_inode(st.st_ino);
+    const int is_regfile = S_ISREG(st.st_mode);
+    if (!(is_shm || (is_regfile && (prot & PROT_WRITE) != 0))) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    const size_t map_len = wasix_posix_extent(length);
+    // The old mapping's bytes reach its file before its pages are replaced, as a
+    // munmap would write them back.
+    wasix_window_writeback(a, (size_t)-1);
+    uint32_t created = 0;
+    if (__imported_wasix_fbx_shm_map_at((int64_t)st.st_ino, (int64_t)map_len, (int64_t)a,
+                                        (intptr_t)&created) != 0) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+    // Every mapping that started at `a` is gone: drop its inode pin and its count.
+    while (wasix_window_release(a, NULL))
+        wasix_map_count_dec();
+    wasix_window_adopt(a, created, fd, prot, length, map_len, &st, is_shm, is_regfile);
+    return addr;
 }
 
 void *mmap(void *addr, size_t length, int prot, int flags,
@@ -1433,6 +1759,10 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             errno = EINVAL;
             return MAP_FAILED;
         }
+        // firebox#MMP: a fixed request at a live window mapping's address is a
+        // replacement of THAT mapping, which only the host can perform.
+        if (wasix_window_addr_live((uintptr_t)addr))
+            return wasix_mmap_fixed_window(addr, length, prot, flags, fd, offset);
         return wasix_mmap_fixed(addr, length, prot, flags, fd, offset);
     }
     // Check for unsupported flags.
@@ -1662,98 +1992,11 @@ void *mmap(void *addr, size_t length, int prot, int flags,
                 // known-limitation), unexercised by the corpus. A /dev/shm object
                 // keeps the seed-once behaviour byte-for-byte (a later mapper must
                 // inherit the LIVE shared value, never clobber it — #V12).
-                const int reg_reseed = (is_regfile && !is_shm);
-                if (shm_created || reg_reseed) {
-                    volatile unsigned char *win =
-                        (volatile unsigned char *)(uintptr_t)shm_off;
-                    unsigned char seedbuf[512];
-                    size_t done = 0;
-                    while (done < length) {
-                        size_t want = length - done;
-                        if (want > sizeof seedbuf) want = sizeof seedbuf;
-                        const ssize_t nread = pread(fd, seedbuf, want, (off_t)done);
-                        if (nread < 0) {
-                            if (errno == EINTR) continue;
-                            // Best-effort seed: the window is already mapped; a
-                            // seed failure leaves the remainder zero (the OS object
-                            // is zero-filled) rather than failing the map.
-                            break;
-                        }
-                        if (nread == 0) {
-                            // Short file — the remainder of [done,length) is the
-                            // file's zeros. A FRESH /dev/shm object is already zero
-                            // so this is a no-op there (keeps #V12 byte-identical);
-                            // a regular-file RE-map may have stale bytes here from a
-                            // prior mapping, so clear them explicitly.
-                            if (reg_reseed)
-                                for (size_t z = done; z < length; z++) win[z] = 0;
-                            break;
-                        }
-                        for (ssize_t i = 0; i < nread; i++)
-                            win[done + (size_t)i] = seedbuf[i];   // raw i32.store8 -> window
-                        done += (size_t)nread;
-                    }
-                    // firebox#ZBK: re-zero the rounded partial-page tail
-                    // [length, shm_map_len) for a regular file so a re-map cannot
-                    // observe a prior mapping's past-EOF write (mmap/11-4). Skipped
-                    // for /dev/shm — its tail is the fresh OS object's zeros and it
-                    // never re-seeds (re-zeroing would risk clobbering a live tail).
-                    if (reg_reseed) {
-                        for (size_t z = length; z < (size_t)shm_map_len; z++)
-                            win[z] = 0;   // raw i32.store8 -> window
-                    }
-                }
-                // firebox#ZBK: mark st_atime for a regular file, mirroring the
-                // legacy path (mmap/13-1). The seed pread above IS a genuine read
-                // reference to the file's bytes that backs every later in-memory
-                // read of the window, so POSIX's "st_atime shall be marked for
-                // update by the first read reference to the mapped region"
-                // (permitted at map time) is honoured here. atime-only (UTIME_OMIT
-                // on mtime) — a read must never bump st_mtime. Best-effort; a fd
-                // lacking FD_FILESTAT_SET_TIMES still maps. Regular-file only —
-                // /dev/shm objects carry no meaningful atime and have no such test.
-                if (reg_reseed) {
-                    const struct timespec atime_now[2] = {
-                        { .tv_sec = 0, .tv_nsec = UTIME_NOW },   // st_atime -> now
-                        { .tv_sec = 0, .tv_nsec = UTIME_OMIT },  // st_mtime untouched
-                    };
-                    (void)futimens(fd, atime_now);
-                }
-                // firebox#V12 gap #3 (inode-lifetime pinning): dup + HOLD the fd so
-                // the /dev/shm inode stays referenced as long as this window mapping
-                // lives — exactly as a real mmap(MAP_SHARED, fd) keeps the file's
-                // inode alive after the fd is closed. Without this the VFS recycles
-                // the st_ino on the next create, defeating musl sem_open's dedup
-                // (sem_unlink/6-1). Released in munmap() below. Best-effort: a dup
-                // failure just forgoes the pin (falls back to the recyclable state).
-                // WIDTH-AGNOSTIC (firebox#V12 gap #3 wasm64): we are only here
-                // because __wasilibc_shm_map SUCCEEDED, which — under the #F4A
-                // window core — it now does on wasm64 too (the window is installed
-                // at wasm64_window_base; the stale pre-#F4A "shm_map returns Inval on
-                // wasm64" no longer holds). So the pin MUST fire on both widths, or
-                // wasm64 sem_unlink/6-1 recycles the inode and reads the stale value.
-                {
-                    const int held = dup(fd);
-                    if (held >= 0)
-                        // firebox#ZBK: record offset+length + the writeback
-                        // discriminator. writeback fires only for a regular file's
-                        // WRITABLE MAP_SHARED — a /dev/shm entry (is_shm) or a
-                        // read-only regular file registers writeback=0 and keeps the
-                        // pure inode-pin / no-flush behaviour. The read-only gate
-                        // mirrors the legacy msync `(prot & PROT_WRITE)==0 -> no-op`
-                        // rule (a read-only mapping cannot be dirtied → nothing to
-                        // flush, and flushing would needlessly bump the file mtime).
-                        wasix_window_register(
-                            (uintptr_t)shm_off, held, offset, length,
-                            /*writeback=*/(is_regfile && !is_shm &&
-                                           (prot & PROT_WRITE) != 0));
-                }
-                // firebox#9VY-24: count this window mapping toward
-                // vm.max_map_count. Repeated maps of the same inode return the
-                // same window address (C1 idempotency) but are each a distinct
-                // VMA on Linux, so each must count — this is what lets mmap/24-1
-                // reach ENOMEM instead of spinning on the idempotent window.
-                wasix_map_count_inc();
+                // firebox#MMP: seeding, the atime mark, the inode pin and the
+                // mapping count live in wasix_window_adopt, shared with the
+                // MAP_FIXED-into-the-window path (wasix_mmap_fixed_window).
+                wasix_window_adopt((uintptr_t)shm_off, shm_created, fd, prot, length,
+                                   (size_t)shm_map_len, &shm_st, is_shm, is_regfile);
                 return (void *)(uintptr_t)shm_off;
             }
             // else: fall through to the private emulation below.
@@ -1864,6 +2107,7 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     map->nfrags = 0;                  // firebox#FWX: registered below, once seeded
     map->inflight = 0;
     map->dead_magic = 0;              // live (poisoned to WASIX_MMAN_DEAD in munmap)
+    map->has_ino = 0;                 // firebox#MMP: set below for a file mapping
 
     // firebox#7C5/#7KH: zero the ENTIRE body up front so the partial-page tail
     // [filelen, body_len) reads as zero for a file-backed mapping (11-4/5/6) and
@@ -1896,11 +2140,12 @@ void *mmap(void *addr, size_t length, int prot, int flags,
 
         map->fd = new_fd;
 
-        // Read at most `length` bytes (the user-requested extent); anything past
-        // the file end remains zero from the memset. A short file (pread returns
-        // 0 before `length` is exhausted) leaves the remainder zero too.
+        // firebox#MMP: read the whole POSIX extent (the last page included, see
+        // wasix_posix_extent); anything past the file end remains zero from the
+        // memset. A short file (pread returns 0 before the extent is exhausted)
+        // leaves the remainder zero too.
         char *body = (char *)addr;
-        size_t to_read = length;
+        size_t to_read = wasix_posix_extent(length);
         off_t roff = offset;
         while (to_read > 0) {
             const ssize_t nread = pread(fd, body, to_read, roff);
@@ -1919,6 +2164,19 @@ void *mmap(void *addr, size_t length, int prot, int flags,
             to_read -= (size_t)nread;
             roff += nread;
             body += (size_t)nread;
+        }
+
+        // firebox#MMP: the file is not the newest copy of its bytes while this
+        // process holds a live shared mapping of it — see wasix_seed_from_live_copy.
+        {
+            struct stat id;
+            if (fstat(fd, &id) == 0) {
+                map->has_ino = 1;
+                map->dev = id.st_dev;
+                map->ino = id.st_ino;
+                wasix_seed_from_live_copy((char *)addr, offset, wasix_posix_extent(length),
+                                          id.st_dev, id.st_ino, map);
+            }
         }
 
         // firebox#TV9: POSIX mmap(2) — "The st_atime field of the mapped file
@@ -2034,7 +2292,22 @@ int munmap(void *addr, size_t length) {
         wasix_window_writeback(wa, (size_t)-1);
         // firebox#V12 gap #3: release the held /dev/shm inode-lifetime pin for
         // this window mapping (see wasix_window_register). A no-op if none held.
-        wasix_window_release(wa);
+        size_t mapped_len = 0;
+        const int had_entry = wasix_window_release(wa, &mapped_len);
+        // firebox#MMP: and UNMAP it — POSIX munmap: "further references to these
+        // pages shall result in the generation of a SIGSEGV signal" (munmap/1-1,
+        // 1-2). The host returns the slot's pages to the inaccessible reservation
+        // (shm_release), so a later access faults and is delivered as SIGSEGV. Only
+        // when the range covers the whole mapping and no other mapping of the same
+        // slot remains in this process: the host unmaps a slot whole (its pages are
+        // host pages, larger than the 4096 POSIX page), so a partial munmap keeps
+        // the pages mapped, as it always has — a lost fault, never a forged one. A
+        // mapping the registry could not track (no entry) is left alone for the
+        // same reason. A host refusal (the browser has no window, so it never gets
+        // here) leaves the old no-op behaviour.
+        if (had_entry && wasix_posix_extent(length) >= wasix_posix_extent(mapped_len) &&
+            !wasix_window_addr_live(wa))
+            (void)__imported_wasix_fbx_shm_release((int64_t)wa);
         // firebox#9VY-24: balance the window-map increment (vm.max_map_count).
         wasix_map_count_dec();
         return 0;
@@ -2082,7 +2355,7 @@ int munmap(void *addr, size_t length) {
     wasix_vma_lock_acquire();
     for (size_t i = 0; i < g_frag_count; i++)
         if (g_frags[i].start < b && a < g_frags[i].end) n++;
-    if (wasix_frags_would_split_locked(a, b) && wasix_frags_reserve(1) != 0) {
+    if (wasix_frags_would_split_locked(a, b, 0) && wasix_frags_reserve(1) != 0) {
         wasix_vma_lock_release();
         errno = ENOMEM;
         return -1;
@@ -2109,7 +2382,7 @@ int munmap(void *addr, size_t length) {
         return -1;
     }
     // Each take removes that fragment's overlap with [a, b), so exactly n succeed.
-    while (k < n && wasix_frags_take_locked(a, b, &pcs[k])) k++;
+    while (k < n && wasix_frags_take_locked(a, b, &pcs[k], 0)) k++;
     wasix_vma_lock_release();
     for (size_t i = 0; i < k; i++) wasix_piece_release(&pcs[i]);
     if (pcs_bytes) {
