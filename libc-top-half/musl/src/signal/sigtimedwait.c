@@ -38,6 +38,7 @@ int sigtimedwait(const sigset_t *restrict mask, siginfo_t *restrict si, const st
 	return __syscall_ret(ret);
 }
 #else
+#include <wasi/api.h>
 #include "pthread_impl.h"
 #include "atomic.h"
 
@@ -86,9 +87,10 @@ extern void __fbx_rtsig_repend(int sig);
  * claim it). On success clears the bit from BOTH bitmasks (so sigpending no
  * longer reports it and no other waiter re-claims it) and returns the signo;
  * returns 0 if nothing in `set` is pending. */
-static int __sigtw_claim(const sigset_t *set)
+static int __sigtw_claim(const sigset_t *set, int *own)
 {
 	struct pthread *self = __pthread_self();
+	*own = 0;
 	for (int sig = 1; sig < _NSIG; sig++) {
 		if (!sigismember(set, sig)) continue;
 		int word = (sig - 1) / 32;
@@ -100,6 +102,7 @@ static int __sigtw_claim(const sigset_t *set)
 			if (prev & bit) {
 				/* Mirror-clear the process-wide view. */
 				a_and(&__wasm_pending_sigs[word], ~bit);
+				*own = 1;
 				return sig;
 			}
 		}
@@ -141,6 +144,26 @@ static void __sigtw_set_acceptance(const sigset_t *set, int on)
 		}
 		a_store((volatile int *)&self->sigwait_set[w], bits);
 	}
+}
+
+/* firebox#C3E (LH2 `kwaith`) — an accept from this thread's OWN set may have
+ * consumed a process-directed instance: the host router (#JRS) pends such an
+ * instance on every blocking thread as a token in that thread's own set, and
+ * learns that one was accepted only when that thread next enters the host,
+ * where it retires the other threads' tokens. Until then they read as pending
+ * in their threads' sigpending (which reports the thread's own set) and an
+ * unblock there runs the handler. So enter the host once before returning:
+ * sched_yield is the cheapest call every host routes through its syscall-entry
+ * work, and on a host without that settle it is a plain yield. MEASURED (LSR
+ * `r2 kwaith`, a sibling's sigwait accepts kill(getpid())): main read
+ * `mainpending=1`; Linux 0. An accept from the process-wide word is not
+ * settled this way: the accepting thread holds no token, so its entry gives the
+ * router nothing to go on, and the holders' tokens stay until the router's next
+ * route of the signal (the #JRS bias: a possible second delivery, never a
+ * loss). */
+static void __sigtw_settle(int own)
+{
+	if (own) (void)__wasi_sched_yield();
 }
 
 static void __sigtw_fill_si(siginfo_t *si, int sig)
@@ -202,9 +225,11 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 		 * sample-then-recheck pattern, mirroring sigsuspend). */
 		int tick = self->sigsuspend_tick;
 
-		int sig = __sigtw_claim(set);
+		int own;
+		int sig = __sigtw_claim(set, &own);
 		if (sig) {
 			__sigtw_set_acceptance(set, 0);
+			__sigtw_settle(own);
 			__sigtw_fill_si(si, sig);
 			/* firebox#C2Q — RT depth coherence: __sigtw_claim cleared the
 			 * pending bit, but if more queued records remain for this RT
@@ -231,9 +256,10 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 		if (r == ETIMEDOUT) {
 			/* One last claim attempt to close the race where the signal
 			 * pended exactly as the wait timed out. */
-			sig = __sigtw_claim(set);
+			sig = __sigtw_claim(set, &own);
 			__sigtw_set_acceptance(set, 0);
 			if (sig) {
+				__sigtw_settle(own);
 				__sigtw_fill_si(si, sig);
 				/* firebox#C2Q — RT depth coherence (see the main-loop claim). */
 				if (__fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
