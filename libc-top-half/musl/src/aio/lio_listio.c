@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
 #include "pthread_impl.h"
 #ifndef __wasilibc_unmodified_upstream
 #include "aio_impl.h"	/* firebox#5DB — __aio_notify_signal (shared with aio.c) */
@@ -89,6 +90,15 @@ static void *wait_thread(void *p)
 	return 0;
 }
 
+/* firebox#SGV — release the workers lio_listio held (see there), then free
+ * the list. A plain store each, as submit() releases a lone request. */
+static void lio_release(volatile int **held, int cnt)
+{
+	for (int i = 0; held && i < cnt; i++)
+		if (held[i]) a_store(held[i], 1);
+	free((void *)held);
+}
+
 int lio_listio(int mode, struct aiocb *restrict const *restrict cbs, int cnt, struct sigevent *restrict sev)
 {
 	int i, ret;
@@ -120,19 +130,32 @@ int lio_listio(int mode, struct aiocb *restrict const *restrict cbs, int cnt, st
 		memcpy(st->cbs, (void*) cbs, cnt*sizeof *cbs);
 	}
 
+	/* firebox#SGV — every request is submitted HELD and released as this call
+	 * returns (lio_release), so none is observed complete before lio_listio
+	 * has returned: on Linux a list's requests are queued, not done, when the
+	 * call returns (Open POSIX aio_suspend/1-1 reads aio_error() of the 7th of
+	 * 10 right after it, MEASURED EINPROGRESS on alpine and debian). Here
+	 * each submit waits for its worker to start, and the early requests
+	 * finished while the later ones were still being submitted. */
+	volatile int **held = 0;
+	if (cnt && !(held = calloc(cnt, sizeof *held))) {
+		free(st);
+		errno = EAGAIN;
+		return -1;
+	}
+
 	for (i=0; i<cnt; i++) {
 		if (!cbs[i]) continue;
 		switch (cbs[i]->aio_lio_opcode) {
 		case LIO_READ:
-			ret = aio_read(cbs[i]);
-			break;
 		case LIO_WRITE:
-			ret = aio_write(cbs[i]);
+			ret = __aio_submit_held(cbs[i], cbs[i]->aio_lio_opcode, &held[i]);
 			break;
 		default:
 			continue;
 		}
 		if (ret) {
+			lio_release(held, cnt);
 			free(st);
 			errno = EAGAIN;
 			return -1;
@@ -140,6 +163,7 @@ int lio_listio(int mode, struct aiocb *restrict const *restrict cbs, int cnt, st
 	}
 
 	if (mode == LIO_WAIT) {
+		lio_release(held, cnt);
 		ret = lio_wait(st);
 		free(st);
 		return ret;
@@ -164,6 +188,7 @@ int lio_listio(int mode, struct aiocb *restrict const *restrict cbs, int cnt, st
 		sigfillset(&set);
 		pthread_sigmask(SIG_BLOCK, &set, &set_old);
 		if (__pthread_create(&td, &a, wait_thread, st)) {
+			lio_release(held, cnt);
 			free(st);
 			errno = EAGAIN;
 			return -1;
@@ -171,6 +196,7 @@ int lio_listio(int mode, struct aiocb *restrict const *restrict cbs, int cnt, st
 		pthread_sigmask(SIG_SETMASK, &set_old, 0);
 	}
 
+	lio_release(held, cnt);
 	return 0;
 }
 

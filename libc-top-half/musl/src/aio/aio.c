@@ -471,7 +471,11 @@ done:
 	return 0;
 }
 
-static int submit(struct aiocb *cb, int op)
+/* firebox#SGV — `held`, when non-null, receives the worker's release word
+ * instead of the release itself: lio_listio holds every request of a list and
+ * releases them all as it returns, so a request is not observed complete
+ * before the call that submitted it has returned (aio_suspend/1-1). */
+static int submit(struct aiocb *cb, int op, volatile int **held)
 {
 	int ret = 0;
 	pthread_attr_t a;
@@ -480,6 +484,7 @@ static int submit(struct aiocb *cb, int op)
 	struct aio_queue *q = __aio_get_queue(cb->aio_fildes, 1);
 	struct aio_args args = { .cb = cb, .op = op, .q = q };
 	sem_init(&args.sem, 0, 0);
+	if (held) *held = 0;   /* nothing to release unless a worker starts */
 
 	if (!q) {
 		/* firebox#FY5 — glibc defers a bad-fd [EBADF] to aio_error rather than
@@ -539,20 +544,26 @@ static int submit(struct aiocb *cb, int op)
 		 * (no host call), so this thread is back in its caller before the
 		 * worker's next poll (io_thread_func). `go` is on the worker's
 		 * stack, which lives until it has seen the store. */
-		a_store(args.go, 1);
+		if (held) *held = args.go;
+		else a_store(args.go, 1);
 	}
 
 	return ret;
 }
 
+hidden int __aio_submit_held(struct aiocb *cb, int op, volatile int **held)
+{
+	return submit(cb, op, held);
+}
+
 int aio_read(struct aiocb *cb)
 {
-	return submit(cb, LIO_READ);
+	return submit(cb, LIO_READ, 0);
 }
 
 int aio_write(struct aiocb *cb)
 {
-	return submit(cb, LIO_WRITE);
+	return submit(cb, LIO_WRITE, 0);
 }
 
 int aio_fsync(int op, struct aiocb *cb)
@@ -561,7 +572,7 @@ int aio_fsync(int op, struct aiocb *cb)
 		errno = EINVAL;
 		return -1;
 	}
-	return submit(cb, op);
+	return submit(cb, op, 0);
 }
 
 ssize_t aio_return(struct aiocb *cb)
