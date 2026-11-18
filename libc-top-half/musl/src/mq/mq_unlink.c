@@ -2,7 +2,7 @@
 #include <errno.h>
 #include "syscall.h"
 #ifndef __wasilibc_unmodified_upstream
-#include "mq_impl.h" /* firebox#KS9 */
+#include "mq_impl.h"
 #endif
 
 int mq_unlink(const char *name)
@@ -18,7 +18,6 @@ int mq_unlink(const char *name)
 	}
 	return ret;
 #else
-	if (*name == '/') name++;
 	return __fbx_mq_unlink(name);
 #endif
 }

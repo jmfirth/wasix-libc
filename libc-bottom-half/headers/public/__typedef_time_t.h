@@ -10,4 +10,12 @@ typedef long time_t;
 typedef long long time_t;
 #endif
 
+#if !defined(__wasilibc_unmodified_upstream) && (defined(_GNU_SOURCE) || defined(_BSD_SOURCE))
+#ifndef TIME_T_MAX
+/* Firebox time_t is signed 64-bit on both widths, including ILP32 where
+ * unsigned long is only 32 bits. Expose its upper bound for deadlines. */
+#define TIME_T_MAX ((time_t)9223372036854775807LL)
+#endif
+#endif
+
 #endif

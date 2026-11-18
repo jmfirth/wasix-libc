@@ -75,6 +75,8 @@ extern volatile int __wasm_pending_sigs[];
  * back here too (sigwaitinfo/7-1: lowest-numbered RT signal first via the
  * low-to-high scan in __sigtw_claim, FIFO within a signal via the ring). */
 extern int __fbx_rtsigq_pop_si(int sig, siginfo_t *si);
+__attribute__((__visibility__("hidden")))
+int __fbx_signal_info_fill_si(int sig, siginfo_t *si);
 extern int __fbx_rtsigq_count(int sig);
 extern void __fbx_rtsig_repend(int sig);
 
@@ -166,21 +168,25 @@ static void __sigtw_settle(int own)
 	if (own) (void)__wasi_sched_yield();
 }
 
-static void __sigtw_fill_si(siginfo_t *si, int sig)
+static int __sigtw_fill_si(siginfo_t *si, int sig)
 {
-	if (!si) return;
+	siginfo_t ignored;
+	if (!si) si = &ignored;
 	/* firebox#C2Q/#HPT — if sigqueue enqueued a real siginfo record for this
 	 * RT signal, hand back its si_value/si_code/si_pid/si_uid (POSIX: a
 	 * synchronous accept returns the QUEUED value, FIFO within a signal; the
 	 * caller's low-to-high scan in __sigtw_claim already picks the lowest RT
 	 * signal first, so this just pops that signal's FIFO head). */
-	if (__fbx_rtsigq_pop_si(sig, si)) return;
+	if (__fbx_rtsigq_pop_si(sig, si)) return 0;
+	int host_record = __fbx_signal_info_fill_si(sig, si);
+	if (host_record) return host_record == 2;
 	/* Minimal siginfo: only si_signo is authoritative from the libc pending
 	 * bitmask (a raise()/kill()-delivered signal carries no queued value).
 	 * si_code SI_USER matches a kill()/raise()-delivered signal. */
 	memset(si, 0, sizeof *si);
 	si->si_signo = sig;
 	si->si_code = SI_USER;
+	return 0;
 }
 
 int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const struct timespec *restrict timeout)
@@ -230,14 +236,14 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 		if (sig) {
 			__sigtw_set_acceptance(set, 0);
 			__sigtw_settle(own);
-			__sigtw_fill_si(si, sig);
+			int host_pending = __sigtw_fill_si(si, sig);
 			/* firebox#C2Q — RT depth coherence: __sigtw_claim cleared the
 			 * pending bit, but if more queued records remain for this RT
 			 * signal, re-mark it pending so the next accept finds them (FIFO
 			 * depth). A no-op for a non-RT signal or a now-empty queue (the
 			 * common single-instance case), so the standard-signal path is
 			 * behaviorally unchanged. */
-			if (__fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
+			if (host_pending || __fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
 			return sig;
 		}
 
@@ -260,9 +266,9 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 			__sigtw_set_acceptance(set, 0);
 			if (sig) {
 				__sigtw_settle(own);
-				__sigtw_fill_si(si, sig);
+				int host_pending = __sigtw_fill_si(si, sig);
 				/* firebox#C2Q — RT depth coherence (see the main-loop claim). */
-				if (__fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
+				if (host_pending || __fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
 				return sig;
 			}
 			errno = EAGAIN;

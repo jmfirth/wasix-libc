@@ -173,6 +173,15 @@ static int setrlimit_locked(int resource, const struct rlimit *rlim) {
 		}
 		return 0;
 	}
+	if (resource == RLIMIT_MSGQUEUE) {
+		uint64_t lim[2] = { rlim->rlim_cur, rlim->rlim_max };
+		int32_t e = __wasilibc_mq_rlimit(lim, 0);
+		if (e != __WASI_ERRNO_SUCCESS) {
+			errno = __wasilibc_errno_from_wasi(e);
+			return -1;
+		}
+		return 0;
+	}
 	// Unprivileged processes may lower the hard limit but never raise it; the
 	// sandbox grants no CAP_SYS_RESOURCE. The default hard limit is
 	// RLIM_INFINITY, so the first setrlimit for a resource always succeeds.
