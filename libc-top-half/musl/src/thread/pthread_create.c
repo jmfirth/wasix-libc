@@ -516,6 +516,15 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 	if (!libc.can_do_threads) return ENOSYS;
 #endif
 	self = __pthread_self();
+#ifndef __wasilibc_unmodified_upstream
+	/* A peer can now name the initial pthread. Capture its runtime TID
+	 * before spawning the peer, while keeping its lock owner stable. */
+	if (self->tid == WASIX_INITIAL_LOCK_TID && !__wasilibc_initial_thread_id) {
+		int tid;
+		if (__wasi_thread_id(&tid) == 0)
+			__wasilibc_initial_thread_id = tid;
+	}
+#endif
 	if (!libc.threaded) {
 		for (FILE *f=*__ofl_lock(); f; f=f->next)
 			init_file_lock(f);

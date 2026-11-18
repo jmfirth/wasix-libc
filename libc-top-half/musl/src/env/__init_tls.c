@@ -127,6 +127,10 @@ void __wasi_init_tp()
 }
 #endif
 
+#ifndef __wasilibc_unmodified_upstream
+hidden int __wasilibc_initial_thread_id;
+#endif
+
 int __init_tp(void *p)
 {
 	pthread_t td = p;
@@ -152,7 +156,7 @@ int __init_tp(void *p)
 	 * - __lockfile relies on the fact the most significant two bits
 	 *   of TIDs are 0.
 	 */
-	td->tid = 0x3fffffff;
+	td->tid = WASIX_INITIAL_LOCK_TID;
 
 	if (&__stack_high) {
 		td->stack = &__stack_high;

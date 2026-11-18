@@ -17,6 +17,11 @@ int pthread_getcpuclockid(pthread_t t, clockid_t *clockid)
 	int tid = 0;
 	if (t == self) {
 		tid = self->tid;
+		if (tid == WASIX_INITIAL_LOCK_TID) {
+			__wasi_errno_t error = __wasi_thread_id(&tid);
+			if (error)
+				return __wasilibc_errno_from_wasi(error);
+		}
 	} else {
 		/* Exit removes the target under this lock before freeing its TCB. */
 		__tl_lock();
@@ -27,6 +32,8 @@ int pthread_getcpuclockid(pthread_t t, clockid_t *clockid)
 			}
 		}
 		__tl_unlock();
+		if (tid == WASIX_INITIAL_LOCK_TID)
+			tid = __wasilibc_initial_thread_id;
 	}
 	if (tid <= 0 || (uint32_t)tid > (INT32_MAX >> 3))
 		return ESRCH;
