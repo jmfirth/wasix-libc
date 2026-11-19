@@ -1,6 +1,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <stdint.h>
 // firebox#48H: <sys/resource.h> for _SC_OPEN_MAX's getrlimit(RLIMIT_NOFILE).
 #include <sys/resource.h>
 #ifdef __wasilibc_unmodified_upstream // WASI has no realtime signals
@@ -245,6 +246,19 @@ long sysconf(int name)
 		extern int __wasilibc_mprotect_host(uintptr_t, uintptr_t, int);
 		return __wasilibc_mprotect_host(0, 0, 0) == 0 ? _POSIX_VERSION : -1;
 	}
+
+#ifndef __wasilibc_unmodified_upstream
+	if (name == _SC_THREAD_PROCESS_SHARED) {
+#ifdef __FIREBOX_NO_THREADS__
+		return -1;
+#else
+		/* Independent process memories can share futex storage only when
+		 * this instance has a shared mapping window. */
+		extern int32_t __wasilibc_shm_file(uint32_t, int, uint64_t, uint64_t *);
+		return __wasilibc_shm_file(3 /* PROBE */, -1, 0, 0) == 0 ? _POSIX_VERSION : -1;
+#endif
+	}
+#endif
 
 	if (name >= sizeof(values)/sizeof(values[0]) || !values[name]) {
 		errno = EINVAL;
