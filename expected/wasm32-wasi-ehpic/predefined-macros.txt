@@ -1228,8 +1228,13 @@
 #define F_TLOCK 2
 #define F_ULOCK 0
 #define GA 249
+#define GETALL 13
 #define GETLONG NS_GET32
+#define GETNCNT 14
+#define GETPID 11
 #define GETSHORT NS_GET16
+#define GETVAL 12
+#define GETZCNT 15
 #define GLOB_ABORTED 2
 #define GLOB_APPEND 0x20
 #define GLOB_DOOFFS 0x08
@@ -1541,6 +1546,14 @@
 #define IP6_ALERT_AN 0x0200
 #define IP6_ALERT_MLD 0x0000
 #define IP6_ALERT_RSVP 0x0100
+#define IPC_CREAT 01000
+#define IPC_EXCL 02000
+#define IPC_INFO 3
+#define IPC_NOWAIT 04000
+#define IPC_PRIVATE ((key_t) 0)
+#define IPC_RMID 0
+#define IPC_SET 1
+#define IPC_STAT 2
 #define IPDEFTTL 64
 #define IPFRAGTTL 60
 #define IPOPT_CLASS(o) ((o) & IPOPT_CLASS_MASK)
@@ -4234,9 +4247,15 @@
 #define SEGSIZE 512
 #define SELFMAG 4
 #define SEM_FAILED ((sem_t *)0)
+#define SEM_INFO 19
 #define SEM_NSEMS_MAX 256
+#define SEM_STAT (18 | (IPC_STAT & 0x100))
+#define SEM_STAT_ANY (20 | (IPC_STAT & 0x100))
+#define SEM_UNDO 0x1000
 #define SEM_VALUE_MAX 0x7fffffff
 #define SERVFAIL ns_r_servfail
+#define SETALL 17
+#define SETVAL 16
 #define SHADOW "/etc/shadow"
 #define SHF_ALLOC (1 << 1)
 #define SHF_ALPHA_GPREL 0x10000000
@@ -5395,6 +5414,7 @@
 #define _SC_XOPEN_XPG4 100
 #define _SEARCH_H 
 #define _SEMAPHORE_H 
+#define _SEM_SEMUN_UNDEFINED 1
 #define _SETJMP_H 
 #define _SHADOW_H 
 #define _SIZE_T 
@@ -5416,11 +5436,13 @@
 #define _SYS_EVENTFD_H 
 #define _SYS_FILE_H 
 #define _SYS_IOCTL_H 
+#define _SYS_IPC_H
 #define _SYS_PARAM_H 
 #define _SYS_RANDOM_H 
 #define _SYS_REG_H 
 #define _SYS_RESOURCE_H 
 #define _SYS_SELECT_H 
+#define _SYS_SEM_H
 #define _SYS_SENDFILE_H 
 #define _SYS_SOCKET_H 
 #define _SYS_STATVFS_H 
@@ -6579,9 +6601,13 @@
 #define __bitop(x,i,o) ((x)[(i)/8] o (1<<(i)%8))
 #define __bool_true_false_are_defined 1
 #define __inline inline
+#define __ipc_perm_key __key
+#define __ipc_perm_seq __seq
+#define __key key
 #define __need_STDDEF_H_misc 
 #define __pic__ 2
 #define __restrict restrict
+#define __seq seq
 #define __tg_complex(fun,x) (__RETCAST_CX(x)( __FLTCX((x)+I) && __IS_FP(x) ? fun ## f (x) : __LDBLCX((x)+I) ? fun ## l (x) : fun(x) ))
 #define __tg_complex_retreal(fun,x) (__RETCAST_REAL(x)( __FLTCX((x)+I) && __IS_FP(x) ? fun ## f (x) : __LDBLCX((x)+I) ? fun ## l (x) : fun(x) ))
 #define __tg_real(fun,x) (__RETCAST(x)__tg_real_nocast(fun, x))
