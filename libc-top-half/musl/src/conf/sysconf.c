@@ -254,8 +254,8 @@ long sysconf(int name)
 #else
 		/* Independent process memories can share futex storage only when
 		 * this instance has a shared mapping window. */
-		extern int32_t __wasilibc_shm_map_fd(int, uint64_t, uint64_t *, uint32_t *);
-		return __wasilibc_shm_map_fd(-1, 0, 0, 0) == 0 ? _POSIX_VERSION : -1;
+		extern int32_t __wasilibc_shm_file(uint32_t, int, uint64_t, uint64_t *);
+		return __wasilibc_shm_file(3 /* PROBE */, -1, 0, 0) == 0 ? _POSIX_VERSION : -1;
 #endif
 	}
 #endif

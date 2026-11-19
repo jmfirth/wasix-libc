@@ -114,12 +114,18 @@ __wasi_errno_t __wasi_fd_ioctl(__wasi_fd_t fd,uint32_t request,void *argp,int32_
 int32_t __imported_wasix_fbx_shm_map(int64_t,int64_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_map")));
 int32_t __wasilibc_shm_map(uint64_t inode,uint64_t len,uint64_t *ret_offset,uint32_t *ret_created){return __imported_wasix_fbx_shm_map((int64_t)inode,(int64_t)len,(intptr_t)ret_offset,(intptr_t)ret_created);}
 
-/* Identify the open file so unlink and name reuse are independent of mmap. */
-int32_t __imported_wasix_fbx_shm_map_fd(int32_t,int64_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_map_fd")));
-int32_t __wasilibc_shm_map_fd(int fd, uint64_t len, uint64_t *offset, uint32_t *created)
+/* firebox#GAG/#MMP/#RST — shm_file(op, fd, len, inout_offset): the one host
+ * import behind a MAP_SHARED mapping in the shared window (mman.c lists the
+ * ops; sysconf asks op 3, PROBE, whether a window exists). The host keys the
+ * object by its open file, so unlink and name reuse are independent of mmap.
+ * Returns 0 or a libc errno: the WASI errno is translated here, so callers
+ * compare against ENOTSUP (no window) and not the raw WASI value. */
+int32_t __imported_wasix_fbx_shm_file(int32_t, int32_t, int64_t, intptr_t)
+    __attribute__((__import_module__(FBX_WASIX_V1), __import_name__("shm_file")));
+int32_t __wasilibc_shm_file(uint32_t op, int fd, uint64_t len, uint64_t *inout_offset)
 {
-    __wasi_errno_t error = __imported_wasix_fbx_shm_map_fd(
-        fd, (int64_t)len, (intptr_t)offset, (intptr_t)created);
+    __wasi_errno_t error = __imported_wasix_fbx_shm_file(
+        (int32_t)op, fd, (int64_t)len, (intptr_t)inout_offset);
     return __wasilibc_errno_from_wasi(error);
 }
 
