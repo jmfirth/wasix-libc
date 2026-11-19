@@ -605,8 +605,11 @@ static void fbx_deliver(const struct fbx_deliver *d)
 		int bit  = 1 << ((sig - 1) % 32);
 		(void)__fbx_rtsigq_push_timer(sig, d->value, SI_TIMER, getpid(), getuid(),
 		                              d->timer);
+		/* firebox#KFC — the owner's own set only: this expiry is directed
+		 * at the owner thread, and the process-wide word is the process's
+		 * set, where a sibling's sigwait would take it. fbx_shows_pending
+		 * reads both. */
 		a_or((volatile int *)&d->owner->pending_sigs[word], bit);
-		a_or(&__wasm_pending_sigs[word], bit);
 	}
 	(void)__wasilibc_thread_signal_posix_timer(d->tid, sig);
 }

@@ -175,8 +175,24 @@ const uint32_t __fbx_sigsuspend_off = offsetof(struct pthread, sigsuspend_tick);
  * pointer-width knowledge; sa_flags is an `int`, so the value is exact. Indexed by
  * [sig] (not sig-1), mirroring __eintr_handler_callbacks[]. Backward-compatible: a
  * host predating the read ignores it, and the guest imports NOTHING new, so wasm
- * built with this libc still instantiates on an older runtime (fix simply dormant). */
-volatile uint32_t __fbx_sa_flags[_NSIG];
+ * built with this libc still instantiates on an older runtime (fix simply dormant).
+ *
+ * firebox#KFC — SLOT 0 declares the pending-set model. No signal is numbered 0,
+ * so sigaction never writes slot 0 and every earlier libc leaves it 0. This libc
+ * stores __FBX_SA0_SHARED_PENDING there: "__wasm_pending_sigs[] is the PROCESS's
+ * pending set, held once (the kernel's shared_pending), and a thread's own
+ * pending_sigs[] holds only signals directed at that thread (task->pending).
+ * Every consumer — sigwait, an unblock drain, a handler's return — claims a
+ * process-directed instance by an atomic clear of the process-wide bit."
+ * Without that declaration the host cannot tell this libc from one whose drains
+ * read the thread's own set alone, which needs a process-directed instance
+ * copied into every blocking thread's own set (the #JRS tokens), so it keeps
+ * doing that. With it, the host pends a process-directed signal into the
+ * process-wide set exactly once and never into a thread's own set.
+ * In .data, not .bss, so a fork child (a copy of this memory) and every thread
+ * read the same tag; nothing ever writes it again. */
+#define __FBX_SA0_SHARED_PENDING 0x31505346u /* "FSP1" */
+volatile uint32_t __fbx_sa_flags[_NSIG] = { [0] = __FBX_SA0_SHARED_PENDING };
 
 /* firebox#HBE — SEQLOCK GENERATION for the three objects above. EVEN = settled,
  * ODD = __fbx_replace_action_locked is mid-write. The host samples this before
@@ -858,34 +874,26 @@ int __fbx_rtsigq_count(int sig) {
 
 /* Mark RT signal `sig` pending on the CALLING thread: the PAIRED bit write.
  *
- * Two callers, one invariant:
- *  - sigtimedwait/sigwaitinfo, after a synchronous accept popped one queued
- *    record but MORE remain, so the pending bit stays ≡ "this RT signal's
- *    queue is non-empty" and the next accept finds the remaining FIFO
- *    instances (sigwaitinfo/7-1).
- *  - kill(getpid(), <rtsig>) (kill.c, firebox#4MP), which pushes a ring record
- *    and must mark it pending.
+ * One caller: __fbx_sigjmp_unwind_handlers, re-arming the records a longjmp
+ * left behind when it abandoned this thread's RT ring drain.
  *
- * Mirrors __wasm_pend_signal's bit writes (per-thread + process-wide masks)
- * minus the wake — the caller is not parking.
+ * firebox#KFC — THIS thread's own set only. It used to write the process-wide
+ * word too (#4MP: the old drains cleared that word only as a mirror of the own
+ * bits they claimed, so a word-only mark could never be cleared). The word is
+ * now the process's own set, claimed directly by every consumer (sigtimedwait,
+ * __wasm_drain_pending_pass), so the pair would be TWO pending instances: the
+ * thread's and the process's. MEASURED before this (LH2 kwdiag `rt-wait-h`,
+ * main blocks SIGRTMIN, a sibling sigwaits, main kill(getpid())): the sibling
+ * accepted, main still read it pending; Linux 0.
  *
- * firebox#4MP — BOTH writes are load-bearing and must never be separated. The
- * process-wide word is what sigpending(2) and timer_create's expiry check read,
- * but the per-thread mirror is what ARMS the clear: __wasm_drain_pending_sigs
- * (below) derives the process-wide AND-NOT mask from the bits it SWAPS OUT of
- * `self->pending_sigs[]`, and __wasm_signal's post-handler drain gate only
- * calls it when that mirror is nonzero. A caller that ORs the process-wide word
- * alone sets a bit no consumption path can clear — which is exactly the defect
- * kill.c carried until #4MP. Route new pending-marks through this helper rather
- * than open-coding the a_or pair. (pthread_kill.c and timer_create.c pend a
- * DIFFERENT thread — `t` / `d->owner` — so they cannot use this `self`-based
- * helper and open-code the same pair against their own target.) */
+ * kill(getpid(), RT) no longer calls this: it is process-directed, so the host
+ * pends it in the process-wide set when the kill returns. sigtimedwait re-arms
+ * the set it took the instance from (sigtimedwait.c __sigtw_repend). */
 void __fbx_rtsig_repend(int sig) {
 	struct pthread *self = __pthread_self();
 	int word = (sig - 1) / 32;
 	int bit  = 1 << ((sig - 1) % 32);
 	if (self) a_or((volatile int *)&self->pending_sigs[word], bit);
-	a_or(&__wasm_pending_sigs[word], bit);
 }
 
 /* firebox#VYD — is a real USER handler installed for `sig` (as opposed to
@@ -1503,7 +1511,15 @@ static int __wasm_drain_pending_pass(struct pthread *self) {
 		 * the whole word to 0 first, and a jump out of the first handler lost
 		 * every signal after it (MEASURED: SIGUSR1 + SIGUSR2 unblocked
 		 * together, SIGUSR1's handler siglongjmps: SIGUSR2 never ran). */
-		int bits = self->pending_sigs[word];
+		/* firebox#KFC — this thread's own set AND the process's. A
+		 * process-directed signal pends once, in __wasm_pending_sigs, until
+		 * one thread takes it; the first thread to unblock it is that thread
+		 * (POSIX XSH 2.4.1). It used to be pended as a copy in every
+		 * blocking thread's own set, and a thread created after the kill had
+		 * no copy at all. MEASURED (LH2 kwaith `nonholder`, every thread
+		 * blocks, kill(getpid()), a NEW thread sigwaits): main still read it
+		 * pending and its unblock ran the handler a second time; Linux 0. */
+		int bits = self->pending_sigs[word] | __wasm_pending_sigs[word];
 		while (bits) {
 			int bit = a_ctz_32((uint32_t)bits);
 			bits &= ~(1 << bit);
@@ -1515,12 +1531,13 @@ static int __wasm_drain_pending_pass(struct pthread *self) {
 			if (sig >= _NSIG || __wasm_thread_sig_blocked(sig)) continue;
 			if (self->sigwait_set[word] & (1U << bit)) continue;
 			if (__wasm_in_handler[sig]) continue;
+			/* The thread's own instance first, as Linux dequeues
+			 * task->pending before shared_pending. Each set holds its own
+			 * instance, so neither claim touches the other set. */
 			if (!__fbx_claim_pending_bit(
-			        (volatile int *)&self->pending_sigs[word], 1 << bit))
+			        (volatile int *)&self->pending_sigs[word], 1 << bit) &&
+			    !__fbx_claim_pending_bit(&__wasm_pending_sigs[word], 1 << bit))
 				continue;
-			/* Mirror the clear into the process-wide bitmask so
-			 * sigpending doesn't continue to report it as pending. */
-			a_and(&__wasm_pending_sigs[word], ~(1 << bit));
 			if (sig >= 1 && sig < _NSIG) {
 				delivered = 1;
 				/* User handlers run before the unblocking call returns.
@@ -1569,14 +1586,17 @@ static void __fbx_stack_pending_handlers(int current)
 		if (sig == current || sig-32U < 3) continue;
 		int word = (sig-1)/32;
 		int bit = 1U << ((sig-1)%32);
-		if (!(self->pending_sigs[word] & bit)) continue;
+		if (!((self->pending_sigs[word] | __wasm_pending_sigs[word]) & bit)) continue;
 		if (self->sigwait_set[word] & bit) continue;
 		if (__wasm_in_handler[sig] || __wasm_thread_sig_blocked(sig)) continue;
 		/* Only user handlers can be staged in guest code. Default actions
 		 * (in particular job-control stops) belong to the host drain. */
 		if (!__fbx_handler_installed(sig)) continue;
-		if (!__fbx_claim_pending_bit(&self->pending_sigs[word], bit)) continue;
-		a_and(&__wasm_pending_sigs[word], ~bit);
+		/* firebox#KFC — own instance first, else the process's; see
+		 * __wasm_drain_pending_pass. */
+		if (!__fbx_claim_pending_bit(&self->pending_sigs[word], bit) &&
+		    !__fbx_claim_pending_bit(&__wasm_pending_sigs[word], bit))
+			continue;
 		__fbx_dispatch_signal(sig, 0, 0);
 	}
 }
@@ -2235,7 +2255,7 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 	struct pthread *self = __pthread_self();
 	if (self && !from_drain) {
 		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
-			if (self->pending_sigs[w]) {
+			if (self->pending_sigs[w] | __wasm_pending_sigs[w]) {
 				__wasm_drain_pending_sigs();
 				break;
 			}
@@ -2305,9 +2325,10 @@ void __wasm_deliver_pending_rt_inline(void) {
  * The pend bit is cleared BEFORE the dispatch, in the same atomic class the
  * guest uses everywhere for these words (a_and against a_or), so a handler
  * that re-raises the same signal re-pends cleanly rather than being swallowed
- * by a clear that happened after it. Both the per-thread bit and the
- * process-wide __wasm_pending_sigs mirror are cleared together — sigpending(2)
- * must not keep reporting a signal whose handler is running.
+ * by a clear that happened after it. One instance is claimed per dispatch:
+ * the thread's own, else the process's (firebox#KFC) — sigpending(2) must not
+ * keep reporting a signal whose handler is running, and must keep reporting
+ * the other instance if both were pending.
  *
  * The RT rings carry queued DEPTH that no single bit can represent, so the
  * ring-driven precedent runs too, after the bitmask pass. */
@@ -2325,12 +2346,16 @@ static int __wasm_deliver_pending_inline_vote(void) {
 		if (s - 32U < 3) continue;
 		int word = (s - 1) / 32;
 		int bit = 1 << ((s - 1) % 32);
-		if (!(self->pending_sigs[word] & bit)) continue;
+		if (!((self->pending_sigs[word] | __wasm_pending_sigs[word]) & bit)) continue;
 		if (self->sigwait_set[word] & bit) continue;
 		if (__wasm_in_handler[s] > 0) continue;
 		if (__wasm_thread_sig_blocked(s)) continue;
-		a_and((volatile int *)&self->pending_sigs[word], ~bit);
-		a_and(&__wasm_pending_sigs[word], ~bit);
+		/* firebox#KFC — claim ONE instance: this thread's own, else the
+		 * process's (see __wasm_drain_pending_pass). Clearing both bits here
+		 * delivered two pending instances once. */
+		if (!__fbx_claim_pending_bit(&self->pending_sigs[word], bit) &&
+		    !__fbx_claim_pending_bit(&__wasm_pending_sigs[word], bit))
+			continue;
 		unsigned long lock_mask[_NSIG/(8*sizeof(long))];
 		__block_all_sigs(lock_mask);
 		LOCK(__eintr_handler_lock);
@@ -2647,7 +2672,7 @@ int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigact
 	struct pthread *self = __pthread_self();
 	if (self) {
 		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
-			if (self->pending_sigs[w]) {
+			if (self->pending_sigs[w] | __wasm_pending_sigs[w]) {
 				__wasm_drain_pending_sigs();
 				break;
 			}
@@ -2998,7 +3023,7 @@ void __fbx_sigjmp_unwind_handlers(int keep) {
 	int has_pending = 0;
 	if (self) {
 		for (int w = 0; w < __WASM_PENDING_WORDS; w++) {
-			if (self->pending_sigs[w]) { has_pending = 1; break; }
+			if (self->pending_sigs[w] | __wasm_pending_sigs[w]) { has_pending = 1; break; }
 		}
 	}
 	if (has_pending) __wasm_drain_pending_sigs();

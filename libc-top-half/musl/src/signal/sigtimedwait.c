@@ -55,9 +55,10 @@ int sigtimedwait(const sigset_t *restrict mask, siginfo_t *restrict si, const st
  * immediately. With `timeout` NULL it blocks indefinitely (sigwait/sigwaitinfo).
  *
  * WHY this lives in the substrate's libc and is built on the existing pending
- * machinery: __wasm_signal already ENQUEUES a blocked signal into both the
- * per-thread (self->pending_sigs[]) and process-wide (__wasm_pending_sigs[])
- * bitmasks instead of dispatching it (sigaction.c). Synchronous acceptance is
+ * machinery: a blocked signal is already PENDED instead of dispatched — a
+ * thread-directed one in the thread's own set (self->pending_sigs[], by
+ * __wasm_signal), a process-directed one once in the process's set
+ * (__wasm_pending_sigs[], by the host; firebox#KFC). Synchronous acceptance is
  * therefore "atomically claim a pending bit in `set` and clear it" — no host
  * round-trip, no handler. The wait is on the existing per-thread sigsuspend
  * wake counter, which __wasm_pend_signal now bumps (see sigaction.c) so a
@@ -66,7 +67,7 @@ int sigtimedwait(const sigset_t *restrict mask, siginfo_t *restrict si, const st
  * and a process-wide raise that exactly one of several waiters claims
  * (sigwait/6-1, the atomic test-and-clear gives single-consumer semantics). */
 
-/* Process-wide pending bitmask (per-thread copy is self->pending_sigs[]). */
+/* The process's pending set (a thread's own set is self->pending_sigs[]). */
 extern volatile int __wasm_pending_sigs[];
 
 /* firebox#C2Q/#HPT — guest-side RT-signal siginfo FIFO (defined in
@@ -78,17 +79,27 @@ extern int __fbx_rtsigq_pop_si(int sig, siginfo_t *si);
 __attribute__((__visibility__("hidden")))
 int __fbx_signal_info_fill_si(int sig, siginfo_t *si);
 extern int __fbx_rtsigq_count(int sig);
-extern void __fbx_rtsig_repend(int sig);
 
 /* Try to atomically claim a pending signal that is a member of `set`,
  * preferring the LOWEST-numbered signal (POSIX leaves selection unspecified
  * for non-RT signals but REQUIRES the lowest-numbered for queued RT signals —
- * sigwait/7-1). Checks the calling thread's own pending bitmask first (where a
- * self-raise or a pthread_kill-to-this-thread lands), then the process-wide
- * bitmask (where a process-directed raise lands and any single waiter may
- * claim it). On success clears the bit from BOTH bitmasks (so sigpending no
- * longer reports it and no other waiter re-claims it) and returns the signo;
- * returns 0 if nothing in `set` is pending. */
+ * sigwait/7-1). Checks the calling thread's own pending set first (where a
+ * raise() or a pthread_kill-to-this-thread lands), then the process's
+ * (where a process-directed signal lands, and any one waiter may claim it).
+ * Returns the signo and sets *own to whether it came from this thread's set,
+ * or returns 0 if nothing in `set` is pending.
+ *
+ * firebox#KFC — each set holds its OWN instance, so a claim clears exactly one
+ * bit. This used to clear the process-wide bit as a "mirror" of an own claim
+ * and the own bit as a "stale copy" of a process claim. With the host pending
+ * a process-directed signal into the process's set ONCE (instead of a copy
+ * into every blocking thread's own set), that destroyed the other instance:
+ * Linux, a process-directed and a thread-directed SIGUSR1 to one blocked
+ * thread that sigtimedwait()s twice, accepts both (#WW0 `directed-coalesce`).
+ * And because the process's instance now exists only once, the atomic
+ * fetch-and on that one word is the whole single-consumer arbitration: two
+ * threads parked in sigwait cannot both accept one kill(getpid()) (#KFC;
+ * MEASURED before: 2 accepts in 2 of 5 runs; Linux 1, always). */
 static int __sigtw_claim(const sigset_t *set, int *own)
 {
 	struct pthread *self = __pthread_self();
@@ -97,28 +108,30 @@ static int __sigtw_claim(const sigset_t *set, int *own)
 		if (!sigismember(set, sig)) continue;
 		int word = (sig - 1) / 32;
 		int bit  = 1 << ((sig - 1) % 32);
-		/* Per-thread first. a_fetch_and clears the bit atomically; if it
-		 * was set, this thread won the claim. */
 		if (self) {
 			int prev = a_fetch_and((volatile int *)&self->pending_sigs[word], ~bit);
 			if (prev & bit) {
-				/* Mirror-clear the process-wide view. */
-				a_and(&__wasm_pending_sigs[word], ~bit);
 				*own = 1;
 				return sig;
 			}
 		}
-		/* Process-wide: a process-directed signal that pended without a
-		 * specific target thread. Exactly one waiter claims it. */
 		int pprev = a_fetch_and(&__wasm_pending_sigs[word], ~bit);
-		if (pprev & bit) {
-			/* Also clear any stale per-thread copy of this bit so it
-			 * isn't redelivered on a later unblock. */
-			if (self) a_and((volatile int *)&self->pending_sigs[word], ~bit);
-			return sig;
-		}
+		if (pprev & bit) return sig;
 	}
 	return 0;
+}
+
+/* firebox#C2Q — RT depth coherence: re-mark `sig` pending in the set the
+ * accepted instance came from while more queued records remain, so the next
+ * accept finds them. firebox#KFC — the SAME set: re-marking both (what
+ * __fbx_rtsig_repend used to do) turned one queue into two instances. */
+static void __sigtw_repend(int sig, int own)
+{
+	struct pthread *self = __pthread_self();
+	int word = (sig - 1) / 32;
+	int bit  = 1 << ((sig - 1) % 32);
+	if (own && self) a_or((volatile int *)&self->pending_sigs[word], bit);
+	else a_or(&__wasm_pending_sigs[word], bit);
 }
 
 /* __timedwait(addr, val, clk, abs_timeout|NULL, priv) — declared in
@@ -146,26 +159,6 @@ static void __sigtw_set_acceptance(const sigset_t *set, int on)
 		}
 		a_store((volatile int *)&self->sigwait_set[w], bits);
 	}
-}
-
-/* firebox#C3E (LH2 `kwaith`) — an accept from this thread's OWN set may have
- * consumed a process-directed instance: the host router (#JRS) pends such an
- * instance on every blocking thread as a token in that thread's own set, and
- * learns that one was accepted only when that thread next enters the host,
- * where it retires the other threads' tokens. Until then they read as pending
- * in their threads' sigpending (which reports the thread's own set) and an
- * unblock there runs the handler. So enter the host once before returning:
- * sched_yield is the cheapest call every host routes through its syscall-entry
- * work, and on a host without that settle it is a plain yield. MEASURED (LSR
- * `r2 kwaith`, a sibling's sigwait accepts kill(getpid())): main read
- * `mainpending=1`; Linux 0. An accept from the process-wide word is not
- * settled this way: the accepting thread holds no token, so its entry gives the
- * router nothing to go on, and the holders' tokens stay until the router's next
- * route of the signal (the #JRS bias: a possible second delivery, never a
- * loss). */
-static void __sigtw_settle(int own)
-{
-	if (own) (void)__wasi_sched_yield();
 }
 
 /* firebox#SGV — a POSIX timer's signal was accepted (sigaction.c's
@@ -256,7 +249,6 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 		int sig = __sigtw_claim(set, &own);
 		if (sig) {
 			__sigtw_set_acceptance(set, 0);
-			__sigtw_settle(own);
 			int host_pending = __sigtw_fill_si(si, sig);
 			/* firebox#C2Q — RT depth coherence: __sigtw_claim cleared the
 			 * pending bit, but if more queued records remain for this RT
@@ -264,7 +256,7 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 			 * depth). A no-op for a non-RT signal or a now-empty queue (the
 			 * common single-instance case), so the standard-signal path is
 			 * behaviorally unchanged. */
-			if (host_pending || __fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
+			if (host_pending || __fbx_rtsigq_count(sig) > 0) __sigtw_repend(sig, own);
 			return sig;
 		}
 
@@ -286,10 +278,9 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 			sig = __sigtw_claim(set, &own);
 			__sigtw_set_acceptance(set, 0);
 			if (sig) {
-				__sigtw_settle(own);
 				int host_pending = __sigtw_fill_si(si, sig);
 				/* firebox#C2Q — RT depth coherence (see the main-loop claim). */
-				if (host_pending || __fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
+				if (host_pending || __fbx_rtsigq_count(sig) > 0) __sigtw_repend(sig, own);
 				return sig;
 			}
 			errno = EAGAIN;

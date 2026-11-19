@@ -132,10 +132,9 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 			if (__wasm_thread_sig_blocked(sig)) {
 				/* firebox#C3E — sigqueue(2) is PROCESS-directed. Blocked here,
 				 * it must stay acceptable by any thread, so send it the way
-				 * kill(getpid()) does: the host router (#JRS) gives every
-				 * thread a copy, publishes the instance once all are routed,
-				 * and retires the other threads' tokens when the consumer next
-				 * enters the host. This replaces a thread-signal to self plus
+				 * kill(getpid()) does: the host pends it once in the process's
+				 * set (firebox#KFC; on an older host, the #JRS router's
+				 * per-thread copies). This replaces a thread-signal to self plus
 				 * an eager process-wide mark: the mark was the only instance a
 				 * sibling could accept, and the caller's own pend stayed behind
 				 * it, so after a sibling's sigwaitinfo took both queued values
@@ -144,8 +143,7 @@ int sigqueue(pid_t pid, int sig, const union sigval value)
 				 * without the router a sibling never saw it at all (the same
 				 * arm timed out). The queued record above is the value: the
 				 * accepting thread pops it (sigtimedwait.c, sigaction.c drain).
-				 * Unlike kill.c's RT path, no eager __fbx_rtsig_repend: the
-				 * router writes the pend. */
+				 * No eager mark: the host writes the pend. */
 				e = __wasi_proc_signal((__wasi_pid_t)pid, (__wasi_signal_t)sig);
 			} else {
 				/* Unblocked here: deliver on this thread now, as Linux prefers

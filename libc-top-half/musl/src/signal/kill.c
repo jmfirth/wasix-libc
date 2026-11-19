@@ -11,22 +11,12 @@
 #include "atomic.h"
 /* firebox#VYD — RT-signal queue DEPTH for a SELF-directed kill(getpid(), RT).
  * Same rationale as raise()/pthread_kill(): the host doorbell coalesces, so the
- * guest owns depth via the __fbx_rtsigq ring. Feed it (+ the pending bitmask,
- * both words — see the firebox#4MP note below) before the proc_signal nudge.
+ * guest owns depth via the __fbx_rtsigq ring. Feed it before the proc_signal
+ * nudge; the host marks the process's pending set (firebox#KFC, below).
  * No-op for a non-RT
  * signal or a cross-process target (which routes to the host stash instead). */
 extern int __fbx_rtsigq_push(int sig, union sigval value, int code,
                              pid_t pid, uid_t uid);
-/* firebox#4MP — THE paired pending-bit write (sigaction.c). It sets BOTH the
- * calling thread's `self->pending_sigs[]` mirror AND the process-wide
- * `__wasm_pending_sigs[]` word, which is the joint invariant the teardown
- * depends on: __wasm_drain_pending_sigs clears the process-wide word by
- * AND-NOTing the bits it SWAPS OUT of the per-thread mirror, and the
- * post-handler drain in __wasm_signal only runs at all when that mirror is
- * nonzero. A site that writes the process-wide word alone therefore sets a bit
- * that nothing on the consumption path can ever clear. Use this helper rather
- * than an open-coded a_or so the pair cannot be separated again. */
-extern void __fbx_rtsig_repend(int sig);
 int __wasm_signal_self(int sig, int code);
 int __wasm_thread_sig_blocked(int sig);
 #endif
@@ -80,50 +70,30 @@ int kill(pid_t pid, int sig)
 	if (sig >= 35 && sig <= (_NSIG - 1) && pid == (pid_t)getpid()) {
 		union sigval sv; memset(&sv, 0, sizeof sv);
 		(void)__fbx_rtsigq_push(sig, sv, SI_USER, getpid(), getuid());
-		/* firebox#4MP — mark pending through the PAIRED write.
-		 *
-		 * This line used to be a bare
-		 *     a_or(&__wasm_pending_sigs[word], bit);
-		 * which set the process-wide word and NOT the calling thread's
-		 * `pending_sigs[]` mirror. Every other set-path in the tree writes
-		 * both (pthread_kill.c:66-67, timer_create.c:381-382,
-		 * sigaction.c:648-649 and :1038-1042); kill.c was the sole outlier,
-		 * and the mirror is what ARMS the clear. __wasm_drain_pending_sigs
-		 * claims each bit SET IN `self->pending_sigs[word]` and only then
-		 * clears it from `__wasm_pending_sigs[word]`, so with the mirror
-		 * never set no bit is claimed and nothing is cleared — and the
-		 * post-handler drain gate in __wasm_signal never even calls it,
-		 * because that gate tests the mirror too. Result: after the ring
-		 * record this bit represents had been consumed and the handler had
-		 * run, the process-wide bit survived, so sigpending(2) kept
-		 * reporting a signal that was not pending and timer_create's
-		 * `if (pending & bit) { overrun++; return; }` expiry check treated
-		 * every later expiry of that signo as already-pending — a POSIX
-		 * timer on that signal never fired again.
-		 *
-		 * __fbx_rtsig_repend performs exactly the pair. The pending state
-		 * and the RT ring are two stores that must agree; keeping the write
-		 * behind the one helper is what stops them being separated again. */
-		__fbx_rtsig_repend(sig);
+		/* firebox#KFC — and NO pending mark here. kill(getpid()) is
+		 * process-directed: the host pends it ONCE in the process's set
+		 * (__wasm_pending_sigs) before proc_signal returns, the same as a
+		 * standard signal. This used to mark the caller's own set AND the
+		 * process's (__fbx_rtsig_repend, firebox#4MP), which made one kill two
+		 * pending instances: a sibling's sigwait accepted one and the caller
+		 * still read it pending. MEASURED (LH2 kwdiag `rt-wait-h`, the probe
+		 * `rt-wait-h` here): main sigpending 1, Linux 0. #4MP's defect — a word
+		 * bit nothing could clear — cannot come back: every consumer now claims
+		 * the process's bit itself (sigtimedwait, the unblock drain). */
 	}
-	/* firebox#C3E — do NOT mark a blocked self-kill in the process-wide word
-	 * here. That word is what any thread's sigwait claims from, and the host
-	 * router (#JRS) publishes a process-directed instance there only once
-	 * every thread's copy has been routed, because a parked sigwaiter that
-	 * takes it before its own copy is routed has no token: its copy then
-	 * pends the signal a second time and the router publishes it again.
-	 * An eager mark here reopened exactly that. MEASURED (LH2, LSR `r2
-	 * kwaith`: main blocks SIGUSR2, a sibling parks in sigwait, main's
-	 * SIGUSR1 handler kills itself with SIGUSR2): the sibling woke on the
-	 * copy's arrival, took the marked bit, and the copy routed afterwards
-	 * left SIGUSR2 pending everywhere, `mainpending=1` 19 of 20 at both
-	 * widths; Linux prints 0. Without the mark the C3E probe's case B (a
-	 * thread created after kill(getpid()) sees it pending) still matches
-	 * Linux: outside a handler this thread's own copy is routed when
-	 * proc_signal returns, which publishes a single thread's instance before
-	 * pthread_create runs. (Inside a handler that route waits for the
-	 * handler's return, so a thread created by the handler itself does not
-	 * see it yet; Linux would show it.) */
+	/* firebox#KFC — the host pends a process-directed kill in the process's
+	 * set (__wasm_pending_sigs) before proc_signal returns, once, on behalf of
+	 * every thread that blocks it (WasiEnv::publish_process_signal); an
+	 * unblocked thread's copy claims it from there. That includes a kill sent
+	 * inside a handler, so a thread the handler creates sees it pending (#WW0
+	 * residual 3; Linux t_pending=1, Firebox was 0 5 of 5).
+	 *
+	 * firebox#C3E history: an eager guest mark here was wrong under the #JRS
+	 * router, which copied the instance into every blocking thread's own set
+	 * and published the process-wide bit only once every copy was routed (a
+	 * parked sigwaiter that took the early mark had no copy-token, so its copy
+	 * pended the signal a second time; LSR `r2 kwaith` mainpending=1 19 of 20).
+	 * Under the shared set there are no copies to race, and no mark is needed. */
 	__wasi_errno_t e = __wasi_proc_signal(pid, (__wasi_signal_t)sig);
 	if (e != __WASI_ERRNO_SUCCESS) {
 		errno = __wasilibc_errno_from_wasi((int)e);
