@@ -135,12 +135,19 @@ static int wasix_copy_supported(void) {
     return __wasilibc_shm_file(WASIX_SHM_FILE_COPY_MAP, -1, 0, NULL) == 0;
 }
 
-static int wasix_copy_map(int fd, uintptr_t addr, size_t len, off_t offset, int prot) {
-    uint64_t range[3] = { addr, (uint64_t)offset, (prot & PROT_WRITE) != 0 };
+static int wasix_copy_map(int fd, uintptr_t addr, size_t len, off_t offset, int prot,
+                          int check_replace) {
+    uint64_t range[3] = { addr, (uint64_t)offset,
+                         (uint64_t)((prot & PROT_WRITE) != 0) | (check_replace ? 2u : 0u) };
     int e = __wasilibc_shm_file(WASIX_SHM_FILE_COPY_MAP, fd, len, range);
     if (e == 0) return 0;
     errno = e;
     return -1;
+}
+
+static int wasix_copy_file(int fd) {
+    struct stat st;
+    return wasix_copy_supported() && fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
 }
 
 static int wasix_copy_publish(uintptr_t start, uintptr_t end, int unmap) {
@@ -1197,7 +1204,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // stores are written back (see g_fixed_maps' `wb_fd`). dup()'s errno (EMFILE)
     // is kept, as on the private-copy path.
     int wb_fd = -1;
-    const int copy = (flags & MAP_SHARED) && !(flags & MAP_ANON) && wasix_copy_supported();
+    const int copy = (flags & MAP_SHARED) && !(flags & MAP_ANON) && wasix_copy_file(fd);
     if ((flags & MAP_SHARED) && !(flags & MAP_ANON) && (prot & PROT_WRITE) && fd >= 0 &&
         (wb_fd = dup(fd)) < 0)
         return MAP_FAILED;
@@ -1208,6 +1215,17 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         wasix_vma_lock_release();
         if (wb_fd >= 0) (void)close(wb_fd);
         errno = EEXIST;
+        return MAP_FAILED;
+    }
+    // Reject a conflicting file range before removing any part of the old VMA.
+    // Older hosts advertise only the ordinary copy registration (probe len 0).
+    if (copy && !noreplace &&
+        __wasilibc_shm_file(WASIX_SHM_FILE_COPY_MAP, -1, 1, NULL) == 0 &&
+        wasix_copy_map(fd, target, wasix_posix_extent(length), offset, prot, 1) < 0) {
+        const int e = errno;
+        wasix_vma_lock_release();
+        if (wb_fd >= 0) (void)close(wb_fd);
+        errno = e;
         return MAP_FAILED;
     }
     // firebox#MMP: a written-back mapping must be registered, or its stores are
@@ -1316,7 +1334,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     wasix_host_widen_rw(target, extent);
     if (copy) {
         wasix_vma_lock_acquire();
-        const int copy_rc = wasix_copy_map(fd, target, extent, offset, prot);
+        const int copy_rc = wasix_copy_map(fd, target, extent, offset, prot, 0);
         if (copy_rc == 0) {
             for (int i = 0; i < g_fixed_count; i++) {
                 if (g_fixed_maps[i].addr == target) {
@@ -2311,9 +2329,9 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
 
         map->fd = new_fd;
-        if ((flags & MAP_SHARED) && wasix_copy_supported()) {
+        if ((flags & MAP_SHARED) && wasix_copy_file(new_fd)) {
             if (wasix_copy_map(new_fd, (uintptr_t)addr,
-                               wasix_posix_extent(length), offset, prot) < 0) {
+                               wasix_posix_extent(length), offset, prot, 0) < 0) {
                 const int e = errno;
                 close(new_fd);
                 free(base);
