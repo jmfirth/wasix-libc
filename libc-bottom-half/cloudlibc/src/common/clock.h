@@ -9,14 +9,41 @@
 #include <stdint.h>
 #include <wasi/api.h>
 
+// WASIX named CPU clocks use Linux's scheduler-clock encoding. Only the
+// time/resolution APIs accept these ids. The four fixed clocks still use the
+// WASI imports, and pointer-ABI clocks still resolve through the known objects.
+#if defined(__wasm64__)
+#define CPU_CLOCK_IMPORT_MODULE "wasix_64v1"
+#else
+#define CPU_CLOCK_IMPORT_MODULE "wasix_32v1"
+#endif
+extern int32_t __wasilibc_cpu_clock_get(int32_t id, uint32_t resolution,
+                                        __wasi_timestamp_t *result)
+    __attribute__((__import_module__(CPU_CLOCK_IMPORT_MODULE),
+                   __import_name__("cpu_clock_get")));
+#undef CPU_CLOCK_IMPORT_MODULE
+
+static inline int32_t __wasilibc_cpu_clockid(uint32_t subject, bool thread) {
+  return (int32_t)((~subject << 3) | (thread ? 6 : 2));
+}
+
+static inline bool __wasilibc_is_named_cpu_clock(uintptr_t raw) {
+  // Reject wide pointer values that only look like a clock after truncation.
+  int32_t id = (int32_t)raw;
+  return (uintptr_t)id == raw && id < 0 && ((id & 7) == 2 || (id & 7) == 6);
+}
+
 // In this implementation we define clockid_t as a pointer type, so that
 // we can implement them as full objects. Right now we only use those
 // objects to store the raw ABI-level clock identifier, but in the
 // future we can use this to provide support for pthread_getcpuclockid()
 // and clock file descriptors.
+#ifndef __WASILIBC_CLOCKID_STRUCT
+#define __WASILIBC_CLOCKID_STRUCT
 struct __clockid {
   __wasi_clockid_t id;
 };
+#endif
 
 // The FOUR pointer-ABI clock objects. Under wasi-sdk's __header_time.h the
 // macros CLOCK_REALTIME / CLOCK_MONOTONIC / CLOCK_PROCESS_CPUTIME_ID /
@@ -53,7 +80,7 @@ extern const struct __clockid _CLOCK_THREAD_CPUTIME_ID;
 // clock_settime/17-2 inputs) sign-/zero-extends to a uintptr_t > 3 and,
 // under the old unconditional `((struct __clockid *)raw)->id`, faulted with
 // an out-of-bounds memory access instead of EINVAL. We instead accept a
-// pointer ONLY when it equals one of the two known clock objects, so a
+// pointer ONLY when it equals one of the four known clock objects, so a
 // bogus integer can never be dereferenced.
 //
 // The parameter type is uintptr_t (not clockid_t) because this header

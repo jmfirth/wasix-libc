@@ -203,6 +203,7 @@ int timer_create(clockid_t clk, struct sigevent *restrict evp, timer_t *restrict
 #include <stdint.h>
 #include <unistd.h>
 #include <signal.h>
+#include <common/clock.h>
 #include <wasi/api.h>
 
 /* Cross-thread signal delivery + RT-depth machinery (shared with raise.c /
@@ -341,29 +342,18 @@ static void ts_add_ns(struct timespec *a, long long ns)
 	if (a->tv_nsec >= 1000000000L) { a->tv_sec++; a->tv_nsec -= 1000000000L; }
 }
 
-/* Read "now" in a timer's clock domain. The CPU-time clocks have no Firebox
- * countdown source; schedule them off CLOCK_MONOTONIC (for the busy-loop Open
- * POSIX CPUTIME tests wall time tracks CPU time, so the wall deadline fires at
- * the right accumulated-CPU point). */
-static void ts_now(clockid_t clk, struct timespec *out)
+/* Read "now" in a timer's own clock domain (firebox#CPU: the CPU-time clocks
+ * are real host-accounted clocks now, not CLOCK_MONOTONIC stand-ins). Returns
+ * nonzero, with *out zeroed, when the clock can no longer be read (a thread
+ * CPU clock whose thread has exited). */
+static int ts_now(clockid_t clk, struct timespec *out)
 {
-	clockid_t c = clk;
-	if (c == CLOCK_PROCESS_CPUTIME_ID || c == CLOCK_THREAD_CPUTIME_ID)
-		c = CLOCK_MONOTONIC;
-	if (clock_gettime(c, out) != 0) { out->tv_sec = 0; out->tv_nsec = 0; }
-}
-
-static int clock_supported(clockid_t clk)
-{
-	switch (clk) {
-	case CLOCK_REALTIME:
-	case CLOCK_MONOTONIC:
-	case CLOCK_PROCESS_CPUTIME_ID:
-	case CLOCK_THREAD_CPUTIME_ID:
-		return 1;
-	default:
-		return 0;
+	if (clock_gettime(clk, out) != 0) {
+		out->tv_sec = 0;
+		out->tv_nsec = 0;
+		return -1;
 	}
+	return 0;
 }
 
 static int fbx_periodic(const struct fbx_timer *t)
@@ -695,7 +685,10 @@ static void *fbx_timer_manager(void *arg)
 			struct fbx_timer *t = &g_timers[i];
 			if (!t->in_use) continue;
 			struct timespec now, wake;
-			ts_now(t->clock, &now);
+			if (ts_now(t->clock, &now)) {
+				t->armed = 0;
+				continue;
+			}
 			/* Lost while unblocked: the host discarded it (default-ignore),
 			 * which is not a dequeue (fbx_dequeued). */
 			if (t->state == FBX_SENT && fbx_lost_locked(t, &now))
@@ -729,6 +722,14 @@ static void *fbx_timer_manager(void *arg)
 			}
 			struct timespec rem;
 			ts_diff(&wake, &now, &rem);
+			/* firebox#CPU — CPU time can stop during sleep or advance faster
+			 * than wall time across workers. Poll an armed CPU-clock timer
+			 * at a fixed interval so a parked clock with very little CPU
+			 * time remaining cannot spin. */
+			if (t->state != FBX_SENT
+			    && (t->clock == CLOCK_PROCESS_CPUTIME_ID
+			        || __wasilibc_is_named_cpu_clock((uintptr_t)t->clock)))
+				rem = (struct timespec){0, 10000000};
 			if (!have || ts_lt(&rem, &min_rem)) { min_rem = rem; have = 1; }
 		}
 		/* The signals with a SENT timer, as this scan found them. Only the
@@ -746,9 +747,8 @@ static void *fbx_timer_manager(void *arg)
 		}
 
 		pthread_mutex_unlock(&g_lock);
-		if (have) {
-			struct timespec deadline;
-			clock_gettime(CLOCK_MONOTONIC, &deadline);
+		struct timespec deadline;
+		if (have && clock_gettime(CLOCK_MONOTONIC, &deadline) == 0) {
 			ts_add(&deadline, &min_rem);
 			(void)__timedwait(&g_kick, kick, CLOCK_MONOTONIC, &deadline, 1);
 		} else {
@@ -781,12 +781,12 @@ static int fbx_ensure_manager_locked(void)
 
 /* ---- gettime helper (g_lock held) ---- */
 
-static void fbx_gettime_locked(struct fbx_timer *t, struct itimerspec *out)
+static int fbx_gettime_locked(struct fbx_timer *t, struct itimerspec *out)
 {
-	out->it_interval = t->interval;
 	if (t->armed) {
 		struct timespec now, next = t->next;
-		ts_now(t->clock, &now);
+		if (ts_now(t->clock, &now)) return -1;
+		out->it_interval = t->interval;
 		/* firebox#SGV — a periodic timer is not re-armed while its signal is
 		 * in flight, but it still has a next expiry: the one after now
 		 * (Linux common_timer_get forwards the timer the same way). */
@@ -794,9 +794,11 @@ static void fbx_gettime_locked(struct fbx_timer *t, struct itimerspec *out)
 			(void)fbx_overrun_at(t, &now, &next);
 		ts_diff(&next, &now, &out->it_value);
 	} else {
+		out->it_interval = t->interval;
 		out->it_value.tv_sec = 0;
 		out->it_value.tv_nsec = 0;
 	}
+	return 0;
 }
 
 /* ---- public API ---- */
@@ -804,8 +806,14 @@ static void fbx_gettime_locked(struct fbx_timer *t, struct itimerspec *out)
 int timer_create(clockid_t clk, struct sigevent *restrict evp,
                  timer_t *restrict res)
 {
-	if (!clock_supported(clk)) { errno = EINVAL; return -1; }
+	if (clock_getres(clk, NULL)) return -1;
 	if (!res) { errno = EFAULT; return -1; }
+	/* firebox#CPU — the manager runs on its own pthread. Bind the creator's
+	 * thread clock while that creator is still the calling thread. */
+	if (clk == CLOCK_THREAD_CPUTIME_ID) {
+		int error = pthread_getcpuclockid(pthread_self(), &clk);
+		if (error) { errno = error; return -1; }
+	}
 
 	int notify = evp ? evp->sigev_notify : SIGEV_SIGNAL;
 	int signo = SIGALRM;
@@ -888,9 +896,26 @@ int timer_settime(timer_t tt, int flags, const struct itimerspec *restrict val,
 	struct fbx_timer *t = fbx_lookup(tt);
 	if (!t) { pthread_mutex_unlock(&g_lock); errno = EINVAL; return -1; }
 
-	if (old) fbx_gettime_locked(t, old);
+	if (old && fbx_gettime_locked(t, old)) {
+		pthread_mutex_unlock(&g_lock);
+		return -1;
+	}
 
 	int arm = (val->it_value.tv_sec != 0 || val->it_value.tv_nsec != 0);
+	/* firebox#CPU — read the clock and start the manager before changing
+	 * anything, so a failed timer_settime leaves the timer as it was. */
+	struct timespec arm_now;
+	if (arm) {
+		if (ts_now(t->clock, &arm_now)) {
+			pthread_mutex_unlock(&g_lock);
+			return -1;
+		}
+		if (fbx_ensure_manager_locked() != 0) {
+			pthread_mutex_unlock(&g_lock);
+			errno = EAGAIN;
+			return -1;
+		}
+	}
 	t->interval = val->it_interval;
 	/* firebox#SGV — a new setting forgets the in-flight expiry (Linux bumps
 	 * it_requeue_pending so its dequeue does not re-arm, and zeroes
@@ -906,21 +931,13 @@ int timer_settime(timer_t tt, int flags, const struct itimerspec *restrict val,
 	t->state = FBX_IDLE;
 	a_store(&t->overrun_last, 0);
 	if (arm) {
-		struct timespec now;
-		ts_now(t->clock, &now);
 		if (flags & TIMER_ABSTIME) {
 			t->next = val->it_value;      /* absolute in the clock domain */
 		} else {
-			t->next = now;
+			t->next = arm_now;
 			ts_add(&t->next, &val->it_value);
 		}
 		t->armed = 1;
-		if (fbx_ensure_manager_locked() != 0) {
-			t->armed = 0;
-			pthread_mutex_unlock(&g_lock);
-			errno = EAGAIN;
-			return -1;
-		}
 	} else {
 		t->armed = 0;                     /* it_value == 0 disarms */
 	}
@@ -963,9 +980,9 @@ int timer_gettime(timer_t tt, struct itimerspec *val)
 	fbx_check_fork();
 	struct fbx_timer *t = fbx_lookup(tt);
 	if (!t) { pthread_mutex_unlock(&g_lock); errno = EINVAL; return -1; }
-	fbx_gettime_locked(t, val);
+	int result = fbx_gettime_locked(t, val);
 	pthread_mutex_unlock(&g_lock);
-	return 0;
+	return result;
 }
 
 /* firebox#SGV — the overrun of the last consumed expiry (it_overrun_last).

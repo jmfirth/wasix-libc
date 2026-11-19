@@ -384,6 +384,11 @@ hidden void __tl_lock(void);
 hidden void __tl_unlock(void);
 hidden void __tl_sync(pthread_t);
 
+#ifndef __wasilibc_unmodified_upstream
+#define WASIX_INITIAL_LOCK_TID 0x3fffffff
+extern hidden int __wasilibc_initial_thread_id;
+#endif
+
 hidden void __vm_wait(void);
 hidden void __vm_lock(void);
 hidden void __vm_unlock(void);

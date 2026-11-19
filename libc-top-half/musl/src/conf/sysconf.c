@@ -10,6 +10,8 @@
 #include <sys/sysinfo.h>
 #ifdef __wasilibc_unmodified_upstream
 #include "syscall.h"
+#else
+#include <wasi/api.h>
 #endif
 #include "libc.h"
 
@@ -267,6 +269,15 @@ long sysconf(int name)
 		extern int32_t __wasilibc_shm_file(uint32_t, int, uint64_t, uint64_t *);
 		return __wasilibc_shm_file(3 /* PROBE */, -1, 0, 0) == 0 ? _POSIX_VERSION : -1;
 #endif
+	}
+#endif
+
+#ifndef __wasilibc_unmodified_upstream
+	if (name == _SC_CPUTIME || name == _SC_THREAD_CPUTIME) {
+		__wasi_timestamp_t resolution;
+		__wasi_clockid_t id = name == _SC_CPUTIME ?
+			__WASI_CLOCKID_PROCESS_CPUTIME_ID : __WASI_CLOCKID_THREAD_CPUTIME_ID;
+		return __wasi_clock_res_get(id, &resolution) == 0 ? _POSIX_VERSION : -1;
 	}
 #endif
 

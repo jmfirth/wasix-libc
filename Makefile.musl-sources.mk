@@ -129,6 +129,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         time/ctime.c \
         time/ctime_r.c \
         time/clock.c \
+        time/clock_getcpuclockid.c \
         time/wcsftime.c \
         time/strptime.c \
         time/difftime.c \

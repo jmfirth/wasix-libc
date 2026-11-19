@@ -126,9 +126,7 @@ int clock_getres (clockid_t, struct timespec *);
 int clock_gettime (clockid_t, struct timespec *);
 int clock_settime (clockid_t, const struct timespec *);
 int clock_nanosleep (clockid_t, int, const struct timespec *, struct timespec *);
-#ifdef __wasilibc_unmodified_upstream /* WASI has no clock_getcpuclockid */
 int clock_getcpuclockid (pid_t, clockid_t *);
-#endif
 
 /* firebox#GGW — POSIX per-process timers ARE provided on wasm (guest-backed
  * implementation in src/time/timer_create.c using Firebox's real threads,
