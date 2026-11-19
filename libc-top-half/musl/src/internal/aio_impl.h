@@ -15,6 +15,13 @@ extern hidden void __aio_atfork(int);
  * Defined in aio.c. See the definition there for the delivery rationale. */
 #include <signal.h>
 hidden void __aio_notify_signal(int signo, union sigval value);
+/* firebox#SGV — completions published but whose signal is not yet sent.
+ * lio_listio's list notification waits for zero (see wait_thread). */
+extern hidden volatile int __aio_notify_inflight;
+/* firebox#SGV — submit one request of a list, holding its worker: *held gets
+ * the word lio_listio stores 1 to as it returns (null when no worker started). */
+struct aiocb;
+hidden int __aio_submit_held(struct aiocb *cb, int op, volatile int **held);
 #endif
 
 #endif

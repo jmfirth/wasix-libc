@@ -63,6 +63,20 @@ int aio_suspend(const struct aiocb *const cbs[], int cnt, const struct timespec 
 
 		ret = __timedwait_cp(pfut, expect, CLOCK_MONOTONIC, ts?&at:0, 1);
 
+#ifndef __wasilibc_unmodified_upstream
+		/* firebox#SGV — a completion that woke us wins over a signal that
+		 * arrived before we ran again. Linux's futex returns 0 for that
+		 * order (the handler runs on the way out) and the loop above returns
+		 * 0; the WASIX futex reports EINTR for it. Open POSIX aio_suspend/1-1
+		 * waits on one request of a list whose list signal follows it at
+		 * once, and read EINTR 3-4 of 5. A signal that came first still
+		 * returns EINTR here: the request is then still in progress. */
+		if (ret == EINTR)
+			for (i=0; i<cnt; i++)
+				if (cbs[i] && aio_error(cbs[i]) != EINPROGRESS)
+					return 0;
+#endif
+
 		switch (ret) {
 		case ETIMEDOUT:
 			ret = EAGAIN;
