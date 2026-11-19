@@ -125,6 +125,32 @@ extern int32_t __wasilibc_shm_file(uint32_t op, int fd, uint64_t len, uint64_t *
 #define WASIX_SHM_FILE_UNMAP 2
 #define WASIX_SHM_FILE_MAP_AT 4
 #define WASIX_SHM_FILE_RELEASE 5
+#define WASIX_SHM_FILE_COPY_MAP 6
+#define WASIX_SHM_FILE_COPY_SYNC 7
+#define WASIX_SHM_FILE_COPY_UNMAP 8
+
+// Browsers cannot alias a native window into linear memory. Give the host the
+// address libc allocated, so it can seed and publish the copy even on a trap.
+static int wasix_copy_supported(void) {
+    return __wasilibc_shm_file(WASIX_SHM_FILE_COPY_MAP, -1, 0, NULL) == 0;
+}
+
+static int wasix_copy_map(int fd, uintptr_t addr, size_t len, off_t offset, int prot) {
+    uint64_t range[3] = { addr, (uint64_t)offset, (prot & PROT_WRITE) != 0 };
+    int e = __wasilibc_shm_file(WASIX_SHM_FILE_COPY_MAP, fd, len, range);
+    if (e == 0) return 0;
+    errno = e;
+    return -1;
+}
+
+static int wasix_copy_publish(uintptr_t start, uintptr_t end, int unmap) {
+    uint64_t addr = start;
+    int e = __wasilibc_shm_file(unmap ? WASIX_SHM_FILE_COPY_UNMAP : WASIX_SHM_FILE_COPY_SYNC,
+                                  -1, end - start, &addr);
+    if (e == 0) return 0;
+    errno = e;
+    return -1;
+}
 
 // firebox#SAH (native-only, #5WQ mechanism): the HOST mprotect libcall. Applies
 // a host `region::protect` to `[offset, offset+len)` of the guest linear memory
@@ -388,6 +414,7 @@ struct map {
                        // the 4096 POSIX page for an ordinary mapping, the 64 KiB
                        // host page (WASIX_MMAN_HOST_PAGE_SIZE) for an enforced one
     int fd;
+    int host_copy;
     // firebox#SAH: host-mprotect bookkeeping.
     //   prefix         distance from the user addr back to the aligned_alloc base
     //                  (== WASIX_MMAN_PAGE_SIZE for the compact 4 KiB-prefixed
@@ -687,6 +714,7 @@ static struct {
     size_t len;
     int owned;
     int wb_fd;
+    int host_copy;
     off_t wb_off;
 } g_fixed_maps[WASIX_MMAN_FIXED_MAX];
 static int g_fixed_count;
@@ -1029,7 +1057,9 @@ static int wasix_fixed_contains(uintptr_t addr) {
 // Best-effort like that path's munmap; returns -1 if a pwrite failed (msync
 // reports it). Caller holds g_vma_lock. A fixed mapping lives below
 // memory.size, so its bytes are written straight from linear memory.
-static int wasix_fixed_writeback_locked(int i, uintptr_t s, uintptr_t e) {
+static int wasix_fixed_writeback_locked(int i, uintptr_t s, uintptr_t e, int unmap) {
+    if (g_fixed_maps[i].host_copy)
+        return wasix_copy_publish(s, e, unmap);
     const int fd = g_fixed_maps[i].wb_fd;
     if (fd < 0) return 0;
     const uintptr_t fa = g_fixed_maps[i].addr;
@@ -1084,7 +1114,7 @@ static int wasix_fixed_unmap_locked(uintptr_t a, uintptr_t b) {
         const int wb_fd = g_fixed_maps[i].wb_fd;
         const off_t wb_off = g_fixed_maps[i].wb_off;
         // firebox#MMP: the piece's stores reach the file before it goes away.
-        wasix_fixed_writeback_locked(i, s, e);
+        wasix_fixed_writeback_locked(i, s, e, 1);
         if (s == fa && e == fb) {
             if (wb_fd >= 0) (void)close(wb_fd);
             g_fixed_maps[i] = g_fixed_maps[--g_fixed_count];   // re-examine slot i
@@ -1100,6 +1130,7 @@ static int wasix_fixed_unmap_locked(uintptr_t a, uintptr_t b) {
                     g_fixed_maps[g_fixed_count].len = (size_t)(fb - e);
                     g_fixed_maps[g_fixed_count].owned = owned;
                     g_fixed_maps[g_fixed_count].wb_fd = wb_fd >= 0 ? tail_fd : -1;
+                    g_fixed_maps[g_fixed_count].host_copy = g_fixed_maps[i].host_copy;
                     g_fixed_maps[g_fixed_count].wb_off = wb_off + (off_t)(e - fa);
                     g_fixed_count++;
                 }
@@ -1166,6 +1197,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // stores are written back (see g_fixed_maps' `wb_fd`). dup()'s errno (EMFILE)
     // is kept, as on the private-copy path.
     int wb_fd = -1;
+    const int copy = (flags & MAP_SHARED) && !(flags & MAP_ANON) && wasix_copy_supported();
     if ((flags & MAP_SHARED) && !(flags & MAP_ANON) && (prot & PROT_WRITE) && fd >= 0 &&
         (wb_fd = dup(fd)) < 0)
         return MAP_FAILED;
@@ -1181,9 +1213,9 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // firebox#MMP: a written-back mapping must be registered, or its stores are
     // lost; refuse it while the registry is (nearly — a split may need a slot)
     // full, before anything changes. ENOMEM: the mapping limit.
-    if (wb_fd >= 0 && g_fixed_count >= WASIX_MMAN_FIXED_MAX - 1) {
+    if ((wb_fd >= 0 || copy) && g_fixed_count >= WASIX_MMAN_FIXED_MAX - 1) {
         wasix_vma_lock_release();
-        (void)close(wb_fd);
+        if (wb_fd >= 0) (void)close(wb_fd);
         errno = ENOMEM;
         return MAP_FAILED;
     }
@@ -1245,6 +1277,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
         g_fixed_maps[g_fixed_count].len = (size_t)(span_end - target);
         g_fixed_maps[g_fixed_count].owned = owned;
         g_fixed_maps[g_fixed_count].wb_fd = wb_fd;
+        g_fixed_maps[g_fixed_count].host_copy = 0;
         g_fixed_maps[g_fixed_count].wb_off = offset;
         g_fixed_count++;
         registered = 1;
@@ -1281,7 +1314,27 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
     // the NEW file's byte there, not the replaced mapping's).
     const size_t extent = wasix_posix_extent(length);
     wasix_host_widen_rw(target, extent);
-    if ((flags & MAP_ANON) == 0) {
+    if (copy) {
+        wasix_vma_lock_acquire();
+        const int copy_rc = wasix_copy_map(fd, target, extent, offset, prot);
+        if (copy_rc == 0) {
+            for (int i = 0; i < g_fixed_count; i++) {
+                if (g_fixed_maps[i].addr == target) {
+                    g_fixed_maps[i].host_copy = 1;
+                    break;
+                }
+            }
+        }
+        wasix_vma_lock_release();
+        if (copy_rc < 0) {
+            const int e = errno;
+            wasix_fixed_disarm_writeback(target);
+            (void)munmap(addr, length);
+            errno = e;
+            return MAP_FAILED;
+        }
+    }
+    if ((flags & MAP_ANON) == 0 && !copy) {
         char *body = (char *)addr;
         size_t rem = extent;
         off_t off = offset;
@@ -1305,7 +1358,7 @@ static void *wasix_mmap_fixed(void *addr, size_t length, int prot, int flags,
             off += n;
             body += (size_t)n;
         }
-    } else {
+    } else if (flags & MAP_ANON) {
         memset(addr, 0, extent);
     }
     // firebox#6Q8: the new mapping's own protection — the other half of MAP_FIXED
@@ -1497,7 +1550,8 @@ static int wasix_frags_take_locked(uintptr_t a, uintptr_t b, struct wasix_piece 
     for (size_t i = 0; i < g_frag_count; i++) {
         struct wasix_frag *f = &g_frags[i];
         if (!(f->start < b && a < f->end)) continue;
-        if (shared_only && !wasix_map_is_writable_shared_file(f->hdr)) continue;
+        if (shared_only && !f->hdr->host_copy && !wasix_map_is_writable_shared_file(f->hdr))
+            continue;
         uintptr_t s = f->start > a ? f->start : a;
         uintptr_t e = f->end < b ? f->end : b;
         struct map *m = f->hdr;
@@ -1526,7 +1580,9 @@ static int wasix_frags_take_locked(uintptr_t a, uintptr_t b, struct wasix_piece 
 // Would unmapping [a, b) split a fragment (one strictly contains the range)?
 static int wasix_frags_would_split_locked(uintptr_t a, uintptr_t b, int shared_only) {
     for (size_t i = 0; i < g_frag_count; i++) {
-        if (shared_only && !wasix_map_is_writable_shared_file(g_frags[i].hdr)) continue;
+        if (shared_only && !g_frags[i].hdr->host_copy &&
+            !wasix_map_is_writable_shared_file(g_frags[i].hdr))
+            continue;
         if (g_frags[i].start < a && b < g_frags[i].end) return 1;
     }
     return 0;
@@ -1551,6 +1607,8 @@ static struct map *wasix_frags_pin_locked(uintptr_t addr, uintptr_t *end) {
 // file's). firebox#7C5: a MAP_PRIVATE mapping never writes back (mmap/7-2,
 // munmap/4-1). Returns 0, or -1 with errno from pwrite.
 static int wasix_map_writeback(const struct map *m, uintptr_t start, uintptr_t end) {
+    if (m->host_copy)
+        return wasix_copy_publish(start, end, 0);
     if (m->fd < 0 || (m->prot & PROT_WRITE) == 0 || (m->flags & MAP_PRIVATE) != 0 ||
         (m->flags & MAP_ANON) != 0)
         return 0;
@@ -1624,7 +1682,10 @@ static void wasix_map_finalize(struct map *m) {
 static void wasix_piece_release(const struct wasix_piece *pc) {
     struct map *m = pc->hdr;
     // Linux writes a shared mapping's dirty pages back when they are unmapped.
-    (void)wasix_map_writeback(m, pc->start, pc->end);
+    if (m->host_copy)
+        (void)wasix_copy_publish(pc->start, pc->end, 1);
+    else
+        (void)wasix_map_writeback(m, pc->start, pc->end);
     if (m->backing == WASIX_MMAN_BACKING_RESERVE) {
         // The piece's pages are the reservation allocator's again, right now —
         // this is what lets a later MAP_FIXED_NOREPLACE into the freed sub-range
@@ -2212,6 +2273,7 @@ void *mmap(void *addr, size_t length, int prot, int flags,
     map->body_len = body_len;
     map->prefix = prefix;
     map->host_protected = 0;
+    map->host_copy = 0;
     map->backing = reserve_backed ? WASIX_MMAN_BACKING_RESERVE
                                   : WASIX_MMAN_BACKING_DLMALLOC;
     map->nfrags = 0;                  // firebox#FWX: registered below, once seeded
@@ -2249,13 +2311,24 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         }
 
         map->fd = new_fd;
+        if ((flags & MAP_SHARED) && wasix_copy_supported()) {
+            if (wasix_copy_map(new_fd, (uintptr_t)addr,
+                               wasix_posix_extent(length), offset, prot) < 0) {
+                const int e = errno;
+                close(new_fd);
+                free(base);
+                errno = e;
+                return MAP_FAILED;
+            }
+            map->host_copy = 1;
+        }
 
         // firebox#MMP: read the whole POSIX extent (the last page included, see
         // wasix_posix_extent); anything past the file end remains zero from the
         // memset. A short file (pread returns 0 before the extent is exhausted)
         // leaves the remainder zero too.
         char *body = (char *)addr;
-        size_t to_read = wasix_posix_extent(length);
+        size_t to_read = map->host_copy ? 0 : wasix_posix_extent(length);
         off_t roff = offset;
         while (to_read > 0) {
             const ssize_t nread = pread(fd, body, to_read, roff);
@@ -2387,7 +2460,7 @@ int munmap(void *addr, size_t length) {
     // memory_size / malloc-header geometry checks here — the whole reason this
     // guard exists is that the window legitimately lives above memory_size, and
     // the host (not the guest free-list) owns the segment lifetime.
-    if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE) {
+    if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE && !wasix_copy_supported()) {
         uintptr_t wa = (uintptr_t)addr;
         if (length == 0 ||                              // empty range
             (wa & (WASIX_MMAN_PAGE_SIZE - 1)) != 0) {   // addr not page-aligned
@@ -2537,7 +2610,7 @@ int msync (void *addr, size_t length, int flags) {
             const uintptr_t fa = g_fixed_maps[i].addr;
             const uintptr_t fb = fa + g_fixed_maps[i].len;
             if (fa < mb && ma < fb &&
-                wasix_fixed_writeback_locked(i, fa > ma ? fa : ma, fb < mb ? fb : mb) != 0)
+                wasix_fixed_writeback_locked(i, fa > ma ? fa : ma, fb < mb ? fb : mb, 0) != 0)
                 fixed_rc = -1;
         }
     }
@@ -2562,7 +2635,7 @@ int msync (void *addr, size_t length, int flags) {
     // munmap() guard above — the #F4A window core installs the window on wasm64
     // at the same SHM_BASE in the conformance posture, so a wasm64 msync of a
     // window pointer must take this no-op path, not the header recovery below.
-    if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE) {
+    if ((uintptr_t)addr >= WASIX_SHM_WINDOW_BASE && !wasix_copy_supported()) {
         if (((uintptr_t)addr & (WASIX_MMAN_PAGE_SIZE - 1)) != 0) {
             errno = EINVAL;
             return -1;
