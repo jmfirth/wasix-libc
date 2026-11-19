@@ -16,7 +16,8 @@ ssize_t write(int fildes, const void *buf, size_t nbyte) {
   __wasi_ciovec_t iov = {.buf = buf, .buf_len = nbyte};
   __wasi_size_t bytes_written;
   __wasi_errno_t error =
-      __wasi_fd_write(fildes, &iov, 1, &bytes_written);
+      __CLOUDLIBC_CP_CALL(fildes, __CLOUDLIBC_CP_SEND,
+      __wasi_fd_write(fildes, &iov, 1, &bytes_written));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's own `__syscall_cp_c` rule) so a COMPLETED call never

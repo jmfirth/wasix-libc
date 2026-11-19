@@ -15,7 +15,8 @@ ssize_t read(int fildes, void *buf, size_t nbyte) {
 
   __wasi_iovec_t iov = {.buf = buf, .buf_len = nbyte};
   __wasi_size_t bytes_read;
-  __wasi_errno_t error = __wasi_fd_read(fildes, &iov, 1, &bytes_read);
+  __wasi_errno_t error = __CLOUDLIBC_CP_CALL(fildes, __CLOUDLIBC_CP_RECV,
+      __wasi_fd_read(fildes, &iov, 1, &bytes_read));
   if (error != 0) {
     // firebox#TWX — a cancel that arrived while we were parked. Keyed on
     // EINTR (musl's own `__syscall_cp_c` rule) so a COMPLETED call never

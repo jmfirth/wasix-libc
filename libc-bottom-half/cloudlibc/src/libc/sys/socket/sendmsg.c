@@ -32,7 +32,8 @@ ssize_t sendmsg(int socket, const struct msghdr* msg, int flags) {
     // already-pending cancel BEFORE parking in the host await.
     __cloudlibc_testcancel();
 
-    error = __wasi_sock_send(socket, si_data, si_data_len, si_flags, &so_datalen);
+    error = __CLOUDLIBC_CP_CALL(socket, __CLOUDLIBC_CP_SEND,
+      __wasi_sock_send(socket, si_data, si_data_len, si_flags, &so_datalen));
   } else {
     struct sockaddr *addr = (struct sockaddr *)msg->msg_name;
     socklen_t addrlen = msg->msg_namelen;
@@ -46,7 +47,8 @@ ssize_t sendmsg(int socket, const struct msghdr* msg, int flags) {
       errno = guest_error;
       return -1;
     }
-    error = __wasi_sock_send_to(socket, si_data, si_data_len, si_flags, &peer_addr, &so_datalen);
+    error = __CLOUDLIBC_CP_CALL(socket, __CLOUDLIBC_CP_SEND,
+      __wasi_sock_send_to(socket, si_data, si_data_len, si_flags, &peer_addr, &so_datalen));
   }
 
   if (error != 0) {

@@ -37,17 +37,19 @@ ssize_t recvmsg(int socket, struct msghdr *restrict msg, int flags) {
     // already-pending cancel BEFORE parking in the host await.
     __cloudlibc_testcancel();
 
-    error = __wasi_sock_recv(socket,
+    error = __CLOUDLIBC_CP_CALL(socket, __CLOUDLIBC_CP_RECV,
+      __wasi_sock_recv(socket,
 								ri_data, ri_data_len, ri_flags,
 								&ro_datalen,
-								&ro_flags);
+								&ro_flags));
   } else {
     __wasi_addr_port_t peer_addr;
-    error = __wasi_sock_recv_from(socket,
+    error = __CLOUDLIBC_CP_CALL(socket, __CLOUDLIBC_CP_RECV,
+      __wasi_sock_recv_from(socket,
 								ri_data, ri_data_len, ri_flags,
 								&ro_datalen,
 								&ro_flags,
-								&peer_addr);
+								&peer_addr));
     if (error != 0) {
       // firebox#TWX — a cancel that arrived while we were parked. Keyed on
       // EINTR (musl's `__syscall_cp_c` rule, pthread_cancel.c:92) so a COMPLETED

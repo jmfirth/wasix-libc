@@ -38,6 +38,23 @@ static int __futex4_cp(volatile void *addr, int op, int val, const struct timesp
 	}
 	return __wasilibc_futex_wait_wasix(addr, op, val, max_wait_ns);
 }
+
+static int cancel_at_wait(struct pthread *self, int result)
+{
+	__testcancel_async();
+	if (!self || self->canceldisable == PTHREAD_CANCEL_DISABLE
+	    || !__atomic_load_n(&self->cancel, __ATOMIC_ACQUIRE))
+		return result;
+
+	/* Only this thread changes canceldisable. Once cancel is observed
+	 * even a MASKED cancellation must be reported to the caller, which
+	 * removes its waiter and reacquires the mutex before unwinding. */
+	int masked = self->canceldisable == PTHREAD_CANCEL_MASKED;
+	if (masked && result == ETIMEDOUT)
+		return result;
+	__testcancel();
+	return masked ? ECANCELED : result;
+}
 #endif
 
 int __timedwait_cp(volatile int *addr, int val,
@@ -52,8 +69,7 @@ int __timedwait_cp(volatile int *addr, int val,
 	 * park below; the EINTR-synthesis block after `__futex4_cp` consults them.
 	 * Declared here (not in the upstream build) so the upstream arm carries no
 	 * unused locals. */
-	struct pthread *self = 0;
-	int sigdisp_before = 0;
+	struct pthread *self = __pthread_self();
 #endif
 
 	if (priv) priv = FUTEX_PRIVATE;
@@ -71,19 +87,12 @@ int __timedwait_cp(volatile int *addr, int val,
 	}
 
 #ifndef __wasilibc_unmodified_upstream
-	/* firebox#5RE — act on a pending ASYNCHRONOUS cancel BEFORE parking, so a
-	 * cancel that arrived after the caller decided to wait but before this
-	 * thread actually parks in `__futex4_cp` is honored without depending on a
-	 * subsequent futex wake. Together with the post-wait `__testcancel_async`
-	 * below this covers both orderings (cancel-before-park / cancel-during-
-	 * park) — the cancel-during-park case is delivered by the runtime's futex
-	 * EINTR-epoch wake. Without this pre-check, an async cancel that races
-	 * ahead of a PERMANENT park (e.g. a contended `pthread_mutex_lock` whose
-	 * holder never releases) would never be acted on (stochastic
-	 * setcanceltype/1-1). Deferred cancellation is intentionally NOT checked
-	 * here: this is the cancel-DISABLED `__timedwait` wrapper path, and only
-	 * async cancellation is defined to fire where deferred is bracketed off. */
-	__testcancel_async();
+	/* A request can arrive after the caller's cancellation check and
+	 * before it parks, for example while cond_wait unlocks the mutex.
+	 * Check the request itself here. The futex interrupt epoch covers
+	 * requests arriving after this check. */
+	r = cancel_at_wait(self, 0);
+	if (r) return r;
 
 	/* firebox#G13 / #NSL — snapshot THIS thread signal-dispatch counter
 	 * immediately before the park. `sigdispatch_tick` is bumped by
@@ -95,13 +104,22 @@ int __timedwait_cp(volatile int *addr, int val,
 	 * so only a handler that runs DURING the park is counted; the local is
 	 * preserved across the asyncify deep-sleep/rewind of `__futex4_cp` exactly
 	 * like `r`/`top`. */
-	if (self == 0) self = __pthread_self();
-	if (self) sigdisp_before = self->sigdispatch_tick;
+	int sigdisp_before = self ? self->sigdispatch_tick : 0;
 #endif
 
 	r = -__futex4_cp(addr, FUTEX_WAIT|priv, val, top);
 
 #ifndef __wasilibc_unmodified_upstream
+	/* The host waits on a relative timer. Only the caller's clock can
+	 * decide whether the absolute deadline has passed. If the timer
+	 * expired first, let the caller recheck its condition and deadline. */
+	if (r == ETIMEDOUT && at) {
+		if (__clock_gettime(clk, &to)) return EINVAL;
+		if (to.tv_sec < at->tv_sec ||
+		    (to.tv_sec == at->tv_sec && to.tv_nsec < at->tv_nsec))
+			r = 0;
+	}
+
 	/* firebox#G13 / #NSL — restore the Linux futex(FUTEX_WAIT)==-EINTR contract
 	 * at the shared funnel. On Linux a parked futex woken by a delivered signal
 	 * returns -EINTR, so `__timedwait_cp` returns EINTR and every musl primitive
@@ -145,57 +163,9 @@ int __timedwait_cp(volatile int *addr, int val,
 #endif
 
 #ifndef __wasilibc_unmodified_upstream
-	/* firebox#5RE — __timedwait_cp is a POSIX cancellation point (the
-	 * cancellable form used by pthread_cond_wait / sem_wait). Upstream musl
-	 * acts on a pending cancel via the SIGCANCEL handler redirecting the PC
-	 * to __cp_cancel mid-syscall; WASIX has no such handler. Instead, a
-	 * pthread_cancel wakes a parked target (the runtime enqueue interrupts
-	 * the futex wait — firebox#5RE wasmer arm), `__futex4_cp` returns, and we
-	 * observe the pending cancel HERE and unwind. `__testcancel` is a no-op
-	 * unless this thread has a pending cancel with cancellation enabled, in
-	 * which case it calls `__cancel` → `pthread_exit(PTHREAD_CANCELED)`,
-	 * running the registered cleanup handlers (LIFO) + TSD destructors.
-	 * Placed after the wait so a thread that blocks, then gets a cancel, acts
-	 * on it on return — the deferred-cancellation contract.
-	 *
-	 * `__testcancel_async` additionally honors a pending ASYNCHRONOUS cancel
-	 * EVEN when deferred cancellation is bracketed off — async cancellation
-	 * (PTHREAD_CANCEL_ASYNCHRONOUS) is defined to take effect at any time,
-	 * including inside the non-cancellation-point `__timedwait` wrapper that
-	 * pthread_mutex_lock uses (which sets PTHREAD_CANCEL_DISABLE around the
-	 * wait). Without this, an async-cancel of a thread blocked on a contended
-	 * mutex is never acted on (the deferred `__testcancel` sees DISABLE and
-	 * the mutex wrapper just re-waits). matches glibc/upstream-musl, where the
-	 * SIGCANCEL handler's `cancelasync` branch fires regardless of the
-	 * deferred state. */
-	__testcancel_async();
-	/* firebox#QBH — surface a MASKED-state deferred cancel as ECANCELED so the
-	 * pthread_cond_wait loop unwinds. pthread_cond_wait brackets its wait in
-	 * PTHREAD_CANCEL_MASKED and needs __timedwait_cp to RETURN ECANCELED so its
-	 * loop (pthread_cond_timedwait.c: `while (*fut==seq && (!e || e==EINTR))`)
-	 * breaks this iteration and proceeds to PTHREAD_CANCELED. In MASKED state
-	 * __testcancel()->__cancel() does NOT pthread_exit — it DISARMS cancellation
-	 * (sets canceldisable=DISABLE) and, upstream, returns -ECANCELED that
-	 * __syscall_cp_c surfaces as the cancellable syscall's result (`r=__cancel()`).
-	 * The WASIX port has no __syscall_cp_asm, so the cancel is acted on by the
-	 * __testcancel() call below, but its -ECANCELED was DISCARDED: __timedwait_cp
-	 * returned the spurious Woken (r==0) from the SIGCANCEL interrupt, the cond
-	 * loop saw e==0 with *fut==seq, and re-parked with cancellation now DISABLED
-	 * (set by __cancel) — the cancel was lost until the caller's own timeout fired
-	 * (libc-test pthread_cond_wait-cancel_ignored). Detect the MASKED-cancel here
-	 * (pending cancel + canceldisable==MASKED — the async and ENABLE cases already
-	 * pthread_exit'd inside __testcancel_async()/the __testcancel() below and never
-	 * return) and fold ECANCELED into r; the __testcancel() below still performs
-	 * the DISABLE-disarm exactly as before. ETIMEDOUT is deliberately preserved:
-	 * a genuine timeout that races a cancel keeps its ETIMEDOUT (matching upstream,
-	 * which converts only the EINTR-interrupt to __cancel and never a timeout) and
-	 * acts on the still-pending cancel at the next cancellation point. That guard
-	 * also makes this fix inert on the #486 timeout path — with no pending cancel
-	 * the condition is false and ETIMEDOUT flows through untouched. */
-	if (r != ETIMEDOUT && self && self->cancel
-	    && self->canceldisable == PTHREAD_CANCEL_MASKED)
-		r = ECANCELED;
-	__testcancel();
+	/* A cancel arriving after this check stays pending. Every invocation
+	 * that disarms a MASKED cancel must also publish its outcome. */
+	r = cancel_at_wait(self, r);
 #endif
 
 	return r;

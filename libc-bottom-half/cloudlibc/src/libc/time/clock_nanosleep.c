@@ -166,6 +166,12 @@ int clock_nanosleep(clockid_t clock_id, int flags, const struct timespec *rqtp,
         want_remaining &&
         __wasi_clock_time_get(__WASI_CLOCKID_MONOTONIC, 1, &mono_start) == 0;
 
+    // Act on a request that was already pending, including one made by
+    // this thread itself. Check after reading the clock, immediately
+    // before the blocking import.
+    if (&__testcancel != 0)
+      __testcancel();
+
     // Block until polling event is triggered.
     __wasi_size_t nevents;
     __wasi_event_t ev;
