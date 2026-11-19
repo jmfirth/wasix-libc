@@ -344,6 +344,8 @@ struct fbx_deliver {
 	void          (*fn)(union sigval);
 };
 
+extern int32_t __wasilibc_thread_signal_posix_timer(int32_t tid, int32_t signo);
+
 static void *fbx_notify_trampoline(void *p)
 {
 	struct fbx_deliver *d = p;
@@ -381,8 +383,7 @@ static void fbx_deliver(const struct fbx_deliver *d)
 		a_or((volatile int *)&d->owner->pending_sigs[word], bit);
 		a_or(&__wasm_pending_sigs[word], bit);
 	}
-	__wasi_errno_t e = __wasi_thread_signal(d->tid, (__wasi_signal_t)sig);
-	(void)e;   /* best-effort delivery; a dead target thread is non-fatal */
+	(void)__wasilibc_thread_signal_posix_timer(d->tid, sig);
 }
 
 /* ---- the manager thread ---- */

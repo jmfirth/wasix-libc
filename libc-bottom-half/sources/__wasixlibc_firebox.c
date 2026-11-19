@@ -113,6 +113,14 @@ __wasi_errno_t __wasi_fd_ioctl(__wasi_fd_t fd,uint32_t request,void *argp,int32_
 int32_t __imported_wasix_fbx_shm_map(int64_t,int64_t,intptr_t,intptr_t) __attribute__((__import_module__(FBX_WASIX_V1),__import_name__("shm_map")));
 int32_t __wasilibc_shm_map(uint64_t inode,uint64_t len,uint64_t *ret_offset,uint32_t *ret_created){return __imported_wasix_fbx_shm_map((int64_t)inode,(int64_t)len,(intptr_t)ret_offset,(intptr_t)ret_created);}
 
+/* Keep timer expirations distinguishable from ordinary pending signals at exec. */
+int32_t __imported_wasix_fbx_thread_signal_posix_timer(int32_t, int32_t)
+    __attribute__((__import_module__(FBX_WASIX_V1), __import_name__("thread_signal_posix_timer")));
+int32_t __wasilibc_thread_signal_posix_timer(int32_t tid, int32_t signo)
+{
+    return __imported_wasix_fbx_thread_signal_posix_timer(tid, signo);
+}
+
 /* firebox#V12 (Stage-1 1c gap #3) — the shared-window UNLINK import.
  *
  * Invalidates the host-global shared-window segment for `inode`: the host drops
