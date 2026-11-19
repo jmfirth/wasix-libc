@@ -1,7 +1,7 @@
 #include <mqueue.h>
 #include "syscall.h"
 #ifndef __wasilibc_unmodified_upstream
-#include "mq_impl.h" /* firebox#KS9 */
+#include "mq_impl.h"
 #endif
 
 int mq_close(mqd_t mqd)

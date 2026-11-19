@@ -13,6 +13,10 @@
 #endif
 #include "libc.h"
 
+#ifndef __wasilibc_unmodified_upstream
+#include <__wasilibc_mq.h>
+#endif
+
 #define JT(x) (-256|(x))
 #define VER JT(1)
 #define JT_ARG_MAX JT(2)
@@ -246,6 +250,12 @@ long sysconf(int name)
 		extern int __wasilibc_mprotect_host(uintptr_t, uintptr_t, int);
 		return __wasilibc_mprotect_host(0, 0, 0) == 0 ? _POSIX_VERSION : -1;
 	}
+#ifndef __wasilibc_unmodified_upstream
+	if (name == _SC_MESSAGE_PASSING) return _POSIX_VERSION;
+	if ((name == _SC_MQ_PRIO_MAX || name == _SC_MQ_OPEN_MAX) && __wasilibc_mq_host_supported()) {
+		return name == _SC_MQ_PRIO_MAX ? MQ_PRIO_MAX : -1;
+	}
+#endif
 
 #ifndef __wasilibc_unmodified_upstream
 	if (name == _SC_THREAD_PROCESS_SHARED) {

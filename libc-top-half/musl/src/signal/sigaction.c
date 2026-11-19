@@ -964,46 +964,28 @@ void __fbx_clear_pending_on_fork(void) {
 #define __FBX_WASIX_MODULE "wasix_32v1"
 #endif
 
-extern int32_t __imported_fbx_signal_info_get(int32_t sig, void *ret_value,
-                                              void *ret_pid)
+extern int32_t __imported_fbx_signal_info_get_full(int32_t sig, uint64_t *value,
+                                                   uint32_t *pid, uint32_t *uid,
+                                                   int32_t *code, uint32_t *pending)
 	__attribute__((__import_module__(__FBX_WASIX_MODULE),
-	               __import_name__("signal_info_get")));
+	               __import_name__("signal_info_get_full")));
 
-/* firebox#4WF — host-provided si_code pull for a host-originated signal.
- *
- * A SIGCHLD delivered to a parent because a child was STOPPED or CONTINUED
- * carries si_code == CLD_STOPPED / CLD_CONTINUED on Linux (Open POSIX
- * sigaction/10-1). Firebox synthesises those edges in the host
- * (WasiProcess::set_stopped / set_continued), but the WASI (pid, signal)
- * delivery seam has no si_code field, so the guest cannot know the code the
- * host chose. This import returns it: 0 (SUCCESS) with *ret_code written when
- * the host has a code queued for `sig`, nonzero (ENOENT) for a bare
- * kill()/raise()-delivered signal (caller keeps SI_USER).
- *
- * Inv 8: ADDITIVE (a NEW import, not a widening of signal_info_get — widening
- * the 3-param signal_info_get would break every #EMN sigqueue guest already
- * emitting the 3-arg form). A guest that never handles a host-coded SIGCHLD
- * never emits this import, so prebuilt upstream wasmer.io artifacts are
- * unaffected. Arity: 2 params (i32 sig, ptr ret_code) -> i32 errno. */
-extern int32_t __imported_fbx_signal_code_get(int32_t sig, void *ret_code)
-	__attribute__((__import_module__(__FBX_WASIX_MODULE),
-	               __import_name__("signal_code_get")));
-
-static int __fbx_signal_info_fill_si(int sig, siginfo_t *si) {
-	uint64_t value = 0;
-	uint32_t spid = 0;
-	/* 0 == __WASI_ERRNO_SUCCESS (payload written); nonzero == ENOENT (none). */
-	if (__imported_fbx_signal_info_get(sig, &value, &spid) != 0)
+__attribute__((__visibility__("hidden")))
+int __fbx_signal_info_fill_si(int sig, siginfo_t *si)
+{
+	uint64_t value;
+	uint32_t pid, uid, pending;
+	int32_t code;
+	if (__imported_fbx_signal_info_get_full(sig, &value, &pid, &uid, &code, &pending))
 		return 0;
-	union sigval sv;
-	memset(&sv, 0, sizeof sv);
-	memcpy(&sv, &value, sizeof sv);   /* width-correct: 4 bytes wasm32, 8 wasm64 */
+	if (!si) return pending ? 2 : 1;
 	memset(si, 0, sizeof *si);
 	si->si_signo = sig;
-	si->si_code  = SI_QUEUE;
-	si->si_value = sv;
-	si->si_pid   = (pid_t)spid;
-	return 1;
+	si->si_code = code;
+	memcpy(&si->si_value, &value, sizeof si->si_value);
+	si->si_pid = (pid_t)pid;
+	si->si_uid = (uid_t)uid;
+	return pending ? 2 : 1;
 }
 #endif
 
@@ -2081,51 +2063,21 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 			 * holds for the whole drain — `sig` stays blocked for its
 			 * duration, identical to the per-delivery mask Linux re-applies,
 			 * since every drained instance is the same signal number. */
-			if (__fbx_rtsigq_pop_si(sig, &si)) {
+			if (__fbx_rtsigq_pop_si(sig, &si) || __fbx_signal_info_fill_si(sig, &si)) {
 				do {
 					handler_ran = 1;
 					__fbx_note_consumed(sig, &si);
 					__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
 					__fbx_invoke_handler(shape, 1, ksa.handler, sig, &si,
 					                     on_alt, alt_top);
-				} while (__fbx_rtsigq_pop_si(sig, &si));
-			} else if (__fbx_sig_is_rt(sig) && __fbx_signal_info_fill_si(sig, &si)) {
-				handler_ran = 1;
-				__fbx_prepare_pending_frame(sig, on_alt, alt_top, ksa.handler);
-				/* firebox#EMN — cross-process sigqueue si_value. The queued
-				 * value was sent by ANOTHER process, so it lives in the HOST,
-				 * not this process's `__fbx_rtsigq` ring (a forked child cannot
-				 * see the sender's guest memory, and the WASI proc_signal seam
-				 * carries no payload). `__fbx_signal_info_fill_si` pulls it via
-				 * the `signal_info_get` import and populates the real si_value/
-				 * si_code/si_pid, so the SA_SIGINFO handler observes the sent
-				 * value instead of a zero (sigqueue/1-1). When the host has no
-				 * queued value either, an RT dispatch delivers NOTHING (the
-				 * firebox#PNB rule stated at the end of this branch); a non-RT
-				 * signal falls through to the SI_USER default below. */
-				__fbx_invoke_handler(shape, 1, ksa.handler, sig, &si,
-				                     on_alt, alt_top);
+				} while (__fbx_sig_is_rt(sig)
+				         && (__fbx_rtsigq_pop_si(sig, &si)
+				             || __fbx_signal_info_fill_si(sig, &si)));
 			} else if (!__fbx_sig_is_rt(sig)) {
 				handler_ran = 1;
 				memset(&si, 0, sizeof si);
 				si.si_signo = sig;
 				si.si_code = SI_USER;
-				/* firebox#4WF — a SIGCHLD raised because a child was STOPPED
-				 * or CONTINUED carries si_code == CLD_STOPPED / CLD_CONTINUED
-				 * (Open POSIX sigaction/10-1). The host stamps that code
-				 * (set_stopped/set_continued) but the (pid, signal) WASI seam
-				 * can't carry it, so pull it via the additive signal_code_get
-				 * import. Scoped to SIGCHLD: it is the only signal for which
-				 * the host synthesises a si_code, and gating here keeps every
-				 * other SA_SIGINFO delivery free of the extra host round-trip.
-				 * A bare kill()/raise() SIGCHLD (no host code) returns ENOENT
-				 * and keeps the SI_USER default set above. */
-				if (sig == SIGCHLD) {
-					int32_t __fbx_code;
-					if (__imported_fbx_signal_code_get(sig, &__fbx_code) == 0) {
-						si.si_code = __fbx_code;
-					}
-				}
 				/* firebox#SGV — a timer's standard signal carries no record;
 				 * the timer machinery fills SI_TIMER/si_value/si_overrun. */
 				__fbx_note_consumed(sig, &si);
@@ -2161,13 +2113,8 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 			 * only errors were surplus invocations carrying si_code SI_USER —
 			 * this fallback firing on an empty ring.
 			 *
-			 * NOT fixed here, deliberately: the `fill_si` arm above delivers
-			 * the host stash ONCE though `fill_si` is a consuming pop, so N
-			 * coalesced EXTERNAL records may be under-delivered — the mirror
-			 * image of this over-count. That is a HYPOTHESIS with no
-			 * measurement behind it (this probe's records were all
-			 * same-process, i.e. the ring arm), so it is split to firebox#9MS
-			 * rather than shipped unvalidated next to a measured fix. */
+			 * The drain includes the host FIFO. Two queues can notify
+			 * the same blocked RT signal before its first dispatch. */
 		} else if (__fbx_sig_is_rt(sig)) {
 			/* firebox#VYD — 1-arg RT dispatch delivers RECORDS-ONLY.
 			 *
@@ -2210,9 +2157,12 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 			/* Standard signal (1..31): at-most-one-pending coalescing — deliver
 			 * ONCE (the pending bitmask has no depth; unchanged pre-#VYD path).
 			 * firebox#SGV — the instance's record is consumed with it, and a
-			 * handler whose own type takes a siginfo still gets one. */
+			 * handler whose own type takes a siginfo still gets one.
+			 * firebox#2FX (CMQ) — a host-queued record (another process's
+			 * sigqueue, a queue notification, a host-coded SIGCHLD) is
+			 * consumed the same way, so it never outlives its delivery. */
 			siginfo_t si;
-			if (!__fbx_rtsigq_pop_si(sig, &si)) {
+			if (!__fbx_rtsigq_pop_si(sig, &si) && !__fbx_signal_info_fill_si(sig, &si)) {
 				memset(&si, 0, sizeof si);
 				si.si_signo = sig;
 				si.si_code = SI_USER;
@@ -2232,8 +2182,10 @@ static void __fbx_dispatch_signal(int sig, int host_entry, int from_drain) {
 		__fbx_stdsigq_discard(sig);
 		__fbx_note_consumed(sig, NULL);
 		if (default_handler != 0) default_handler(sig);
+		/* firebox#2FX (CMQ) — SIG_DFL with no default handler drops the
+		 * instance: drop its host record with it. */
+		else (void)__fbx_signal_info_fill_si(sig, 0);
 	}
-	/* else: SIG_DFL with default_handler unset — drop. */
 
 	if (!(ksa.flags & SA_NODEFER)) {
 		__wasm_in_handler[sig] = 0;

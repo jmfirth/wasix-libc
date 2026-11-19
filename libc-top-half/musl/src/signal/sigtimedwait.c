@@ -75,6 +75,8 @@ extern volatile int __wasm_pending_sigs[];
  * back here too (sigwaitinfo/7-1: lowest-numbered RT signal first via the
  * low-to-high scan in __sigtw_claim, FIFO within a signal via the ring). */
 extern int __fbx_rtsigq_pop_si(int sig, siginfo_t *si);
+__attribute__((__visibility__("hidden")))
+int __fbx_signal_info_fill_si(int sig, siginfo_t *si);
 extern int __fbx_rtsigq_count(int sig);
 extern void __fbx_rtsig_repend(int sig);
 
@@ -170,7 +172,9 @@ static void __sigtw_settle(int own)
  * __fbx_note_consumed has the whole contract). */
 extern void __fbx_timer_signal_consumed(int sig, siginfo_t *si) __attribute__((__weak__));
 
-static void __sigtw_fill_si(siginfo_t *si, int sig)
+/* Returns nonzero when the host still holds more records for `sig`
+ * (firebox#2FX, CMQ), so the caller re-pends it. */
+static int __sigtw_fill_si(siginfo_t *si, int sig)
 {
 	/* firebox#SGV — the accepted instance's record is consumed whether or not
 	 * the caller asked for it (sigtimedwait(set, NULL, ts) is valid). Leaving
@@ -182,19 +186,28 @@ static void __sigtw_fill_si(siginfo_t *si, int sig)
 	 * synchronous accept returns the QUEUED value, FIFO within a signal; the
 	 * caller's low-to-high scan in __sigtw_claim already picks the lowest RT
 	 * signal first, so this just pops that signal's FIFO head). A standard
-	 * signal's single record (SI_QUEUE, SI_ASYNCIO) pops the same way. */
+	 * signal's single record (SI_QUEUE, SI_ASYNCIO) pops the same way.
+	 * firebox#2FX (CMQ) — then the host's record for it (another process's
+	 * sigqueue, a queue notification, a host-coded SIGCHLD). */
+	int host_pending = 0;
 	if (!__fbx_rtsigq_pop_si(sig, si)) {
-		/* Minimal siginfo: only si_signo is authoritative from the libc
-		 * pending bitmask (a raise()/kill()-delivered signal carries no
-		 * queued value). si_code SI_USER matches a kill()/raise()-delivered
-		 * signal. */
-		memset(si, 0, sizeof *si);
-		si->si_signo = sig;
-		si->si_code = SI_USER;
+		int host_record = __fbx_signal_info_fill_si(sig, si);
+		if (host_record) {
+			host_pending = host_record == 2;
+		} else {
+			/* Minimal siginfo: only si_signo is authoritative from the libc
+			 * pending bitmask (a raise()/kill()-delivered signal carries no
+			 * queued value). si_code SI_USER matches a kill()/raise()-delivered
+			 * signal. */
+			memset(si, 0, sizeof *si);
+			si->si_signo = sig;
+			si->si_code = SI_USER;
+		}
 	}
 	/* A timer's instance: SI_TIMER, si_value, si_timerid, si_overrun, and
 	 * the timer settles (POSIX: the overrun count is reset on acceptance). */
 	if (__fbx_timer_signal_consumed != NULL) __fbx_timer_signal_consumed(sig, si);
+	return host_pending;
 }
 
 int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const struct timespec *restrict timeout)
@@ -244,14 +257,14 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 		if (sig) {
 			__sigtw_set_acceptance(set, 0);
 			__sigtw_settle(own);
-			__sigtw_fill_si(si, sig);
+			int host_pending = __sigtw_fill_si(si, sig);
 			/* firebox#C2Q — RT depth coherence: __sigtw_claim cleared the
 			 * pending bit, but if more queued records remain for this RT
 			 * signal, re-mark it pending so the next accept finds them (FIFO
 			 * depth). A no-op for a non-RT signal or a now-empty queue (the
 			 * common single-instance case), so the standard-signal path is
 			 * behaviorally unchanged. */
-			if (__fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
+			if (host_pending || __fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
 			return sig;
 		}
 
@@ -274,9 +287,9 @@ int sigtimedwait(const sigset_t *restrict set, siginfo_t *restrict si, const str
 			__sigtw_set_acceptance(set, 0);
 			if (sig) {
 				__sigtw_settle(own);
-				__sigtw_fill_si(si, sig);
+				int host_pending = __sigtw_fill_si(si, sig);
 				/* firebox#C2Q — RT depth coherence (see the main-loop claim). */
-				if (__fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
+				if (host_pending || __fbx_rtsigq_count(sig) > 0) __fbx_rtsig_repend(sig);
 				return sig;
 			}
 			errno = EAGAIN;

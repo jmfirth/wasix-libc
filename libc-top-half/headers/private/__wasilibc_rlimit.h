@@ -24,4 +24,14 @@ extern uintptr_t __wasilibc_sbrk_max;
 // Defined in setrlimit.c, which owns the process rlimit table.
 void __wasilibc_get_stored_rlimit(int resource, struct rlimit *rlim);
 
+#ifndef __wasilibc_unmodified_upstream
+#ifdef __wasm64__
+#define RLIMIT_WASIX_MODULE "wasix_64v1"
+#else
+#define RLIMIT_WASIX_MODULE "wasix_32v1"
+#endif
+extern int32_t __wasilibc_mq_rlimit(const uint64_t *set, uint64_t *get)
+	__attribute__((__import_module__(RLIMIT_WASIX_MODULE), __import_name__("mq_rlimit")));
+#endif
+
 #endif
