@@ -9,11 +9,21 @@
 #include <errno.h>
 #include <time.h>
 #include <wasi/libc.h>
+#include <wasi/api_firebox.h>
 
 int clock_getres(clockid_t clock_id, struct timespec *res) {
   uintptr_t raw = (uintptr_t)clock_id;
   __wasi_timestamp_t ts;
   __wasi_errno_t error;
+  if (clock_id == CLOCK_BOOTTIME) {
+    error = __wasix_clock_boottime_get(1, &ts);
+    if (error) {
+      errno = __wasilibc_errno_from_wasi(error);
+      return -1;
+    }
+    if (res) *res = timestamp_to_timespec(ts);
+    return 0;
+  }
   // firebox#79E — reject an unknown clock_id with EINVAL (POSIX) instead of
   // dereferencing it as a pointer-ABI clockid (the old unconditional deref
   // faulted out-of-bounds on bogus integer ids such as 50 / INT32_MIN).

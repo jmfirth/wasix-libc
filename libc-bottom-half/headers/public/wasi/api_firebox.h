@@ -383,6 +383,17 @@ __wasi_errno_t __wasix_system_info(uint64_t *out);
 #define __WASIX_CLOCK_DISCIPLINE_ADJTIME_VALID 1
 __wasi_errno_t __wasix_clock_discipline_get(int64_t *out);
 
+/* firebox#EQS — additive timerfd imports. Times are four signed 64-bit
+ * words: interval (seconds, nanoseconds), then value (seconds, nanoseconds).
+ * A fixed layout keeps the wasm32 timespec padding out of the host ABI. */
+__wasi_errno_t __wasix_timerfd_create(int32_t clock, int32_t flags, int32_t *fd);
+__wasi_errno_t __wasix_timerfd_settime(int32_t fd, int32_t flags,
+                                    const int64_t *new_value, int64_t *old_value);
+__wasi_errno_t __wasix_timerfd_gettime(int32_t fd, int64_t *value);
+/* CLOCK_BOOTTIME is outside the preview1 clock ID set. query_resolution is
+ * 0 for clock_gettime and 1 for clock_getres. The result is nanoseconds. */
+__wasi_errno_t __wasix_clock_boottime_get(int32_t query_resolution, uint64_t *out);
+
 #ifdef __cplusplus
 }
 #endif

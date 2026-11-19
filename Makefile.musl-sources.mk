@@ -181,6 +181,7 @@ LIBC_TOP_HALF_MUSL_SOURCES = \
         linux/wait4.c \
         linux/epoll.c \
         linux/eventfd.c \
+        linux/timerfd.c \
         linux/setgroups.c \
         linux/sysinfo.c \
         linux/adjtimex.c \
