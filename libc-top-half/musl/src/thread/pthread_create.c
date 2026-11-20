@@ -517,17 +517,20 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 	if (!libc.can_do_threads) return ENOSYS;
 #endif
 	if (attrp && !c11) attr = *attrp;
+	self = __pthread_self();
 #ifndef __wasilibc_unmodified_upstream
 	/* The WASI spawn ABI has no scheduling argument. Refuse an explicit
-	 * policy the guest cannot grant before allocating or starting a child. */
+	 * policy the guest cannot grant before allocating or starting a child.
+	 * Record the permitted policy in the new TCB before releasing its gate. */
+	int policy = __sched_get_thread_policy(self);
 	if (attr._a_sched == PTHREAD_EXPLICIT_SCHED) {
 		ret = __sched_validate_param(attr._a_policy, attr._a_prio);
 		if (ret) return ret;
-		ret = __sched_policy_permission(attr._a_policy);
+		ret = __sched_policy_permission(policy, attr._a_policy);
 		if (ret) return ret;
+		policy = attr._a_policy;
 	}
 #endif
-	self = __pthread_self();
 #ifndef __wasilibc_unmodified_upstream
 	/* A peer can now name the initial pthread. Capture its runtime TID
 	 * before spawning the peer, while keeping its lock owner stable. */
@@ -661,6 +664,7 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 	new->canary = self->canary;
 	new->sysinfo = self->sysinfo;
 #ifndef __wasilibc_unmodified_upstream
+	new->sched_policy = policy;
 	/* POSIX: new threads inherit creator's signal mask. Copy the
 	 * parent's blocked_sigmask field verbatim. See issue #24 patch C. */
 	memcpy(new->blocked_sigmask, self->blocked_sigmask,

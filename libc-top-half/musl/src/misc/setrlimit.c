@@ -135,6 +135,9 @@ static void apply_memory_rlimits(void) {
 static void get_stored_rlimit_locked(int resource, struct rlimit *rlim) {
 	if (rlimit_set_mask & (1u << resource)) {
 		*rlim = rlimits[resource];
+	} else if (resource == RLIMIT_NICE) {
+		/* The unprivileged scheduler starts without a nice allowance. */
+		*rlim = (struct rlimit){0, 0};
 	} else {
 		rlim->rlim_cur = RLIM_INFINITY;
 		rlim->rlim_max = RLIM_INFINITY;

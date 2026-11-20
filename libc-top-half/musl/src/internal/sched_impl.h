@@ -2,19 +2,10 @@
 #define _FIREBOX_SCHED_IMPL_H
 
 /*
- * firebox#QAF — faithful POSIX scheduling for the single-scheduling-class
- * substrate (UNPRIVILEGED-SEMANTICS tier, the same tier as mlock #R23/#ZDN).
- *
- * WHY this is a faithful path and NOT a lying stub: Firebox runs one scheduling
- * class. That is exactly what an *unprivileged* Linux process sees — it can read
- * its policy/parameters, it runs at SCHED_OTHER static priority 0, and any
- * attempt to select a real-time policy (SCHED_FIFO / SCHED_RR) is refused with
- * EPERM because a real-time class requires a privilege the process does not
- * hold. Every value below is the value Linux itself returns to such a process;
- * nothing is invented. The POSIX PRIORITY_SCHEDULING contract is genuinely
- * SATISFIED, so these interfaces belong in the libc (Invariant 0: the substrate
- * is the product; Invariant 2: "the same way you'd do it on Linux"), not behind
- * a Firebox-specific gate.
+ * firebox#QAF/#HSE — scheduling in the unprivileged profile. Threads start
+ * at SCHED_OTHER and can record OTHER/BATCH/IDLE at static priority zero.
+ * The hint is guest state shared by the pthread and sched_* APIs. RT needs
+ * a privilege this profile does not grant.
  *
  * These are shared, side-effect-free helpers so the per-function sources and the
  * pthread thread-scheduling wrappers cannot drift (Invariant 1 — fix the class,
@@ -26,8 +17,12 @@
 #include <sched.h>
 #include <errno.h>
 #include <signal.h>
+#include <unistd.h>
 #include <wasi/api.h> /* firebox#R63 — __wasix_sched_check_owner + __WASI_ERRNO_* */
 #include <wasi/libc.h> /* firebox#87F — __wasilibc_errno_from_wasi */
+#ifndef __wasilibc_unmodified_upstream
+#include "pthread_impl.h"
+#endif
 
 /* The scheduling policies Linux accepts. SCHED_DEADLINE is intentionally not a
  * settable policy through sched_setscheduler(2) (it needs sched_setattr), so it
@@ -46,7 +41,7 @@ static inline int __sched_policy_valid(int policy)
 	}
 }
 
-/* Real-time policies the unprivileged single-class substrate cannot grant. */
+/* Real-time policies the unprivileged profile cannot grant. */
 static inline int __sched_policy_is_realtime(int policy)
 {
 	return policy == SCHED_FIFO || policy == SCHED_RR;
@@ -72,11 +67,69 @@ static inline int __sched_validate_param(int policy, int priority)
 	return 0;
 }
 
-/* Call after validation and any target lookup to preserve errno precedence. */
-static inline int __sched_policy_permission(int policy)
+/* The profile has no CAP_SYS_NICE or RLIMIT_NICE allowance for leaving IDLE. */
+static inline int __sched_policy_permission(int current, int policy)
 {
-	return __sched_policy_is_realtime(policy) ? EPERM : 0;
+	return (__sched_policy_is_realtime(policy) ||
+	        (current == SCHED_IDLE && policy != SCHED_IDLE)) ? EPERM : 0;
 }
+
+#ifndef __wasilibc_unmodified_upstream
+static inline unsigned char __sched_get_thread_policy(pthread_t t)
+{
+	return __atomic_load_n(&t->sched_policy, __ATOMIC_RELAXED);
+}
+
+static inline int __sched_set_thread_policy(pthread_t t, int policy)
+{
+	/* TID callers hold the list lock. pthread callers hold killlock. Exit
+	 * takes killlock before the list lock, so share the update atomically. */
+	unsigned char current = __sched_get_thread_policy(t);
+	do {
+		int error = __sched_policy_permission(current, policy);
+		if (error) return error;
+	} while (!__atomic_compare_exchange_n(&t->sched_policy, &current, policy,
+	                                     1, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+	return 0;
+}
+
+/* Return 0 on a local read/write or an errno. Keep the list locked through
+ * the operation so the target cannot unlink itself and free its TCB. */
+static inline int __sched_access_local(pid_t tid, const int *request, int *observed)
+{
+	pthread_t self = __pthread_self();
+	if (tid == 0) {
+		if (request) return __sched_set_thread_policy(self, *request);
+		*observed = __sched_get_thread_policy(self);
+		return 0;
+	}
+	if (tid < 0) return EINVAL;
+
+	/* For the initial thread Wasmer assigns TID == PID. Libc uses a
+	 * separate sentinel as that thread's lock owner. */
+	pid_t leader = getpid();
+	int error = ESRCH;
+	sigset_t mask;
+	__block_app_sigs(&mask);
+	__tl_lock();
+	pthread_t t = self;
+	do {
+		int id = __atomic_load_n(&t->tid, __ATOMIC_RELAXED);
+		if ((id == WASIX_INITIAL_LOCK_TID ? leader : id) == tid) {
+			if (request) error = __sched_set_thread_policy(t, *request);
+			else {
+				*observed = __sched_get_thread_policy(t);
+				error = 0;
+			}
+			break;
+		}
+		t = t->next;
+	} while (t != self);
+	__tl_unlock();
+	__restore_sigs(&mask);
+	return error;
+}
+#endif
 
 /*
  * Faithful process existence / permission probe, using the POSIX null-signal

@@ -2,7 +2,7 @@
 #include <errno.h>
 #include "sched_impl.h"
 
-/* firebox#QAF — SCHED_OTHER runs at static priority 0, so that is the faithful
+/* firebox#QAF — every supported policy runs at static priority 0, so that is the faithful
  * sched_param the substrate reports (an unprivileged Linux process sees the
  * same). pid validated as the kernel does (EINVAL for negative, ESRCH for a
  * reaped pid — Open POSIX sched_getparam/4-1). On success errno is untouched and

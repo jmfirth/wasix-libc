@@ -1,5 +1,6 @@
 #include "pthread_impl.h"
 #include "lock.h"
+#include "sched_impl.h"
 
 #ifdef __wasilibc_unmodified_upstream
 int pthread_getschedparam(pthread_t t, int *restrict policy, struct sched_param *restrict param)
@@ -25,11 +26,6 @@ int pthread_getschedparam(pthread_t t, int *restrict policy, struct sched_param 
 	return r;
 }
 #else
-/* firebox#QAF — every thread in the single-scheduling-class substrate runs
- * SCHED_OTHER at static priority 0 (the state an unprivileged Linux thread
- * reports for itself). Report it faithfully under killlock; a cleared tid means
- * the thread has exited (ESRCH). See src/internal/sched_impl.h for the tier
- * framing. Returns an errno value directly, per POSIX. */
 int pthread_getschedparam(pthread_t t, int *restrict policy, struct sched_param *restrict param)
 {
 	int r;
@@ -37,7 +33,7 @@ int pthread_getschedparam(pthread_t t, int *restrict policy, struct sched_param 
 	if (!t->tid) {
 		r = ESRCH;
 	} else {
-		*policy = SCHED_OTHER;
+		*policy = __sched_get_thread_policy(t);
 		param->sched_priority = 0;
 		r = 0;
 	}

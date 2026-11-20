@@ -133,8 +133,8 @@ int pthread_cancel(pthread_t);
 struct sched_param;
 
 /* firebox#QAF — un-guarded: Firebox ships faithful unprivileged thread
- * scheduling (src/thread/pthread_{get,set}schedparam.c). Every thread runs
- * SCHED_OTHER/prio 0; selecting a real-time policy returns EPERM. */
+ * scheduling (src/thread/pthread_{get,set}schedparam.c). OTHER, BATCH and IDLE
+ * have static priority zero. Selecting a real-time policy returns EPERM. */
 int pthread_getschedparam(pthread_t, int *__restrict, struct sched_param *__restrict);
 int pthread_setschedparam(pthread_t, int, const struct sched_param *);
 int pthread_setschedprio(pthread_t, int);

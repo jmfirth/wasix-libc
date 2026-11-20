@@ -2,8 +2,7 @@
 #include <errno.h>
 #include "sched_impl.h"
 
-/* firebox#QAF — sched_setparam for the single-class substrate. Every task's
- * policy is SCHED_OTHER, whose only valid static priority is 0, so a nonzero
+/* firebox#QAF — every supported policy's only valid priority is 0, so a nonzero
  * request is out of range and fails EINVAL (Open POSIX sched_setparam/23-1 sets
  * max(policy)+1 and expects EINVAL); setting priority 0 is the faithful no-op
  * the substrate already satisfies and succeeds (sched_setparam/22-1). pid is
@@ -19,7 +18,7 @@ int sched_setparam(pid_t pid, const struct sched_param *param)
 		errno = EINVAL;
 		return -1;
 	}
-	/* Current policy is SCHED_OTHER: valid priority range is [0, 0]. */
+	/* All supported policies share the static priority range [0, 0]. */
 	if (param->sched_priority != 0) {
 		errno = EINVAL;
 		return -1;

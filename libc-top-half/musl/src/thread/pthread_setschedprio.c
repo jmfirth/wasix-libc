@@ -19,10 +19,7 @@ int pthread_setschedprio(pthread_t t, int prio)
 	return r;
 }
 #else
-/* firebox#QAF — set a thread's priority within its current policy. Threads are
- * always SCHED_OTHER (single class), whose only valid static priority is 0, so a
- * nonzero prio is out of range (EINVAL) and 0 is a faithful no-op. A cleared tid
- * is ESRCH. See src/internal/sched_impl.h. */
+/* Every permitted policy has the same static priority range [0, 0]. */
 int pthread_setschedprio(pthread_t t, int prio)
 {
 	int r = __sched_validate_param(SCHED_OTHER, prio);

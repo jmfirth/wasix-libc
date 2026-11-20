@@ -30,15 +30,10 @@ struct sched_param {
 	int __reserved3;
 };
 
-/* firebox#QAF — un-guarded from the upstream __wasilibc_unmodified_upstream
- * block ("WASI has no CPU scheduling support"). Firebox ships these with
- * faithful UNPRIVILEGED-SEMANTICS: the substrate has one scheduling class, which
- * is exactly what an unprivileged Linux process sees. The definitions live under
- * musl's src/sched and report the real Linux values (SCHED_OTHER, [1,99]/[0,0]
- * priority ranges, EPERM for a real-time policy). Absent, these merely produced
- * "call to undeclared function" build failures across 100+ Open POSIX rows; the
- * capability is genuinely provided, so it belongs in the header (Invariant 0
- * and 2). Additive — no ABI break vs upstream wasix-libc (Invariant 8). */
+/* firebox#QAF/#HSE — the unprivileged profile records local OTHER, BATCH and
+ * IDLE policies at priority zero. RT requests require privilege and return
+ * EPERM. Keeping these declarations outside the upstream-only guard lets
+ * guests use the standard scheduling APIs and inspect the returned errno. */
 int    sched_get_priority_max(int);
 int    sched_get_priority_min(int);
 int    sched_getparam(pid_t, struct sched_param *);

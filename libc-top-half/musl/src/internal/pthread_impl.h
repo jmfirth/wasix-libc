@@ -52,6 +52,10 @@ struct pthread {
 	volatile unsigned char canceldisable, cancelasync;
 	unsigned char tsd_used:1;
 	unsigned char dlerror_flag:1;
+#ifndef __wasilibc_unmodified_upstream
+	/* Non-RT policy fits in the padding before map_base. */
+	unsigned char sched_policy;
+#endif
 	unsigned char *map_base;
 	size_t map_size;
 	void *stack;

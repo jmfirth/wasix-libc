@@ -2,22 +2,6 @@
 #include <errno.h>
 #include "sched_impl.h"
 
-/* firebox#QAF — sched_setscheduler for the single-scheduling-class substrate,
- * modeling an unprivileged Linux process (the UNPRIVILEGED-SEMANTICS tier; see
- * sched_impl.h). The error ladder mirrors the kernel's, in the order the Open
- * POSIX tests pin:
- *   - invalid policy               -> EINVAL
- *   - priority outside policy range-> EINVAL  (sched_setscheduler/19-1 sets
- *                                     max+1 for each policy and expects EINVAL,
- *                                     checked BEFORE the ESRCH/EPERM legs)
- *   - nonexistent/reaped pid       -> ESRCH   (sched_setscheduler/21-1: valid
- *                                     SCHED_FIFO prio on a reaped child)
- *   - real-time policy (FIFO/RR)   -> EPERM   (unprivileged cannot select a
- *                                     real-time class; 16-1/22-x accept EPERM)
- * Selecting SCHED_OTHER/BATCH/IDLE at priority 0 — the class the substrate
- * already provides — is a faithful no-op that returns the previous policy, which
- * is always SCHED_OTHER. */
-
 int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
 {
 	if (!param) {
@@ -25,19 +9,23 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
 		return -1;
 	}
 	int error = __sched_validate_param(policy, param->sched_priority);
+	if (!error) {
+#ifdef __wasilibc_unmodified_upstream
+		if (__sched_pid_check_write(pid) != 0) return -1;
+		error = __sched_policy_permission(SCHED_OTHER, policy);
+#else
+		error = __sched_access_local(pid, &policy, NULL);
+		if (error == ESRCH) {
+			/* The host can check a foreign process's owner and lifetime.
+			 * Its guest policy is outside this libc's linear memory. */
+			if (__sched_pid_check_write(pid) != 0) return -1;
+			error = __sched_policy_is_realtime(policy) ? EPERM : ENOSYS;
+		}
+#endif
+	}
 	if (error) {
 		errno = error;
 		return -1;
 	}
-	/* Write path: a foreign-owner pid is denied EPERM before the policy is
-	 * applied, mirroring the kernel's check_same_owner() (firebox#R63). The
-	 * read probe's EPERM-swallow would wrongly allow a cross-uid mutation. */
-	if (__sched_pid_check_write(pid) != 0)
-		return -1;
-	error = __sched_policy_permission(policy);
-	if (error) {
-		errno = error;
-		return -1;
-	}
-	return SCHED_OTHER;
+	return 0;
 }
