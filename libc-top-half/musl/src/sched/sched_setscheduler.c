@@ -24,13 +24,9 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
 		errno = EINVAL;
 		return -1;
 	}
-	if (!__sched_policy_valid(policy)) {
-		errno = EINVAL;
-		return -1;
-	}
-	if (param->sched_priority < __sched_priority_min(policy)
-	    || param->sched_priority > __sched_priority_max(policy)) {
-		errno = EINVAL;
+	int error = __sched_validate_param(policy, param->sched_priority);
+	if (error) {
+		errno = error;
 		return -1;
 	}
 	/* Write path: a foreign-owner pid is denied EPERM before the policy is
@@ -38,8 +34,9 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
 	 * read probe's EPERM-swallow would wrongly allow a cross-uid mutation. */
 	if (__sched_pid_check_write(pid) != 0)
 		return -1;
-	if (__sched_policy_is_realtime(policy)) {
-		errno = EPERM;
+	error = __sched_policy_permission(policy);
+	if (error) {
+		errno = error;
 		return -1;
 	}
 	return SCHED_OTHER;

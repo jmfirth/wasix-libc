@@ -25,9 +25,8 @@ int pthread_setschedprio(pthread_t t, int prio)
  * is ESRCH. See src/internal/sched_impl.h. */
 int pthread_setschedprio(pthread_t t, int prio)
 {
-	if (prio < __sched_priority_min(SCHED_OTHER)
-	    || prio > __sched_priority_max(SCHED_OTHER)) return EINVAL;
-	int r;
+	int r = __sched_validate_param(SCHED_OTHER, prio);
+	if (r) return r;
 	LOCK(t->killlock);
 	r = !t->tid ? ESRCH : 0;
 	UNLOCK(t->killlock);

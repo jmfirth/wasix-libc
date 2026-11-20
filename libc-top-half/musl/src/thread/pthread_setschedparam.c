@@ -27,14 +27,10 @@ int pthread_setschedparam(pthread_t t, int policy, const struct sched_param *par
  * in src/internal/sched_impl.h so this cannot drift from sched_setscheduler. */
 int pthread_setschedparam(pthread_t t, int policy, const struct sched_param *param) {
 	if (!param) return EINVAL;
-	if (!__sched_policy_valid(policy)) return EINVAL;
-	if (param->sched_priority < __sched_priority_min(policy)
-	    || param->sched_priority > __sched_priority_max(policy)) return EINVAL;
-	int r;
+	int r = __sched_validate_param(policy, param->sched_priority);
+	if (r) return r;
 	LOCK(t->killlock);
-	if (!t->tid) r = ESRCH;
-	else if (__sched_policy_is_realtime(policy)) r = EPERM;
-	else r = 0;
+	r = !t->tid ? ESRCH : __sched_policy_permission(policy);
 	UNLOCK(t->killlock);
 	return r;
 }

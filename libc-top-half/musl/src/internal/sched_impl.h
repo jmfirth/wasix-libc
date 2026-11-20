@@ -64,6 +64,20 @@ static inline int __sched_priority_min(int policy)
 	return __sched_policy_is_realtime(policy) ? 1 : 0;
 }
 
+static inline int __sched_validate_param(int policy, int priority)
+{
+	if (!__sched_policy_valid(policy) || priority < __sched_priority_min(policy)
+	    || priority > __sched_priority_max(policy))
+		return EINVAL;
+	return 0;
+}
+
+/* Call after validation and any target lookup to preserve errno precedence. */
+static inline int __sched_policy_permission(int policy)
+{
+	return __sched_policy_is_realtime(policy) ? EPERM : 0;
+}
+
 /*
  * Faithful process existence / permission probe, using the POSIX null-signal
  * idiom kill(pid, 0). Firebox's kill() routes to __wasi_proc_signal, which

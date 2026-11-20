@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stddef.h>
 #ifndef __wasilibc_unmodified_upstream
+#include "sched_impl.h"
 #include <stdatomic.h>
 #include <wasi/api.h>
 #include <bits/signal.h>
@@ -515,6 +516,17 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 #ifdef __wasilibc_unmodified_upstream
 	if (!libc.can_do_threads) return ENOSYS;
 #endif
+	if (attrp && !c11) attr = *attrp;
+#ifndef __wasilibc_unmodified_upstream
+	/* The WASI spawn ABI has no scheduling argument. Refuse an explicit
+	 * policy the guest cannot grant before allocating or starting a child. */
+	if (attr._a_sched == PTHREAD_EXPLICIT_SCHED) {
+		ret = __sched_validate_param(attr._a_policy, attr._a_prio);
+		if (ret) return ret;
+		ret = __sched_policy_permission(attr._a_policy);
+		if (ret) return ret;
+	}
+#endif
 	self = __pthread_self();
 #ifndef __wasilibc_unmodified_upstream
 	/* A peer can now name the initial pthread. Capture its runtime TID
@@ -541,8 +553,6 @@ int __pthread_create(pthread_t *restrict res, const pthread_attr_t *restrict att
 #endif
 		libc.threaded = 1;
 	}
-	if (attrp && !c11) attr = *attrp;
-
 	__acquire_ptc();
 	if (!attrp || c11) {
 		attr._a_stacksize = __default_stacksize;
